@@ -37,7 +37,7 @@ from backend.core.events import (
 )
 from backend.core.models import BlockState, LayoutSnapshot, ScheduleStatus, SignalAspect, TrainMode, TurnoutPosition
 from backend.core.routing import RouteAlgorithm, find_route
-from backend.infrastructure.train_catalogue import TrainCatalogue, export_csv, export_json
+from backend.infrastructure.train_catalogue import TrainCatalogue, export_csv, export_json, import_csv, import_json
 from backend.infrastructure.train_database import DecoderFunctionMapping, MaintenanceRecord, RollingStockRecord, TrainModel
 from backend.runtime import ControllerRuntime
 from backend.services.dispatcher import ControlMode
@@ -285,6 +285,15 @@ class ControllerApplication:
         for train in self.trains:
             train_id = str(train["id"])
             block_id = str(train.get("block_id", "B01"))
+            if self.z21_host and train.get("address") in (None, ""):
+                # A catalogue record may be known before a decoder address is
+                # assigned. Keep it in the database/UI, but never register an
+                # unaddressed model with the physical command station.
+                if train_id in self.runtime.dispatcher.trains:
+                    if hasattr(self.runtime.track, "remove_train"):
+                        self.runtime.track.remove_train(train_id)
+                    self.runtime.dispatcher.unregister_train(train_id)
+                continue
             current_motion = next((motion for motion in self.runtime.track.get_snapshot().trains if motion.train_id == train_id), None)
             if current_motion is not None and current_motion.block_id != block_id and hasattr(self.runtime.track, "remove_train"):
                 self.runtime.track.remove_train(train_id)
@@ -533,6 +542,105 @@ class ControllerApplication:
             raise ValueError("catalogue format must be json or csv")
         return json.loads(export_json(catalogue))
 
+    def import_train_catalogue(
+        self,
+        content: Any,
+        *,
+        format_name: str = "json",
+        on_conflict: str = "error",
+    ) -> dict[str, Any]:
+        """Validate and merge a portable catalogue into the live model store."""
+
+        if self.runtime is None:
+            raise RuntimeError("runtime is not available")
+        normalized = str(format_name or "json").strip().lower()
+        if normalized == "json":
+            source = content if isinstance(content, str) else json.dumps(content)
+            records = import_json(source)
+        elif normalized == "csv":
+            source = content if isinstance(content, str) else str(content or "")
+            records = import_csv(source)
+        else:
+            raise ValueError("catalogue format must be json or csv")
+        catalogue = TrainCatalogue(records)
+        merged = catalogue.merge_into(self.runtime.train_database, on_conflict=on_conflict)
+        affected = set(merged.imported_ids) | set(merged.updated_ids)
+        for record in catalogue:
+            if record.train_id not in affected:
+                continue
+            model = record.train
+            row = next((item for item in self.trains if str(item.get("id")) == model.train_id), None)
+            if row is None:
+                row = {
+                    "id": model.train_id,
+                    "mode": ControlMode.STOPPED.value,
+                    "speed": 0,
+                    "direction": "forward",
+                    "block_id": str(self.blocks[0].get("id", "B01")) if self.blocks else "B01",
+                }
+                self.trains.append(row)
+            row.update({
+                "name": model.name,
+                "address": model.decoder_address,
+                "decoder_protocol": model.decoder_protocol,
+                "manufacturer": model.manufacturer,
+                "model_number": model.model,
+                "era": model.era,
+                "length_mm": model.length_mm,
+                "length": (model.length_mm / 1000) if model.length_mm is not None else row.get("length", ""),
+                "mass_g": model.mass_g,
+                "maxSpeed": model.max_speed_kmh if model.max_speed_kmh is not None else row.get("maxSpeed", 140),
+                "decoder_functions": [
+                    {
+                        "function_number": item.function_number,
+                        "name": item.name,
+                        "description": item.description,
+                        "momentary": item.momentary,
+                        "enabled": item.enabled,
+                    }
+                    for item in record.decoder_functions
+                ],
+                "maintenance_records": [
+                    {
+                        "record_id": item.record_id,
+                        "service_date": item.service_date,
+                        "service_type": item.service_type,
+                        "description": item.description,
+                        "mileage_km": item.mileage_km,
+                        "cost": item.cost,
+                        "performed_by": item.performed_by,
+                        "next_service_date": item.next_service_date,
+                    }
+                    for item in record.maintenance_records
+                ],
+                "consist": [
+                    {
+                        "id": item.rolling_stock_id,
+                        "type": item.vehicle_type,
+                        "name": item.name,
+                        "manufacturer": item.manufacturer,
+                        "model": item.model,
+                        "length_mm": item.length_mm,
+                        "mass_g": item.mass_g,
+                    }
+                    for item in record.rolling_stock
+                ],
+            })
+            self._publish_domain_event(TrainDatabaseChanged(train_id=model.train_id, entity="catalogue", action="imported" if model.train_id in merged.imported_ids else "updated", record_id=model.train_id))
+        self._sync_runtime_from_ui()
+        self.events.append({
+            "type": "train_catalogue_imported",
+            "format": normalized,
+            "imported": list(merged.imported_ids),
+            "updated": list(merged.updated_ids),
+            "skipped": list(merged.skipped_ids),
+        })
+        return {
+            "imported": list(merged.imported_ids),
+            "updated": list(merged.updated_ids),
+            "skipped": list(merged.skipped_ids),
+        }
+
     def _sync_ui_from_runtime(self) -> None:
         if self.runtime is None:
             return
@@ -724,6 +832,16 @@ class ControllerApplication:
         result = []
         for train in self.trains:
             ui_id = self._ui_train_id(train["id"])
+            raw_length = train.get("length_mm")
+            if raw_length in (None, ""):
+                raw_length = 0
+            try:
+                display_length = round(float(raw_length) / 1000, 2)
+            except (TypeError, ValueError):
+                display_length = 0
+            max_speed = train.get("maxSpeed", train.get("max_speed_kmh", 140))
+            if max_speed in (None, ""):
+                max_speed = 140
             result.append({
                 "id": ui_id,
                 "number": "" if train.get("address") in (None, "") else str(train.get("address")),
@@ -744,8 +862,8 @@ class ControllerApplication:
                 "era": train.get("era", ""),
                 "mass_g": train.get("mass_g"),
                 "decoder_protocol": train.get("decoder_protocol", "DCC"),
-                "length": round(float(train.get("length_mm", 0)) / 1000, 2),
-                "maxSpeed": train.get("maxSpeed", train.get("max_speed_kmh", 140)),
+                "length": display_length,
+                "maxSpeed": max_speed,
                 "consist": train.get("consist", []),
             })
         return result
@@ -1652,6 +1770,17 @@ class ControllerHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/commands":
                 return self._send_json(self.application.command(self._read_json()))
+            if parsed.path == "/api/train-catalogue":
+                payload = self._read_json()
+                content = payload.get("content", payload.get("catalogue", payload.get("trains")))
+                if content is None:
+                    raise ValueError("catalogue content is required")
+                result = self.application.import_train_catalogue(
+                    content,
+                    format_name=str(payload.get("format", "json")),
+                    on_conflict=str(payload.get("on_conflict", payload.get("onConflict", "error"))),
+                )
+                return self._send_json({"result": result, "state": self.application.state()})
             if parsed.path == "/api/simulation/tick":
                 query = parse_qs(parsed.query)
                 if "steps" in query:

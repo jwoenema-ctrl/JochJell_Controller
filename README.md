@@ -37,3 +37,5 @@ disposable session.
 Train model details can be exported in the portable catalogue format from `GET /api/train-catalogue`
 or as CSV with `GET /api/train-catalogue?format=csv`. The format includes decoder functions,
 maintenance history and ordered rolling stock, so the database is not tied to one installation.
+The train data sheet also imports JSON/CSV catalogues with explicit error, skip or replace conflict
+handling.

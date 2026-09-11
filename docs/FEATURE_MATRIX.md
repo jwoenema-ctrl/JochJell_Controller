@@ -12,8 +12,9 @@ without changing the Z21 protocol adapter.
 | Timetable | Deterministic scheduler, API commands and schedule simulation events |
 | Track I/O | Fixed-step simulator, connection-gated Z21 LAN commands, track power and R-BUS feedback polling in `backend/infrastructure/` |
 | Persistence | SQLite layout snapshots plus train model, decoder-function, maintenance and ordered rolling-stock records; portable JSON/CSV train catalogue export |
-| Browser UI | Graph editor with persisted block connections, topology-aware systematic view, signal/turnout/turntable controls, layout-asset inspector, timetable/service editor, per-train mode switcher, train profile/consist/database-record editor and WebGL photo-scan depth/mesh surface with 2D fallback |
+| Browser UI | Graph editor with persisted block connections, topology-aware systematic view, signal/turnout/turntable controls, layout-asset inspector, timetable/service editor, per-train mode switcher, train profile/consist/database-record editor, JSON/CSV catalogue import/export and WebGL photo-scan depth/mesh surface with 2D fallback |
 | Visual Studio | `Train Controller/Train Controller.pyproj` includes backend, frontend, docs and tests |
+| GitHub checks | `.github/workflows/test.yml` runs the Python suite and frontend syntax checks on pushes and pull requests |
 
 ## Hardware activation
 

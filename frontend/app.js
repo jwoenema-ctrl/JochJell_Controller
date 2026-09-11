@@ -863,6 +863,117 @@
     }
   }
 
+  function catalogueFormatForFile(file) {
+    if (!file) return null;
+    const name = String(file.name || '').toLowerCase();
+    if (name.endsWith('.json') || String(file.type || '').toLowerCase() === 'application/json') return 'json';
+    if (name.endsWith('.csv') || String(file.type || '').toLowerCase() === 'text/csv') return 'csv';
+    return null;
+  }
+
+  function updateCatalogueFileStatus(event) {
+    const file = event && event.target && event.target.files ? event.target.files[0] : null;
+    const status = $('#train-catalogue-file-status');
+    if (!status) return;
+    if (!file) {
+      status.textContent = 'No file selected.';
+      return;
+    }
+    const format = catalogueFormatForFile(file);
+    status.textContent = format ? `${file.name} · ${format.toUpperCase()} catalogue` : `${file.name} · choose a .json or .csv file`;
+  }
+
+  function openTrainCatalogueImport() {
+    const dialog = $('#train-catalogue-import');
+    if (!dialog || app.importingTrainCatalogue) return;
+    const fileInput = $('#train-catalogue-file');
+    if (fileInput) fileInput.value = '';
+    const status = $('#train-catalogue-file-status');
+    if (status) status.textContent = 'No file selected.';
+    const importStatus = $('#train-catalogue-import-status');
+    if (importStatus) importStatus.textContent = '';
+    if (!dialog.open) dialog.showModal();
+  }
+
+  function closeTrainCatalogueImport() {
+    const dialog = $('#train-catalogue-import');
+    if (!dialog) return;
+    if (dialog.open) dialog.close();
+  }
+
+  function importSummary(result) {
+    const imported = Array.isArray(result.imported) ? result.imported.length : 0;
+    const updated = Array.isArray(result.updated) ? result.updated.length : 0;
+    const skipped = Array.isArray(result.skipped) ? result.skipped.length : 0;
+    return `${imported} added · ${updated} updated · ${skipped} skipped`;
+  }
+
+  async function importTrainCatalogue(event) {
+    event.preventDefault();
+    if (app.importingTrainCatalogue) return;
+    const fileInput = $('#train-catalogue-file');
+    const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+    const format = catalogueFormatForFile(file);
+    const importStatus = $('#train-catalogue-import-status');
+    if (!file) {
+      if (importStatus) importStatus.textContent = 'Select a JSON or CSV file first.';
+      showToast('Select a JSON or CSV catalogue file first.', 'warning');
+      return;
+    }
+    if (!format) {
+      if (importStatus) importStatus.textContent = 'Only JSON and CSV catalogue files are supported.';
+      showToast('Choose a .json or .csv catalogue file.', 'warning');
+      return;
+    }
+
+    const policySelect = $('#train-catalogue-conflict');
+    const onConflict = policySelect && ['error', 'skip', 'replace'].includes(policySelect.value) ? policySelect.value : 'error';
+    const submit = $('#submit-train-catalogue');
+    app.importingTrainCatalogue = true;
+    if (submit) {
+      submit.disabled = true;
+      submit.setAttribute('aria-busy', 'true');
+      submit.textContent = 'Importing…';
+    }
+    if (importStatus) importStatus.textContent = `Reading ${file.name}…`;
+
+    try {
+      const content = await file.text();
+      if (!content.trim()) throw new Error('The selected catalogue file is empty.');
+      const response = await fetch('/api/train-catalogue', {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ format, content, on_conflict: onConflict })
+      });
+      const responseText = await response.text();
+      let payload = null;
+      if (responseText) {
+        try { payload = JSON.parse(responseText); } catch (error) { /* handled below */ }
+      }
+      if (!response.ok) {
+        const detail = payload && payload.error ? payload.error : `${response.status} ${response.statusText}`;
+        throw new Error(detail || 'Catalogue import failed');
+      }
+      if (!payload || !payload.state || typeof payload.state !== 'object') throw new Error('The controller returned no updated state.');
+      mergePayload(payload.state);
+      app.source = 'api';
+      renderAll();
+      closeTrainCatalogueImport();
+      showToast(`Catalogue imported · ${importSummary(payload.result || {})}`, 'success');
+    } catch (error) {
+      if (importStatus) importStatus.textContent = error.message || 'Catalogue import failed.';
+      showToast(error.message || 'Catalogue import failed', 'warning');
+    } finally {
+      app.importingTrainCatalogue = false;
+      if (submit) {
+        submit.disabled = false;
+        submit.removeAttribute('aria-busy');
+        submit.textContent = 'Import catalogue';
+      }
+      if (fileInput) fileInput.value = '';
+    }
+  }
+
   function renderTrainDataManager(train) {
     const { decoderFunctions, maintenance } = trainDataCollections(train);
     const functionRows = decoderFunctions.map((item, index) => {
@@ -876,7 +987,7 @@
       const detail = [item.performed_by, item.mileage_km != null ? `${item.mileage_km} km` : '', item.cost != null ? `€${item.cost}` : ''].filter(Boolean).join(' · ');
       return `<div class="record-row"><div class="record-main"><strong>${escapeHtml(date)} · ${escapeHtml(item.service_type || 'Service')}</strong><small>${escapeHtml(item.description || detail || 'No service notes')}</small></div><span class="record-meta">${escapeHtml(detail)}</span><span class="record-actions"><button class="icon-button small edit-maintenance" data-record-index="${index}" title="Edit maintenance record" aria-label="Edit maintenance record">✎</button><button class="icon-button small record-delete" data-record-index="${index}" title="Delete maintenance record" aria-label="Delete maintenance record">×</button></span></div>`;
     }).join('');
-    return `<div class="data-sheet"><div class="data-item"><span>Manufacturer / model</span><span>${escapeHtml([train.manufacturer, train.model_number].filter(Boolean).join(' · ') || '—')}</span></div><div class="data-item"><span>Era / scale</span><span>${escapeHtml(train.era || '—')} · H0</span></div><div class="data-item"><span>Decoder address / protocol</span><span>${escapeHtml(train.number || '—')} · ${escapeHtml(train.decoder_protocol || 'DCC')}</span></div><div class="data-item"><span>Train category</span><span>${escapeHtml(train.class || '—')}</span></div><div class="data-item"><span>Overall length / mass</span><span>${escapeHtml(train.length || '—')} m · ${escapeHtml(train.mass_g || '—')} g</span></div><div class="data-item"><span>Maximum speed</span><span>${escapeHtml(train.maxSpeed || '—')} km/h</span></div><div class="data-item"><span>Direction / block</span><span>${escapeHtml(train.direction || '—')} · ${escapeHtml(train.position || '—')}</span></div><div class="data-item"><span>Route target</span><span>${escapeHtml(train.destination_block_id || '—')}</span></div></div><div class="record-manager"><section class="record-section"><div class="record-section-heading"><div><p class="eyebrow">DECODER</p><h3>Function mappings <span>${decoderFunctions.length}</span></h3></div><button class="text-button" id="add-decoder-function">＋ Add</button></div><div class="record-list">${functionRows || '<div class="record-empty">No decoder functions mapped.</div>'}</div></section><section class="record-section"><div class="record-section-heading"><div><p class="eyebrow">SERVICE LOG</p><h3>Maintenance records <span>${maintenance.length}</span></h3></div><button class="text-button" id="add-maintenance">＋ Add</button></div><div class="record-list">${maintenanceRows || '<div class="record-empty">No maintenance records logged.</div>'}</div></section></div><div class="button-row catalogue-actions"><button class="button button-soft" id="export-train-catalogue">Export catalogue</button></div><p class="editor-note">Function mappings and service history are saved for the selected train profile.</p>`;
+    return `<div class="data-sheet"><div class="data-item"><span>Manufacturer / model</span><span>${escapeHtml([train.manufacturer, train.model_number].filter(Boolean).join(' · ') || '—')}</span></div><div class="data-item"><span>Era / scale</span><span>${escapeHtml(train.era || '—')} · H0</span></div><div class="data-item"><span>Decoder address / protocol</span><span>${escapeHtml(train.number || '—')} · ${escapeHtml(train.decoder_protocol || 'DCC')}</span></div><div class="data-item"><span>Train category</span><span>${escapeHtml(train.class || '—')}</span></div><div class="data-item"><span>Overall length / mass</span><span>${escapeHtml(train.length || '—')} m · ${escapeHtml(train.mass_g || '—')} g</span></div><div class="data-item"><span>Maximum speed</span><span>${escapeHtml(train.maxSpeed || '—')} km/h</span></div><div class="data-item"><span>Direction / block</span><span>${escapeHtml(train.direction || '—')} · ${escapeHtml(train.position || '—')}</span></div><div class="data-item"><span>Route target</span><span>${escapeHtml(train.destination_block_id || '—')}</span></div></div><div class="record-manager"><section class="record-section"><div class="record-section-heading"><div><p class="eyebrow">DECODER</p><h3>Function mappings <span>${decoderFunctions.length}</span></h3></div><button type="button" class="text-button" id="add-decoder-function">＋ Add</button></div><div class="record-list">${functionRows || '<div class="record-empty">No decoder functions mapped.</div>'}</div></section><section class="record-section"><div class="record-section-heading"><div><p class="eyebrow">SERVICE LOG</p><h3>Maintenance records <span>${maintenance.length}</span></h3></div><button type="button" class="text-button" id="add-maintenance">＋ Add</button></div><div class="record-list">${maintenanceRows || '<div class="record-empty">No maintenance records logged.</div>'}</div></section></div><div class="button-row catalogue-actions"><button type="button" class="button button-soft" id="export-train-catalogue">Export catalogue</button><button type="button" class="button button-soft" id="open-train-catalogue-import" aria-haspopup="dialog" aria-controls="train-catalogue-import">Import catalogue</button></div><p class="editor-note">Function mappings and service history are saved for the selected train profile.</p>`;
   }
 
   function openTrainDataEditor(kind, record, index) {
@@ -993,6 +1104,7 @@
       const rollingStock = train.rolling_stock || database.rolling_stock || [];
       content.innerHTML = renderTrainDataManager(train);
       $('#export-train-catalogue').addEventListener('click', exportTrainCatalogue);
+      $('#open-train-catalogue-import').addEventListener('click', openTrainCatalogueImport);
       $('#add-decoder-function').addEventListener('click', () => openTrainDataEditor('decoder'));
       $('#add-maintenance').addEventListener('click', () => openTrainDataEditor('maintenance'));
       $$('.edit-decoder-function', content).forEach((button) => button.addEventListener('click', () => {
@@ -1620,6 +1732,10 @@
     $('#train-data-editor-form').addEventListener('submit', saveTrainDataEditor);
     $('#cancel-train-data-editor').addEventListener('click', closeTrainDataEditor);
     $('#close-train-data-editor').addEventListener('click', closeTrainDataEditor);
+    $('#train-catalogue-import-form').addEventListener('submit', importTrainCatalogue);
+    $('#train-catalogue-file').addEventListener('change', updateCatalogueFileStatus);
+    $('#cancel-train-catalogue-import').addEventListener('click', closeTrainCatalogueImport);
+    $('#close-train-catalogue-import').addEventListener('click', closeTrainCatalogueImport);
     $('#schedule-train').addEventListener('change', (event) => {
       const train = app.state.trains.find((item) => item.id === event.target.value);
       if (!train) return;

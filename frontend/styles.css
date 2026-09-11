@@ -286,6 +286,14 @@ h2 { font-size: 15px; letter-spacing: -.01em; font-weight: 650; }
 .record-empty { padding: 18px 10px; color: var(--faint); font-size: 9px; text-align: center; }
 .check-field { display: flex; align-items: center; gap: 7px; min-height: 28px; color: var(--muted); font-size: 10px; }
 .check-field input { width: 14px; min-height: 14px; accent-color: var(--blue); }
+.catalogue-actions { align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.catalogue-actions .button { flex: 1 1 145px; }
+.catalogue-import-modal { width: min(560px, calc(100vw - 32px)); }
+.catalogue-file-input { width: 100%; min-height: 34px; padding: 7px; border: 1px dashed var(--line-bright); border-radius: 7px; background: rgba(9,20,34,.45); color: var(--muted); font-size: 10px; }
+.catalogue-file-input:focus { outline: 1px solid rgba(92,157,255,.65); outline-offset: 2px; }
+.catalogue-file-status, .catalogue-field-help { margin: 5px 0 0; color: var(--faint); font-size: 9px; line-height: 1.4; }
+.catalogue-import-status { min-height: 14px; margin: 12px 0 0; color: var(--yellow); font-size: 9px; line-height: 1.4; }
+.catalogue-import-status:empty { margin-top: 0; }
 .consist-summary { display: flex; justify-content: space-between; margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: rgba(27,44,68,.35); color: var(--muted); font-size: 10px; }
 .consist-summary strong { color: var(--text); font-weight: 600; }
 

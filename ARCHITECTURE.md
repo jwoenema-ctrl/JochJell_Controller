@@ -8,7 +8,7 @@ hardware, while the Z21 adapter is kept behind the same interface for later inte
 
 - `backend/core`: domain entities (including editable topology and photo-scan manifests), state store, events, layout controller, layout graph and routing algorithms.
 - `backend/services`: scheduler, dispatcher, route updater, movement authority/interlocking, avoidance and connection checks.
-- `backend/infrastructure`: simulated track, real Z21 track adapter, Z21 transport and train database.
+- `backend/infrastructure`: simulated track, real Z21 track adapter, Z21 transport, train database and portable train catalogue.
 - `backend/runtime.py`: default dependency-injection composition for a simulation-first controller.
 - `backend/api`: local HTTP API, browser/domain anti-corruption bridge and application composition. Typed domain events are projected into the bounded `/api/events` history.
 - `frontend`: browser UI served by the local API. It consumes JSON and does not own domain rules; local photo previews stay browser-scoped.
@@ -36,7 +36,6 @@ viewer even when no scan asset has been configured yet.
 
 - RailCom-based train identification on top of the anonymous R-BUS occupancy layer.
 - Photogrammetry-grade reconstruction, calibration, and occlusion on top of the optional depth/mesh scan surface.
-- Train database imports from manufacturer catalogues and a richer browser catalogue picker.
 - Hardware-specific accessory feedback and signal/turntable state polling beyond the current command adapter.
 - Multi-user layout collaboration and audit history.
 - Additional Z21 accessory, booster and programming-track commands.

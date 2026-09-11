@@ -195,8 +195,12 @@ def snapshot_from_ui(
             continue
         mode_value = str(value.get("mode", value.get("class", "manual"))).lower()
         mode = TrainMode.AUTOMATIC if mode_value == "automatic" else TrainMode.STOPPED if mode_value in {"stopped", "safe", "stop"} else TrainMode.MANUAL
-        speed = max(0.0, float(value.get("speed", value.get("speed_kmh", 0))))
-        max_speed = max(speed, float(value.get("maxSpeed", value.get("max_speed_kmh", 140))))
+        raw_speed = value.get("speed", value.get("speed_kmh", 0))
+        speed = max(0.0, float(raw_speed if raw_speed not in (None, "") else 0))
+        raw_max_speed = value.get("maxSpeed", value.get("max_speed_kmh", 140))
+        max_speed = max(speed, float(raw_max_speed if raw_max_speed not in (None, "") else 140))
+        raw_length = value.get("length_mm", 0)
+        length_mm = float(raw_length if raw_length not in (None, "") else 0)
         status = TrainStatus.RUNNING if speed > 0 else TrainStatus.STOPPED
         domain_trains.append(
             Train(
@@ -210,7 +214,7 @@ def snapshot_from_ui(
                     decoder_type="Z21 LAN",
                 ),
                 decoder_address=int(value["address"]) if value.get("address") not in (None, "") else None,
-                length_mm=float(value.get("length_mm", 0)),
+                length_mm=length_mm,
                 max_speed_kmh=max_speed,
                 mode=mode,
                 status=status,

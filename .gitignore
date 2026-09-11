@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.vs/
 data/*.sqlite3
 data/scans/*
 !data/scans/.gitkeep

@@ -344,6 +344,35 @@
       <div class="modal-actions"><button type="button" class="button button-soft" id="cancel-train-data-editor">Cancel</button><button type="submit" class="button button-primary" id="save-train-data-editor">Save record</button></div>
     </form>
   </dialog>
+  <dialog class="modal catalogue-import-modal" id="train-catalogue-import" aria-labelledby="train-catalogue-import-title">
+    <form class="modal-card" id="train-catalogue-import-form" novalidate>
+      <div class="modal-heading">
+        <div><p class="eyebrow">TRAIN DATABASE</p><h2 id="train-catalogue-import-title">Import train catalogue</h2></div>
+        <button type="button" class="icon-button" id="close-train-catalogue-import" aria-label="Close train catalogue import">×</button>
+      </div>
+      <div class="modal-body">
+        <p class="editor-note" id="train-catalogue-import-help">Choose a JSON or CSV catalogue file. Existing train IDs are handled using the selected conflict policy.</p>
+        <div class="field-grid">
+          <div class="field field-wide">
+            <label for="train-catalogue-file">Catalogue file (JSON or CSV)</label>
+            <input class="catalogue-file-input" id="train-catalogue-file" type="file" accept=".json,.csv,application/json,text/csv" aria-describedby="train-catalogue-file-status train-catalogue-import-help" required>
+            <p class="catalogue-file-status" id="train-catalogue-file-status" role="status" aria-live="polite">No file selected.</p>
+          </div>
+          <div class="field field-wide">
+            <label for="train-catalogue-conflict">Conflict policy</label>
+            <select id="train-catalogue-conflict" aria-describedby="train-catalogue-conflict-help">
+              <option value="error">Error — stop if a train ID already exists</option>
+              <option value="skip">Skip — keep existing train records</option>
+              <option value="replace">Replace — overwrite matching train records</option>
+            </select>
+            <p class="catalogue-field-help" id="train-catalogue-conflict-help">The default error policy makes no changes when conflicts are found.</p>
+          </div>
+        </div>
+        <p class="catalogue-import-status" id="train-catalogue-import-status" role="status" aria-live="polite"></p>
+      </div>
+      <div class="modal-actions"><button type="button" class="button button-soft" id="cancel-train-catalogue-import">Cancel</button><button type="submit" class="button button-primary" id="submit-train-catalogue">Import catalogue</button></div>
+    </form>
+  </dialog>
   <script src="scan_viewer.js"></script>
   <script src="app.js"></script>
 </body>
