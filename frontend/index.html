@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#09111f">
+  <title>H0 Control Desk</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div>
+          <p class="eyebrow">Z21 / ROCO CONTROL</p>
+          <h1>H0 Control Desk</h1>
+        </div>
+      </div>
+
+      <nav class="mode-nav" aria-label="Primary workspace">
+        <button class="mode-tab is-active" data-workspace="dispatch">Dispatch</button>
+        <button class="mode-tab" data-workspace="layout">Layout editor</button>
+        <button class="mode-tab" data-workspace="timetable">Timetable</button>
+        <button class="mode-tab" data-workspace="scans">3D scans</button>
+      </nav>
+
+      <div class="topbar-actions">
+        <div class="connection-status" id="connection-status">
+          <span class="status-dot is-simulated" id="connection-dot"></span>
+          <div>
+            <span class="connection-label" id="connection-label">Simulation fallback</span>
+            <span class="connection-detail" id="connection-detail">Local sample state</span>
+          </div>
+        </div>
+        <button class="icon-button" id="refresh-button" title="Refresh from controller" aria-label="Refresh from controller">↻</button>
+      </div>
+    </header>
+
+    <div class="sync-ribbon" id="sync-ribbon" role="status" aria-live="polite">
+      <span class="ribbon-icon">◌</span>
+      <span id="sync-message">Loading control state…</span>
+      <span class="ribbon-time" id="sync-time">—</span>
+    </div>
+
+    <main class="dashboard">
+      <aside class="sidebar">
+        <section class="panel control-panel">
+          <div class="panel-heading compact-heading">
+            <div>
+              <p class="eyebrow">OPERATING MODE</p>
+              <h2>Control center</h2>
+            </div>
+            <span class="live-pill"><span></span> LIVE</span>
+          </div>
+          <div class="control-mode-grid">
+            <button class="control-mode is-active" data-control-mode="manual">
+              <span class="mode-glyph">✦</span>
+              <span><strong>Manual</strong><small>Direct throttle</small></span>
+            </button>
+            <button class="control-mode" data-control-mode="automatic">
+              <span class="mode-glyph">⟳</span>
+              <span><strong>Automatic</strong><small>Dispatcher rules</small></span>
+            </button>
+            <button class="control-mode" data-control-mode="simulation">
+              <span class="mode-glyph">◒</span>
+              <span><strong>Simulation</strong><small>Test timetable</small></span>
+            </button>
+            <button class="control-mode" data-control-mode="safe">
+              <span class="mode-glyph">⌁</span>
+              <span><strong>Safe stop</strong><small>All trains halt</small></span>
+            </button>
+          </div>
+        </section>
+
+        <section class="panel selected-train-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">SELECTED TRAIN</p>
+              <h2 id="selected-train-name">IC 184 Aurora</h2>
+            </div>
+            <span class="train-badge" id="selected-train-badge">184</span>
+          </div>
+          <div class="selected-train-route">
+            <span id="selected-train-origin">Amsterdam Centraal</span><span class="route-line"></span><span id="selected-train-destination">Utrecht</span>
+          </div>
+          <div class="throttle-readout">
+            <div><span class="muted-label">SPEED</span><strong><span id="speed-readout">74</span><small> km/h</small></strong></div>
+            <div class="signal-readout"><span class="signal-dot green"></span><span>Clear</span></div>
+          </div>
+          <input class="range-input" id="speed-slider" type="range" min="0" max="140" step="1" value="74" aria-label="Train speed">
+          <div class="range-labels"><span>STOP</span><span>CRUISE</span><span>MAX 140</span></div>
+          <div class="button-row">
+            <button class="button button-primary" id="apply-speed">Set speed</button>
+            <button class="button button-danger" id="stop-train">Stop</button>
+          </div>
+        </section>
+
+        <section class="panel simulation-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">SIMULATION CLOCK</p>
+              <h2 id="simulation-clock">10:42:16</h2>
+            </div>
+            <span class="simulation-state" id="simulation-state">RUNNING</span>
+          </div>
+          <div class="simulation-meta">
+            <span><i class="mini-icon">◷</i><span id="simulation-date">Tuesday · 14 May</span></span>
+            <span><i class="mini-icon">1×</i><span id="simulation-rate">Real time</span></span>
+          </div>
+          <div class="simulation-actions">
+            <button class="button button-soft" id="simulation-toggle">Pause</button>
+            <button class="button button-soft" id="simulation-tick">Tick +1 min</button>
+            <button class="button button-soft" id="track-power-toggle">Power on</button>
+            <select class="compact-select" id="simulation-rate-select" aria-label="Simulation speed">
+              <option value="1">1×</option>
+              <option value="5">5×</option>
+              <option value="15">15×</option>
+              <option value="60">60×</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="panel health-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">SYSTEM HEALTH</p>
+              <h2>Controller services</h2>
+            </div>
+            <span class="health-score" id="health-score">96%</span>
+          </div>
+          <div class="health-list">
+            <div class="health-row"><span class="health-check">✓</span><span>State controller</span><span class="health-value">Ready</span></div>
+            <div class="health-row"><span class="health-check">✓</span><span>Route planner</span><span class="health-value">A* / BFS</span></div>
+            <div class="health-row"><span class="health-check">✓</span><span>Block feedback</span><span class="health-value" id="feedback-health">Simulated</span></div>
+            <div class="health-row"><span class="health-check warning">!</span><span>Connection checker</span><span class="health-value" id="checker-health">Standby</span></div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="workspace" aria-label="Controller workspace">
+        <div class="workspace-heading">
+          <div>
+            <p class="eyebrow">NETWORK OVERVIEW <span class="separator">/</span> DISPATCH BOARD</p>
+            <h2>West yard <span class="heading-muted">· 12 blocks online</span></h2>
+          </div>
+          <div class="workspace-tools">
+            <label class="search-box"><span>⌕</span><input id="train-search" type="search" placeholder="Find train or block…"></label>
+            <button class="button button-soft" id="fit-layout">Fit layout</button>
+            <button class="button button-soft" id="open-settings">Settings <span>⌄</span></button>
+          </div>
+        </div>
+
+        <section class="panel map-panel" id="layout-panel">
+          <div class="map-toolbar">
+            <div class="toolbar-tabs">
+              <button class="toolbar-tab is-active" data-layout-view="graph">Node graph</button>
+              <button class="toolbar-tab" data-layout-view="systematic">Systematic track</button>
+              <button class="toolbar-tab" data-layout-view="signals">Signals & turnouts</button>
+              <button class="toolbar-tab" id="toggle-layout-edit" data-layout-view="editor">Edit layout</button>
+            </div>
+            <div class="map-legend">
+              <span><i class="legend-line occupied"></i>Occupied</span>
+              <span><i class="legend-line route"></i>Reserved</span>
+              <span><i class="legend-line free"></i>Free</span>
+              <button class="icon-button small" id="layout-zoom-out" title="Zoom out">−</button>
+              <span id="layout-zoom-label">100%</span>
+              <button class="icon-button small" id="layout-zoom-in" title="Zoom in">+</button>
+              <button class="button button-soft editor-action" id="open-layout-assets" type="button">Assets</button>
+              <button class="button button-soft editor-action" id="edit-selected-block">Edit block</button>
+              <button class="button button-soft editor-action" id="add-layout-block">＋ Block</button>
+              <button class="button button-soft editor-action" id="save-layout">Save layout</button>
+              <button class="button button-soft editor-action" id="load-layout">Load saved</button>
+            </div>
+          </div>
+          <div class="graph-editor-tools" id="graph-editor-tools"><span class="graph-editor-label">Connections</span><select id="connection-from" aria-label="Connection source block"></select><span class="graph-editor-arrow">↔</span><select id="connection-to" aria-label="Connection target block"></select><button class="button button-soft editor-action" id="connect-blocks">Connect</button><button class="button button-soft editor-action" id="disconnect-blocks">Disconnect</button></div>
+          <div class="map-stage" id="map-stage">
+            <svg id="layout-svg" class="layout-svg" viewBox="0 0 980 350" role="img" aria-label="Track block node graph"></svg>
+            <div class="map-stage-label top-left"><span class="pulse-dot"></span> LIVE BLOCK GRAPH</div>
+            <div class="map-stage-label bottom-right">Drag to pan · Click a block to inspect</div>
+          </div>
+          <div class="map-summary">
+            <div class="summary-stat"><span class="stat-icon blue">▦</span><span><strong id="block-count">12</strong><small>Track blocks</small></span></div>
+            <div class="summary-stat"><span class="stat-icon orange">⇆</span><span><strong id="turnout-count">4</strong><small>Turnouts aligned</small></span></div>
+            <div class="summary-stat"><span class="stat-icon green">●</span><span><strong id="free-count">7</strong><small>Blocks available</small></span></div>
+            <div class="summary-stat"><span class="stat-icon violet">⌁</span><span><strong id="route-count">2</strong><small>Active routes</small></span></div>
+            <div class="map-selected-note" id="map-selected-note">Select a block to inspect its occupancy and route state.</div>
+          </div>
+        </section>
+
+        <section class="panel systematic-panel is-hidden" id="systematic-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">LINEAR TRACK PLAN</p><h2>West yard systematic view</h2></div>
+            <span class="panel-action">3 platforms · 2 routes</span>
+          </div>
+          <div class="systematic-view" id="systematic-view"></div>
+        </section>
+
+        <section class="panel scan-panel is-hidden" id="scan-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">PHOTO-SCAN WORKSPACE</p><h2>3D track viewer</h2></div>
+            <div class="panel-heading-actions"><span class="scan-status"><span></span> Scan manifest ready</span><button class="text-button" id="link-scan">＋ Link scan</button><button class="text-button" id="use-local-scan">＋ Use local photo</button><input id="scan-file" type="file" accept="image/*" hidden><select class="compact-select" id="scan-select" aria-label="Select photo scan"></select></div>
+          </div>
+          <div class="scan-viewer-host" id="scan-viewer-host" aria-label="Photo scan 3D track viewer"></div>
+          <div class="scan-footer"><div><strong id="scan-title">No scan selected</strong><span id="scan-description">Add local photo scans to the manifest to anchor the viewer to your layout.</span></div><div class="scan-hint">Drag to orbit · Wheel to zoom · Click a scan anchor</div></div>
+        </section>
+
+        <div class="lower-grid">
+          <section class="panel train-panel" id="train-panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">FLEET & POSITIONS</p><h2>Train overview</h2></div>
+              <button class="text-button" id="add-train">＋ Add train</button>
+            </div>
+            <div class="train-table-head"><span>TRAIN</span><span>POSITION</span><span>STATUS</span><span>SPEED</span></div>
+            <div class="train-list" id="train-list"></div>
+          </section>
+
+          <section class="panel train-editor-panel" id="train-editor-panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">TRAIN PROFILE</p><h2>Settings & data sheet</h2></div>
+              <button class="icon-button small" id="close-editor" title="Collapse train editor">×</button>
+            </div>
+            <div class="editor-tabs">
+              <button class="editor-tab is-active" data-editor-tab="settings">Settings</button>
+              <button class="editor-tab" data-editor-tab="datasheet">Data sheet</button>
+              <button class="editor-tab" data-editor-tab="consist">Consist</button>
+            </div>
+            <div class="editor-content" id="editor-content"></div>
+          </section>
+        </div>
+
+        <div class="bottom-grid">
+          <section class="panel timetable-panel" id="timetable-panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">OPERATING PLAN</p><h2>Timetable & scheduler</h2></div>
+              <div class="panel-heading-actions"><span class="scheduler-status"><span></span> Dispatcher active</span><button class="text-button" id="simulate-schedule">▷ Simulate next event</button><button class="text-button" id="add-schedule">＋ New service</button></div>
+            </div>
+            <div class="schedule-header"><span>TIME</span><span>SERVICE</span><span>ROUTE</span><span>PLATFORM</span><span>STATE</span><span></span></div>
+            <div class="schedule-list" id="schedule-list"></div>
+          </section>
+
+          <section class="panel assembler-panel" id="assembler-panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">CONSIST BUILDER</p><h2>Train assembler</h2></div>
+              <button class="text-button" id="save-consist">Save consist</button>
+            </div>
+            <div class="assembler-train-picker"><label>Assembling</label><select id="assembler-train-select"></select><span class="tiny-status">● Stored</span></div>
+            <div class="consist-list" id="consist-list"></div>
+            <button class="add-car-button" id="add-car">＋ Add rolling stock</button>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer-bar">
+      <span>H0 Control Desk <span class="footer-muted">· local workspace</span></span>
+      <span><span class="footer-indicator"></span> <span id="footer-source">Embedded sample state</span> <span class="footer-muted">·</span> Last sync <span id="footer-sync">—</span></span>
+    </footer>
+  </div>
+
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <dialog class="modal layout-assets-modal" id="layout-assets-editor" aria-labelledby="layout-assets-editor-title">
+    <div class="modal-card layout-assets-card">
+      <div class="modal-heading">
+        <div><p class="eyebrow">LAYOUT EDITOR</p><h2 id="layout-assets-editor-title">Layout assets</h2></div>
+        <button type="button" class="icon-button" id="close-layout-assets" aria-label="Close layout asset inspector">×</button>
+      </div>
+      <div class="layout-assets-toolbar">
+        <label class="asset-kind-label" for="layout-asset-kind">Asset type</label>
+        <select class="compact-select" id="layout-asset-kind" aria-label="Layout asset type">
+          <option value="station">Stations</option>
+          <option value="signal">Signals</option>
+          <option value="waypoint">Waypoints</option>
+          <option value="turntable">Turntables</option>
+          <option value="platform">Platforms</option>
+        </select>
+        <button type="button" class="button button-primary" id="add-layout-asset">＋ Add asset</button>
+      </div>
+      <div class="layout-assets-grid">
+        <section class="asset-list-panel" aria-labelledby="layout-asset-list-title">
+          <div class="asset-list-heading"><div><p class="eyebrow">CURRENT RECORDS</p><h3 id="layout-asset-list-title">Stations</h3></div><span class="asset-count" id="layout-asset-count">0</span></div>
+          <div class="asset-list" id="layout-asset-list" aria-live="polite"></div>
+        </section>
+        <section class="asset-form-panel" aria-labelledby="layout-asset-form-title">
+          <div class="asset-form-heading"><div><p class="eyebrow">RECORD DETAILS</p><h3 id="layout-asset-form-title">Add station</h3></div><span class="asset-form-state" id="layout-asset-form-state">New</span></div>
+          <form id="layout-asset-form" novalidate>
+            <div class="field-grid" id="layout-asset-fields"></div>
+            <p class="editor-note" id="layout-asset-help">Create or update a layout asset. IDs are stable references used by the controller.</p>
+            <div class="modal-actions asset-form-actions"><button type="button" class="button button-soft" id="cancel-layout-asset">Cancel</button><button type="submit" class="button button-primary" id="save-layout-asset">Create record</button></div>
+          </form>
+        </section>
+      </div>
+    </div>
+  </dialog>
+  <dialog class="modal" id="block-editor" aria-labelledby="block-editor-title">
+    <form class="modal-card" id="block-editor-form" method="dialog">
+      <div class="modal-heading">
+        <div><p class="eyebrow">LAYOUT GRAPH</p><h2 id="block-editor-title">Edit track block</h2></div>
+        <button type="button" class="icon-button" id="close-block-editor" aria-label="Close block editor">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-grid">
+          <div class="field"><label for="block-id">Block ID</label><input id="block-id" readonly></div>
+          <div class="field"><label for="block-name">Block name</label><input id="block-name" required></div>
+          <div class="field"><label for="block-length">Length (mm)</label><input id="block-length" type="number" min="0" step="1"></div>
+          <div class="field"><label for="block-station">Station / area label</label><input id="block-station"></div>
+        </div>
+        <p class="editor-note">Block identity and topology remain stable while display metadata is edited. Connections are managed in the graph toolbar.</p>
+      </div>
+      <div class="modal-actions"><button type="button" class="button button-soft" id="cancel-block-editor">Cancel</button><button type="submit" class="button button-primary" id="save-block-editor">Save block</button></div>
+    </form>
+  </dialog>
+  <dialog class="modal" id="schedule-editor" aria-labelledby="schedule-editor-title">
+    <form class="modal-card" id="schedule-editor-form" method="dialog">
+      <div class="modal-heading">
+        <div><p class="eyebrow">DISPATCHER SERVICE</p><h2 id="schedule-editor-title">New timetable service</h2></div>
+        <button type="button" class="icon-button" id="close-schedule-editor" aria-label="Close service editor">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-grid">
+          <div class="field"><label for="schedule-time">Departure / arrival time</label><input id="schedule-time" type="time" required></div>
+          <div class="field"><label for="schedule-service">Service name</label><input id="schedule-service" required></div>
+          <div class="field"><label for="schedule-number">Service / decoder no.</label><input id="schedule-number" inputmode="numeric"></div>
+          <div class="field"><label for="schedule-train">Assigned train</label><select id="schedule-train"></select></div>
+          <div class="field"><label for="schedule-origin">Origin</label><input id="schedule-origin"></div>
+          <div class="field"><label for="schedule-destination">Destination</label><input id="schedule-destination"></div>
+          <div class="field"><label for="schedule-station">Operational station</label><select id="schedule-station"></select></div>
+          <div class="field"><label for="schedule-platform">Platform</label><select id="schedule-platform"></select></div>
+          <div class="field"><label for="schedule-state">State</label><select id="schedule-state"><option>Draft</option><option>Ready</option><option>Active</option><option>Boarding</option><option>Delayed</option><option>Paused</option><option>Completed</option></select></div>
+          <div class="field field-wide"><label for="schedule-route">Route / display text</label><input id="schedule-route" placeholder="Origin  →  Destination"></div>
+        </div>
+        <p class="editor-note">The assigned train and operational station drive schedule simulation; the route text is the human-readable timetable label.</p>
+      </div>
+      <div class="modal-actions"><button type="button" class="button button-soft" id="cancel-schedule-editor">Cancel</button><button type="submit" class="button button-primary" id="save-schedule-editor">Save service</button></div>
+    </form>
+  </dialog>
+  <dialog class="modal" id="train-data-editor" aria-labelledby="train-data-editor-title">
+    <form class="modal-card" id="train-data-editor-form" method="dialog">
+      <div class="modal-heading">
+        <div><p class="eyebrow" id="train-data-editor-kicker">TRAIN DATABASE</p><h2 id="train-data-editor-title">Edit train record</h2></div>
+        <button type="button" class="icon-button" id="close-train-data-editor" aria-label="Close train record editor">×</button>
+      </div>
+      <div class="modal-body" id="train-data-editor-body"></div>
+      <div class="modal-actions"><button type="button" class="button button-soft" id="cancel-train-data-editor">Cancel</button><button type="submit" class="button button-primary" id="save-train-data-editor">Save record</button></div>
+    </form>
+  </dialog>
+  <script src="scan_viewer.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
