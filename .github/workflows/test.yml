@@ -23,3 +23,20 @@ jobs:
         run: |
           node --check frontend/app.js
           node --check frontend/scan_viewer.js
+      - name: Run viewer regression tests
+        run: node --test tests/js/scan_viewer.test.js
+      - name: Install isolated browser test tools
+        run: |
+          npm install --no-save --no-package-lock playwright@1.62.1
+          npx playwright install --with-deps chromium
+      - name: Verify browser workflows and responsive pages
+        run: node tests/browser_smoke.cjs
+        env:
+          SCREENSHOT_DIR: artifacts/ui-verification
+      - name: Preserve browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-verification
+          path: artifacts/ui-verification
+          if-no-files-found: ignore

@@ -12,6 +12,9 @@ import mimetypes
 import os
 import re
 import threading
+import time
+from copy import deepcopy
+from datetime import datetime, timezone
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from http import HTTPStatus
@@ -39,6 +42,8 @@ from backend.core.models import BlockState, LayoutSnapshot, ScheduleStatus, Sign
 from backend.core.routing import RouteAlgorithm, find_route
 from backend.infrastructure.train_catalogue import TrainCatalogue, export_csv, export_json, import_csv, import_json
 from backend.infrastructure.train_database import DecoderFunctionMapping, MaintenanceRecord, RollingStockRecord, TrainModel
+from backend.infrastructure.settings import SQLiteSettingsRepository, validate_settings
+from backend.infrastructure.scan_store import MAX_UPLOAD_BODY_BYTES, ScanStore
 from backend.runtime import ControllerRuntime
 from backend.services.dispatcher import ControlMode
 from backend.services.scheduler import ScheduleStop as RuntimeScheduleStop
@@ -110,11 +115,23 @@ class ControllerApplication:
     z21_port: int = 21105
     feedback_map: dict[tuple[int, int], str] = field(default_factory=dict)
     runtime: ControllerRuntime | None = field(default=None, repr=False)
+    scan_directory: str | Path | None = None
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    _routing_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _routing_wake: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _routing_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _routing_last_monotonic: float | None = field(default=None, init=False, repr=False)
+    _routing_last_at: str | None = field(default=None, init=False)
+    _routing_refresh_count: int = field(default=0, init=False)
+    _routing_error: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Compose the domain runtime once and mirror the initial UI fixture into it."""
 
+        self._settings_repository = SQLiteSettingsRepository(self.database_path)
+        self._settings = self._settings_repository.load()
+        scan_directory = self.scan_directory or (Path(self.database_path).resolve().parent / "scans" if self.database_path != ":memory:" else SCAN_DIR)
+        self._scan_store = ScanStore(scan_directory)
         if self.runtime is None:
             if self.z21_host:
                 self.runtime = ControllerRuntime.create_z21(self.z21_host, port=self.z21_port, database_path=self.database_path, feedback_map=self.feedback_map)
@@ -204,6 +221,7 @@ class ControllerApplication:
     def close(self) -> None:
         """Close the composed runtime and its persistence connections."""
 
+        self.stop_background_refresh()
         subscription = getattr(self, "_domain_event_subscription", None)
         if subscription is not None:
             subscription.close()
@@ -211,6 +229,144 @@ class ControllerApplication:
         if self.runtime is not None:
             self.runtime.close()
             self.runtime = None
+        repository = getattr(self, "_settings_repository", None)
+        if repository is not None:
+            repository.close()
+            self._settings_repository = None
+
+    def _routing_activity(self) -> str:
+        if self.runtime is None or not self.track_power or (self.simulation_mode and not self.simulation_running):
+            return "idle"
+        snapshot = self.runtime.track.get_snapshot()
+        moving = any(motion.speed > 0 or motion.target_speed > 0 for motion in snapshot.trains)
+        scheduled = any(self._schedule_domain_status(row.get("state")) is ScheduleStatus.ACTIVE for row in self.schedules)
+        return "busy" if moving or scheduled else "idle"
+
+    def _routing_interval_ms(self) -> int:
+        routing = self._settings["routing"]
+        key = "idle_interval_ms" if routing["adaptive"] and self._routing_activity() == "idle" else "busy_interval_ms"
+        return routing[key]
+
+    def settings_payload(self) -> dict[str, Any]:
+        """Read saved preferences and live status, without probing any device."""
+
+        with self._lock:
+            next_host = os.environ.get("H0_Z21_HOST") or self._settings["z21_host"]
+            next_port = int(os.environ.get("H0_Z21_PORT") or self._settings["z21_port"])
+            restart_required = bool(self.z21_host and (self.z21_host != next_host or self.z21_port != next_port))
+            interval = self._routing_interval_ms()
+            remaining = max(0, interval - int((time.monotonic() - self._routing_last_monotonic) * 1000)) if self._routing_last_monotonic is not None else 0
+            return {
+                "settings": deepcopy(self._settings),
+                "runtime": {
+                    "connection_mode": "z21" if self.z21_host else "simulation",
+                    "active_z21_host": self.z21_host,
+                    "active_z21_port": self.z21_port if self.z21_host else None,
+                    "next_z21_host": next_host,
+                    "next_z21_port": next_port,
+                    "z21_environment_override": bool(os.environ.get("H0_Z21_HOST") or os.environ.get("H0_Z21_PORT")),
+                    "restart_required": restart_required,
+                    "hardware_activation_required": not bool(self.z21_host),
+                    "connection_message": "Saved for the next explicit physical startup; simulation stays active." if not self.z21_host else "Restart physical control to apply the saved endpoint." if restart_required else "Physical endpoint is active. Environment overrides take precedence when set.",
+                    "routing": {
+                        "running": bool(self._routing_thread and self._routing_thread.is_alive()),
+                        "activity": self._routing_activity(),
+                        "adaptive": self._settings["routing"]["adaptive"],
+                        "effective_interval_ms": interval,
+                        "next_refresh_in_ms": remaining,
+                        "refresh_count": self._routing_refresh_count,
+                        "last_refresh_at": self._routing_last_at,
+                        "error": self._routing_error,
+                        "motion_commands_enabled": False,
+                    },
+                },
+            }
+
+    def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            patch = payload.get("settings", payload)
+            validated = validate_settings(patch, self._settings)
+            self._settings = self._settings_repository.save(validated)
+            self._routing_wake.set()
+            return self.settings_payload()
+
+    def refresh_routes(self, *, force: bool = False, now: float | None = None) -> bool:
+        """Run a due planning cycle. No simulation or movement is advanced."""
+
+        with self._lock:
+            if self.runtime is None:
+                return False
+            current_time = time.monotonic() if now is None else now
+            if not force and self._routing_last_monotonic is not None and (current_time - self._routing_last_monotonic) * 1000 < self._routing_interval_ms():
+                return False
+            destinations = {str(train["id"]): str(train["destination_block_id"]) for train in self.trains if train.get("destination_block_id")}
+            positions = {str(train["id"]): str(train.get("block_id", "")) for train in self.trains}
+            routes = self.runtime.refresh_routes(destinations, positions)
+            for train in self.trains:
+                if str(train["id"]) in routes:
+                    train["route"] = list(routes[str(train["id"])])
+            self._routing_last_monotonic = current_time
+            self._routing_last_at = datetime.now(timezone.utc).isoformat()
+            self._routing_refresh_count += 1
+            self._routing_error = None
+            return True
+
+    def start_background_refresh(self) -> None:
+        with self._lock:
+            if self._routing_thread and self._routing_thread.is_alive():
+                return
+            self._routing_stop.clear()
+            self._routing_wake.clear()
+            self._routing_thread = threading.Thread(target=self._routing_loop, name="h0-route-refresh", daemon=True)
+            self._routing_thread.start()
+
+    def _routing_loop(self) -> None:
+        while not self._routing_stop.is_set():
+            # Clear before planning so a concurrent settings/layout update
+            # always wakes the next wait rather than getting lost.
+            self._routing_wake.clear()
+            try:
+                self.refresh_routes()
+            except Exception as exc:
+                with self._lock:
+                    self._routing_error = str(exc)
+                    self._routing_last_monotonic = time.monotonic()
+            with self._lock:
+                elapsed = time.monotonic() - (self._routing_last_monotonic or time.monotonic())
+                delay = max(0.01, self._routing_interval_ms() / 1000 - elapsed)
+            self._routing_wake.wait(delay)
+
+    def stop_background_refresh(self) -> None:
+        self._routing_stop.set()
+        self._routing_wake.set()
+        worker = self._routing_thread
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=5)
+            if worker.is_alive():
+                raise RuntimeError("route planner did not stop; persistence remains open for safety")
+        self._routing_thread = None
+
+    def _persist_scan_manifest(self) -> None:
+        """Save scans via the existing layout store without replaying train commands."""
+
+        if self.runtime is None:
+            raise RuntimeError("runtime is not available")
+        snapshot = self._domain_snapshot()
+        self.runtime.layout_repository.save(self.layout_id, snapshot, name=self.layout_name)
+        self.runtime.layout.replace(snapshot)
+
+    def upload_scan(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            scan, path = self._scan_store.upload(payload)
+            self.scans.append(scan)
+            try:
+                self._persist_scan_manifest()
+            except Exception:
+                self.scans.remove(scan)
+                path.unlink(missing_ok=True)
+                raise
+            self.events.append({"type": "scan_uploaded", "scan_id": scan["id"]})
+            return {"scan": deepcopy(scan), "scans": deepcopy(self.scans)}
 
     def _record_domain_event(self, event: Event) -> None:
         """Project typed domain events into the bounded HTTP event history."""
@@ -350,6 +506,8 @@ class ControllerApplication:
                 train["speed"] = 0
         self._sync_train_database()
         self._sync_scheduler()
+        self.refresh_routes(force=True)
+        self._routing_wake.set()
 
     def _sync_scheduler(self) -> None:
         """Project timetable rows into the deterministic scheduler service."""
@@ -750,6 +908,8 @@ class ControllerApplication:
             "turnouts": self._ui_turnouts(),
             "events": snapshot["events"],
             "scans": list(self.scans),
+            "settings": deepcopy(self._settings),
+            "runtime": self.settings_payload()["runtime"],
         }
 
     def _ui_blocks(self) -> list[dict[str, Any]]:
@@ -899,6 +1059,7 @@ class ControllerApplication:
                         if train["mode"] == "automatic" and train["speed"] > 0:
                             train["progress"] = (train.get("progress", 0) + train["speed"] / 100) % 1
             self.events.append({"type": "simulation_tick", "tick": self.tick_count})
+            self._routing_wake.set()
             return self._ui_snapshot()
 
     def save_layout(self, layout_id: str | None = None, *, name: str | None = None) -> dict[str, Any]:
@@ -1510,7 +1671,7 @@ class ControllerApplication:
                     self.scans.append(scan)
                 else:
                     existing.update(scan)
-                self._sync_runtime_from_ui()
+                self._persist_scan_manifest()
                 self.events.append({"type": "scan_updated", "scan_id": scan_id})
             elif kind == "remove_scan":
                 scan_id = str(payload.get("scan_id", "")).strip()
@@ -1518,7 +1679,7 @@ class ControllerApplication:
                 self.scans = [item for item in self.scans if str(item.get("id", "")) != scan_id]
                 if len(self.scans) == before:
                     raise ValueError(f"Unknown scan: {scan_id}")
-                self._sync_runtime_from_ui()
+                self._persist_scan_manifest()
                 self.events.append({"type": "scan_removed", "scan_id": scan_id})
             elif kind == "move_block":
                 block_id = str(payload.get("block_id", "")).strip().upper()
@@ -1673,6 +1834,7 @@ class ControllerApplication:
                 self.simulation_mode = bool(payload.get("enabled", True))
             else:
                 raise ValueError(f"Unsupported command: {kind or 'missing type'}")
+            self._routing_wake.set()
             return self._ui_snapshot()
 
 
@@ -1693,9 +1855,9 @@ class ControllerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _read_json(self) -> dict[str, Any]:
+    def _read_json(self, *, max_bytes: int = 1_000_000) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 1_000_000:
+        if length < 0 or length > max_bytes:
             raise ValueError("request body is too large")
         raw = self.rfile.read(length) if length else b"{}"
         value = json.loads(raw.decode("utf-8"))
@@ -1705,6 +1867,10 @@ class ControllerHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/api/settings":
+            return self._send_json(self.application.settings_payload())
+        if parsed.path.startswith("/api/scans/files/"):
+            return self._send_scan_file(unquote(parsed.path.removeprefix("/api/scans/files/")))
         if parsed.path == "/api/state":
             return self._send_json(self.application.state())
         if parsed.path == "/api/layout":
@@ -1768,6 +1934,10 @@ class ControllerHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/api/settings":
+                return self._send_json(self.application.update_settings(self._read_json()))
+            if parsed.path == "/api/scans/upload":
+                return self._send_json(self.application.upload_scan(self._read_json(max_bytes=MAX_UPLOAD_BODY_BYTES)), HTTPStatus.CREATED)
             if parsed.path == "/api/commands":
                 return self._send_json(self.application.command(self._read_json()))
             if parsed.path == "/api/train-catalogue":
@@ -1801,6 +1971,21 @@ class ControllerHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
 
+    def _send_scan_file(self, generated_name: str) -> None:
+        with self.application._lock:
+            path = self.application._scan_store.resolve(generated_name)
+            image_url = f"/api/scans/files/{generated_name}"
+            if path is None or not any(scan.get("image") == image_url for scan in self.application.scans):
+                return self._send_json({"error": "scan file not found"}, HTTPStatus.NOT_FOUND)
+            body = path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_static(self, requested_path: str) -> None:
         requested_path = unquote(requested_path)
         if requested_path.startswith("/scans/"):
@@ -1829,13 +2014,41 @@ def make_server(host: str = "127.0.0.1", port: int = 8080, application: Controll
         pass
 
     BoundHandler.application = app
-    return ThreadingHTTPServer((host, port), BoundHandler)
+
+    class ControllerHTTPServer(ThreadingHTTPServer):
+        def server_close(self) -> None:
+            app.stop_background_refresh()
+            super().server_close()
+            if application is None:
+                app.close()
+
+    server = ControllerHTTPServer((host, port), BoundHandler)
+    app.start_background_refresh()
+    return server
+
+
+def startup_z21_endpoint(settings: dict[str, Any], environment: dict[str, str] | None = None) -> tuple[str | None, int]:
+    """Only explicit process configuration can select physical operation."""
+
+    environment = os.environ if environment is None else environment
+    track_system = environment.get("H0_TRACK_SYSTEM", "simulation").strip().lower()
+    if track_system not in {"simulation", "z21"}:
+        raise ValueError("H0_TRACK_SYSTEM must be simulation or z21")
+    host = environment.get("H0_Z21_HOST") or (settings["z21_host"] if track_system == "z21" else None)
+    port = int(environment.get("H0_Z21_PORT") or settings["z21_port"])
+    if host:
+        validated = validate_settings({"z21_host": host, "z21_port": port}, settings)
+        return validated["z21_host"], validated["z21_port"]
+    return None, port
 
 
 def run(host: str = "127.0.0.1", port: int = 8080) -> None:
     database_path = os.environ.get("H0_CONTROLLER_DB", "data/controller.sqlite3")
-    z21_host = os.environ.get("H0_Z21_HOST") or None
-    z21_port = int(os.environ.get("H0_Z21_PORT", "21105"))
+    repository = SQLiteSettingsRepository(database_path)
+    try:
+        z21_host, z21_port = startup_z21_endpoint(repository.load())
+    finally:
+        repository.close()
     feedback_map: dict[tuple[int, int], str] = {}
     for token in os.environ.get("H0_Z21_FEEDBACK_MAP", "").split(","):
         if not token.strip() or "=" not in token:

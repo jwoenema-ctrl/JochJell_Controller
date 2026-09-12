@@ -131,11 +131,17 @@
       this.dragging = false;
       this.lastPointer = null;
       this.imageCache = new Map();
+      this.pendingImages = new Map();
       this.textureCache = new Map();
       this.depthFieldCache = new Map();
       this.projectedAnchors = [];
       this.currentSurface = null;
       this.renderer = null;
+      this._manifestSignature = JSON.stringify(this.manifest);
+      this._needsDraw = true;
+      this._visible = false;
+      this._destroyed = false;
+      this._unavailable = false;
       this.force2d = Boolean(this.options.force2d);
       this._onResize = () => this.resize();
       this._onPointerDown = (event) => this.pointerDown(event);
@@ -152,20 +158,21 @@
     }
 
     build() {
-      if (!this.host || !global.document || !global.document.createElement) return;
+      if (this._destroyed || !this.host || !global.document || !global.document.createElement) return;
       this.removeCanvasListeners();
-      if (this.gl) this.textureCache.forEach((texture) => { if (texture) this.gl.deleteTexture(texture); });
-      this.textureCache.clear();
-      this.gl = null;
-      this.glProgram = null;
-      this.glPositionBuffer = null;
-      this.glUvBuffer = null;
+      global.removeEventListener('resize', this._onResize);
+      if (this.resizeObserver) this.resizeObserver.disconnect();
+      this.releaseWebGL();
       this.context = null;
+      this.renderer = null;
+      this.width = 0;
+      this.height = 0;
+      this._visible = false;
+      this._needsDraw = true;
+      this._unavailable = false;
       this.host.innerHTML = '';
-      this.canvas = global.document.createElement('canvas');
-      this.canvas.setAttribute('aria-label', 'Interactive photo-scan track viewer');
-      this.canvas.style.touchAction = 'none';
-      this.host.appendChild(this.canvas);
+      if (global.getComputedStyle && global.getComputedStyle(this.host).position === 'static') this.host.style.position = 'relative';
+      this.createCanvas();
 
       let webglAttempted = false;
       if (!this.force2d) {
@@ -176,7 +183,7 @@
             this.initWebGL(webgl);
           }
         } catch (error) {
-          this.glProgram = null;
+          this.releaseWebGL();
         }
       }
       if (!this.glProgram) {
@@ -184,10 +191,7 @@
         // it so shader/context failures still have a genuine 2D fallback.
         if (webglAttempted) {
           this.canvas.remove();
-          this.canvas = global.document.createElement('canvas');
-          this.canvas.setAttribute('aria-label', 'Interactive photo-scan track viewer');
-          this.canvas.style.touchAction = 'none';
-          this.host.appendChild(this.canvas);
+          this.createCanvas();
         }
         this.context = this.canvas.getContext('2d');
         this.renderer = this.context ? '2d' : null;
@@ -195,6 +199,7 @@
         this.renderer = 'webgl';
       }
       if (!this.renderer) {
+        this._unavailable = true;
         this.host.innerHTML = '<div class="scan-empty"><div><strong>Canvas is unavailable</strong>Use a browser with canvas support to view the photo scan.</div></div>';
         return;
       }
@@ -212,6 +217,32 @@
       if (this.resizeObserver) this.resizeObserver.observe(this.host);
       this.manifest.forEach((scan) => this.loadImage(scan));
       this.resize();
+    }
+
+    createCanvas() {
+      this.canvas = global.document.createElement('canvas');
+      this.canvas.setAttribute('aria-label', 'Interactive photo-scan track viewer');
+      // The host owns its viewport height. An in-flow canvas can enlarge that
+      // host on every observation (especially when its border is measured).
+      Object.assign(this.canvas.style, {
+        position: 'absolute', inset: '0', display: 'block',
+        width: '100%', height: '100%', touchAction: 'none'
+      });
+      this.host.appendChild(this.canvas);
+    }
+
+    releaseWebGL() {
+      if (this.gl) {
+        this.textureCache.forEach((texture) => { if (texture) this.gl.deleteTexture(texture); });
+        if (this.glPositionBuffer) this.gl.deleteBuffer(this.glPositionBuffer);
+        if (this.glUvBuffer) this.gl.deleteBuffer(this.glUvBuffer);
+        if (this.glProgram) this.gl.deleteProgram(this.glProgram);
+      }
+      this.textureCache.clear();
+      this.gl = null;
+      this.glProgram = null;
+      this.glPositionBuffer = null;
+      this.glUvBuffer = null;
     }
 
     initWebGL(gl) {
@@ -235,21 +266,26 @@
           gl_FragColor = uUseTexture ? texture2D(uTexture, vUv) : uColor;
         }
       `;
+      const shaders = [];
       const compile = (type, source) => {
         const shader = gl.createShader(type);
+        shaders.push(shader);
         gl.shaderSource(shader, source);
         gl.compileShader(shader);
         if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || 'WebGL shader compilation failed');
         return shader;
       };
-      const program = gl.createProgram();
-      gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource));
-      gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentSource));
-      gl.linkProgram(program);
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'WebGL program linking failed');
-
       this.gl = gl;
+      const program = gl.createProgram();
       this.glProgram = program;
+      try {
+        gl.attachShader(program, compile(gl.VERTEX_SHADER, vertexSource));
+        gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragmentSource));
+        gl.linkProgram(program);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) || 'WebGL program linking failed');
+      } finally {
+        shaders.forEach((shader) => gl.deleteShader(shader));
+      }
       this.glPosition = gl.getAttribLocation(program, 'aPosition');
       this.glUv = gl.getAttribLocation(program, 'aUv');
       this.glMvp = gl.getUniformLocation(program, 'uMvp');
@@ -292,9 +328,20 @@
     }
 
     setManifest(manifest) {
-      if (!this.canvas || !this.host || !this.host.contains(this.canvas)) this.build();
-      this.manifest = Array.isArray(manifest) ? manifest.slice() : [];
+      if (this._destroyed) return;
+      const next = Array.isArray(manifest) ? manifest.slice() : [];
+      const signature = JSON.stringify(next);
+      const changed = signature !== this._manifestSignature;
+      this.manifest = next;
+      this._manifestSignature = signature;
       if (!this.manifest.some((scan) => scan.id === this.selectedId)) this.selectedId = this.manifest[0] && this.manifest[0].id;
+      if (!this._unavailable && (!this.canvas || !this.host || !this.host.contains(this.canvas))) this.build();
+      if (!changed) {
+        // Also checks visibility: a page can be revealed without its manifest
+        // changing, and should receive its first correctly sized frame then.
+        this.resize();
+        return;
+      }
       const urls = new Set(this.manifest.reduce((all, scan) => {
         if (!scan) return all;
         if (scan.image) all.push(scan.image);
@@ -312,17 +359,25 @@
       });
       this.imageCache.forEach((image, url) => {
         if (!urls.has(url)) {
+          const pending = this.pendingImages.get(url);
+          if (pending) { pending.onload = null; pending.onerror = null; }
+          this.pendingImages.delete(url);
           this.imageCache.delete(url);
           this.depthFieldCache.delete(url);
         }
       });
       this.manifest.forEach((scan) => this.loadImage(scan));
-      this.draw();
+      this._needsDraw = true;
+      this.resize();
     }
 
     setSelected(id) {
-      if (this.manifest.some((scan) => scan.id === id)) this.selectedId = id;
-      this.draw();
+      if (this._destroyed) return;
+      if (id !== this.selectedId && this.manifest.some((scan) => scan.id === id)) {
+        this.selectedId = id;
+        this._needsDraw = true;
+      }
+      this.resize();
     }
 
     selected() {
@@ -330,17 +385,28 @@
     }
 
     resize() {
-      if (!this.canvas || !this.renderer) return;
-      const rect = this.host.getBoundingClientRect();
+      if (this._destroyed || !this.canvas || !this.renderer || !this.host.contains(this.canvas)) return false;
+      // client sizes exclude borders and are zero inside a hidden page. Never
+      // invent dimensions for hidden canvases or write measured sizes to CSS.
+      const width = this.host.clientWidth;
+      const height = this.host.clientHeight;
+      if (!(width > 0 && height > 0)) {
+        this._visible = false;
+        return false;
+      }
       const ratio = Math.max(1, Math.min(2, global.devicePixelRatio || 1));
-      this.width = Math.max(320, Math.round(rect.width || 640));
-      this.height = Math.max(260, Math.round(rect.height || 360));
-      this.canvas.width = this.width * ratio;
-      this.canvas.height = this.height * ratio;
-      this.canvas.style.width = `${this.width}px`;
-      this.canvas.style.height = `${this.height}px`;
-      if (this.renderer === '2d') this.context.setTransform(ratio, 0, 0, ratio, 0, 0);
-      this.draw();
+      const pixelWidth = Math.max(1, Math.round(width * ratio));
+      const pixelHeight = Math.max(1, Math.round(height * ratio));
+      const changed = width !== this.width || height !== this.height || ratio !== this.pixelRatio || this.canvas.width !== pixelWidth || this.canvas.height !== pixelHeight;
+      if (!changed && this._visible && !this._needsDraw) return false;
+      this.width = width;
+      this.height = height;
+      this.pixelRatio = ratio;
+      this._visible = true;
+      if (this.canvas.width !== pixelWidth) this.canvas.width = pixelWidth;
+      if (this.canvas.height !== pixelHeight) this.canvas.height = pixelHeight;
+      if (changed && this.renderer === '2d') this.context.setTransform(pixelWidth / width, 0, 0, pixelHeight / height, 0, 0);
+      return this.draw();
     }
 
     loadImage(scan) {
@@ -351,18 +417,26 @@
     }
 
     loadImageUrl(url, scan, isDepth) {
-      if (!url || this.imageCache.has(url) || !global.Image) return;
+      if (this._destroyed || !url || this.imageCache.has(url) || !global.Image) return;
       // Mark the URL before starting the async request so redraws do not
       // create duplicate Image objects while the first request is pending.
       this.imageCache.set(url, null);
       const image = new global.Image();
+      this.pendingImages.set(url, image);
       if (scan.crossOrigin !== false) image.crossOrigin = scan.crossOrigin || 'anonymous';
       image.onload = () => {
+        if (this._destroyed || this.pendingImages.get(url) !== image) return;
+        this.pendingImages.delete(url);
         this.imageCache.set(url, image);
         if (isDepth) this.depthFieldCache.delete(url);
         this.draw();
       };
-      image.onerror = () => { this.imageCache.set(url, null); this.draw(); };
+      image.onerror = () => {
+        if (this._destroyed || this.pendingImages.get(url) !== image) return;
+        this.pendingImages.delete(url);
+        this.imageCache.set(url, null);
+        this.draw();
+      };
       image.src = url;
     }
 
@@ -488,9 +562,17 @@
     }
 
     draw() {
-      if (!this.renderer || !this.width) return;
+      if (this._destroyed) return false;
+      this._needsDraw = true;
+      if (!this.renderer || !this.width || !this.host.contains(this.canvas)) return false;
+      if (!this.host.clientWidth || !this.host.clientHeight) {
+        this._visible = false;
+        return false;
+      }
+      this._needsDraw = false;
       if (this.renderer === 'webgl') this.drawWebGL();
       else this.draw2D();
+      return true;
     }
 
     surfaceGeometry(scan, image) {
@@ -600,7 +682,10 @@
       const aspect = image && image.width && image.height ? image.width / image.height : 16 / 9;
       const surfaceHeight = 3.4;
       const surfaceWidth = surfaceHeight * aspect;
-      const distance = 5 / this.zoom;
+      // Fit the photograph on portrait as well as landscape viewports.
+      const halfFovTangent = Math.tan(Math.PI / 8);
+      const fitDistance = Math.max(surfaceHeight / (2 * halfFovTangent), surfaceWidth / (2 * halfFovTangent * (this.width / this.height))) * 1.12;
+      const distance = Math.max(5, fitDistance) / this.zoom;
       const eye = [this.panX + Math.sin(this.yaw) * distance, this.panY + Math.sin(this.pitch) * distance, Math.cos(this.yaw) * Math.cos(this.pitch) * distance];
       const view = lookAtMat4(eye, [this.panX, this.panY, 0], [0, 1, 0]);
       const projection = perspectiveMat4(Math.PI / 4, this.width / this.height, 0.1, 100);
@@ -837,9 +922,8 @@
     }
 
     switchTo2D() {
-      if (!this.host || this.renderer === '2d') return;
+      if (this._destroyed || !this.host || this.renderer === '2d') return;
       this.renderer = null;
-      this.glProgram = null;
       this.force2d = true;
       this.build();
     }
@@ -856,11 +940,22 @@
     }
 
     destroy() {
+      if (this._destroyed) return;
+      this._destroyed = true;
       this.removeCanvasListeners();
       global.removeEventListener('resize', this._onResize);
       if (this.resizeObserver) this.resizeObserver.disconnect();
-      if (this.gl) this.textureCache.forEach((texture) => { if (texture) this.gl.deleteTexture(texture); });
-      if (this.host) this.host.innerHTML = '';
+      this.releaseWebGL();
+      this.pendingImages.forEach((image) => { image.onload = null; image.onerror = null; });
+      this.pendingImages.clear();
+      this.imageCache.clear();
+      this.depthFieldCache.clear();
+      if (this.host && (this.host.contains(this.canvas) || (this.overlay && this.host.contains(this.overlay)))) this.host.innerHTML = '';
+      this.canvas = null;
+      this.renderer = null;
+      this.context = null;
+      this.projectedAnchors = [];
+      this.currentSurface = null;
     }
   }
 

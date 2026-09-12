@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from .core import EventController, LayoutController, StateController
+from .core.models import BlockState
+from .core.routing import RouteAlgorithm, find_route
 from .infrastructure.interfaces import ConnectionState, ConnectionStatus, TrackSystem
 from .infrastructure.layout_repository import SQLiteLayoutRepository
 from .infrastructure.simulation import SimulatedTrackSystem
@@ -14,7 +16,7 @@ from .infrastructure.real_track import Z21TrackSystem
 from .infrastructure.z21 import Z21LanTransport
 from .services.avoidance import AvoidanceDetector
 from .services.connection import ConnectionChecker
-from .services.dispatcher import DispatchCycle, Dispatcher
+from .services.dispatcher import ControlMode, DispatchCycle, Dispatcher
 from .services.interlocking import MovementAuthorityService
 from .services.route_updater import ConstantRouteUpdater
 from .services.scheduler import TimetableService
@@ -140,6 +142,40 @@ class ControllerRuntime:
         if cycle is None:
             cycle = self.dispatcher.tick()
         return cycle
+
+    def refresh_routes(
+        self,
+        destinations: Mapping[str, str],
+        positions: Mapping[str, str] | None = None,
+    ) -> dict[str, tuple[str, ...]]:
+        """Recalculate plans and reservations without polling or commanding track.
+
+        This is safe to run on a wall-clock timer. It deliberately never ticks
+        the dispatcher, changes a train target, or sends a transport packet.
+        Dispatch still performs its independent safety checks on every tick.
+        """
+
+        snapshot = self.track.get_snapshot()
+        graph = self.layout.graph()
+        locations = dict(positions or {})
+        locations.update({motion.train_id: motion.block_id for motion in snapshot.trains if motion.block_id})
+        blocked = tuple(block.id for block in self.layout.snapshot().snapshot.blocks if block.state is BlockState.OUT_OF_SERVICE)
+        planned_routes: dict[str, tuple[str, ...]] = {}
+        for train_id, control in self.dispatcher.trains.items():
+            if control.mode is not ControlMode.AUTOMATIC:
+                continue
+            current = self.route_updater.desired_routes.get(train_id, ())
+            start = str(locations.get(train_id, current[0] if current else "")).upper()
+            goal = str(destinations.get(train_id, current[-1] if current else start)).upper()
+            if graph.node(start) is None:
+                self.route_updater.release_train(train_id)
+                continue
+            route = find_route(graph, start, goal, algorithm=RouteAlgorithm.A_STAR, blocked_nodes=blocked) if graph.node(goal) is not None else None
+            values = route.node_ids if route is not None else (start,)
+            self.route_updater.set_route(train_id, values)
+            planned_routes[train_id] = values
+        self.route_updater.update(snapshot.occupied_blocks)
+        return planned_routes
 
     def close(self) -> None:
         self.train_database.close()

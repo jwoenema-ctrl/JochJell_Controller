@@ -106,6 +106,12 @@
     layoutAssetEditing: null
   };
 
+  const DEFAULT_SETTINGS = { theme: 'system', z21_host: '192.168.0.111', z21_port: 21105, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
+  app.settings = clone(DEFAULT_SETTINGS);
+  app.settingsDirty = false;
+  app.settingsLoaded = false;
+  app.pollTimer = null;
+
   const LAYOUT_ASSET_DEFINITIONS = {
     station: {
       label: 'Station', collection: 'stations', plural: 'Stations', prefix: 'ST',
@@ -267,7 +273,10 @@
     const timer = window.setTimeout(() => controller.abort(), 4200);
     try {
       const response = await fetch(endpoint, { ...options, signal: controller.signal, headers: { Accept: 'application/json', ...(options && options.headers) } });
-      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.error || `${response.status} ${response.statusText}`);
+      }
       return await response.json();
     } finally {
       window.clearTimeout(timer);
@@ -275,6 +284,7 @@
   }
 
   async function bootstrap() {
+    loadAppSettings();
     const endpoints = ['/api/state', '/api/layout', '/api/trains', '/api/train-database'];
     const results = await Promise.allSettled(endpoints.map((endpoint) => fetchJson(endpoint)));
     let successCount = 0;
@@ -291,8 +301,8 @@
     if (successCount) {
       const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
       app.state.connection = simulated
-        ? { ...app.state.connection, connected: false, simulated: true, label: 'Simulation API online', detail: `${successCount}/${endpoints.length} endpoints responding` }
-        : { ...app.state.connection, connected: true, simulated: false, label: 'Z21 controller online', detail: `${successCount}/${endpoints.length} endpoints responding` };
+        ? { ...app.state.connection, connected: false, simulated: true, label: 'Simulation online', detail: 'No physical trains connected' }
+        : { ...app.state.connection, connected: Boolean(app.state.connection.connected), simulated: false, label: app.state.connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: `${successCount}/${endpoints.length} endpoints responding` };
     } else {
       app.state.connection = { connected: false, simulated: true, label: 'Simulation fallback', detail: 'Local sample state' };
     }
@@ -303,12 +313,14 @@
 
   async function pollController() {
     if (document.visibilityState === 'hidden') return;
-    const results = await Promise.allSettled(['/api/connection', '/api/feedback'].map((endpoint) => fetchJson(endpoint)));
+    const results = await Promise.allSettled(['/api/connection', '/api/feedback', '/api/state', '/api/settings'].map((endpoint) => fetchJson(endpoint)));
     const connectionResult = results[0];
     if (connectionResult && connectionResult.status === 'fulfilled') {
       const connection = unwrap(connectionResult.value) || {};
       const simulated = Boolean(connection.simulated || connection.mode === 'simulation');
-      app.state.connection = { ...app.state.connection, ...connection, simulated, connected: simulated ? false : Boolean(connection.connected), label: simulated ? 'Simulation API online' : 'Z21 controller online', detail: simulated ? 'Live simulation status' : 'Live connection check' };
+      app.state.connection = { ...app.state.connection, ...connection, simulated, connected: simulated ? false : Boolean(connection.connected), label: simulated ? 'Simulation online' : connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: simulated ? 'No physical trains connected' : 'Live connection check' };
+    } else {
+      app.state.connection = { connected: false, simulated: false, label: 'Controller unavailable', detail: 'Check the local server' };
     }
     const feedbackResult = results[1];
     if (feedbackResult && feedbackResult.status === 'fulfilled') {
@@ -324,10 +336,115 @@
         });
       }
     }
-    renderConnection();
-    renderGraph();
-    renderSystematicView();
-    renderStats();
+    if (results[2].status === 'fulfilled') {
+      const lastConnection = app.state.connection;
+      mergePayload(results[2].value);
+      app.state.connection = lastConnection;
+      renderTrainList();
+      renderSchedules();
+      updateSync('Controller state refreshed', 'success');
+    }
+    if (results[3].status === 'fulfilled') showSettingsRuntime(results[3].value.runtime);
+    renderConnection(); renderGraph(); renderSystematicView(); renderStats();
+  }
+
+  function applyTheme(theme) {
+    const resolved = theme === 'system' ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : theme;
+    document.documentElement.dataset.theme = resolved;
+    document.documentElement.style.colorScheme = resolved;
+    $('meta[name="theme-color"]').content = resolved === 'dark' ? '#212121' : '#ffffff';
+  }
+
+  function schedulePolling() {
+    window.clearTimeout(app.pollTimer);
+    app.pollTimer = window.setTimeout(async () => {
+      try { await pollController(); } finally { schedulePolling(); }
+    }, app.settings.ui_refresh_ms);
+  }
+
+  function renderSettings() {
+    const settings = app.settings;
+    $('#setting-theme').value = settings.theme;
+    $('#setting-ui-refresh').value = settings.ui_refresh_ms / 1000;
+    $('#setting-z21-host').value = settings.z21_host;
+    $('#setting-z21-port').value = settings.z21_port;
+    $('#setting-routing-adaptive').checked = settings.routing.adaptive;
+    $('#setting-routing-busy').value = settings.routing.busy_interval_ms / 1000;
+    $('#setting-routing-idle').value = settings.routing.idle_interval_ms / 1000;
+    $('#setting-routing-idle').disabled = !settings.routing.adaptive;
+    renderScanLibrary();
+  }
+
+  function renderScanLibrary() {
+    const scans = (app.state.scans || []).filter((scan) => scan.image);
+    $('#settings-scan-library').innerHTML = scans.length ? scans.map((scan) => `<div class="scan-library-item"><div><strong>${escapeHtml(scan.label || scan.id)}</strong><p class="settings-help">${escapeHtml(scan.description || 'Layout photo')}</p></div><button type="button" class="button button-soft" data-view-scan="${escapeHtml(scan.id)}">Open viewer</button></div>`).join('') : '<p class="settings-help">Your photo library is empty. Add your first layout photograph above.</p>';
+  }
+
+  function showSettingsRuntime(runtime) {
+    if (!runtime) return;
+    $('#settings-connection-note').textContent = (runtime.connection_message || 'Saving never activates hardware. Connection changes take effect at the next explicit Z21 startup.') + (runtime.z21_environment_override ? ' An environment setting currently overrides the saved address or port.' : '');
+    const routing = runtime.routing;
+    if (routing) $('#settings-routing-status').textContent = routing.error
+      ? `Route refresh needs attention: ${routing.error}`
+      : `Layout ${routing.activity || 'idle'} · ${Number(routing.effective_interval_ms || 0) / 1000}s refresh · ${routing.refresh_count || 0} planning cycles. Route refresh never sends movement commands.`;
+  }
+
+  async function loadAppSettings() {
+    try {
+      const response = await fetchJson('/api/settings');
+      app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
+      app.settingsLoaded = true;
+      if (!app.settingsDirty) {
+        renderSettings(); applyTheme(app.settings.theme);
+        $('#settings-save-status').textContent = 'Preferences are up to date.';
+      }
+      showSettingsRuntime(response.runtime);
+      schedulePolling();
+    } catch (error) {
+      $('#settings-save-status').textContent = 'Settings unavailable. Check the controller connection and try Refresh.';
+    }
+  }
+
+  async function saveAppSettings(event) {
+    event.preventDefault();
+    const button = $('#settings-save');
+    const settings = {
+      theme: $('#setting-theme').value,
+      z21_host: $('#setting-z21-host').value.trim(),
+      z21_port: Number($('#setting-z21-port').value),
+      ui_refresh_ms: Number($('#setting-ui-refresh').value) * 1000,
+      routing: { adaptive: $('#setting-routing-adaptive').checked, busy_interval_ms: Number($('#setting-routing-busy').value) * 1000, idle_interval_ms: Number($('#setting-routing-idle').value) * 1000 }
+    };
+    button.disabled = true;
+    $('#settings-save-status').textContent = 'Saving preferences…';
+    try {
+      const response = await fetchJson('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+      app.settings = response.settings;
+      app.settingsLoaded = true; app.settingsDirty = false;
+      applyTheme(app.settings.theme); renderSettings(); schedulePolling(); showSettingsRuntime(response.runtime);
+      $('#settings-save-status').textContent = 'Saved on this controller.';
+      showToast('Settings saved', 'success');
+    } catch (error) {
+      $('#settings-save-status').textContent = `Not saved: ${error.message}`;
+    } finally { button.disabled = false; }
+  }
+
+  async function uploadScan(file) {
+    if (!file || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('Choose a PNG, JPEG or WebP photograph.');
+    if (file.size > 10 * 1024 * 1024) throw new Error('Choose a photograph smaller than 10 MB.');
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1]);
+      reader.onerror = () => reject(new Error('This photograph could not be read.'));
+      reader.readAsDataURL(file);
+    });
+    const response = await fetchJson('/api/scans/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: file.name, label: file.name.replace(/\.[^.]+$/, ''), mime_type: file.type, data }) });
+    if (Array.isArray(response.scans)) app.state.scans = response.scans;
+    else if (response.scan) app.state.scans.push(response.scan);
+    if (response.scan) app.selectedScanId = response.scan.id;
+    renderScanLibrary();
+    if (app.workspace === 'scans') renderScans();
+    return response;
   }
 
   function updateSync(message, tone) {
@@ -554,7 +671,8 @@
     renderSidebar();
     renderGraph();
     renderSystematicView();
-    renderScans();
+    if (app.workspace === 'scans') renderScans();
+    renderScanLibrary();
     renderTrainList();
     renderEditor();
     renderSchedules();
@@ -573,7 +691,8 @@
     $('#connection-detail').textContent = connection.detail || '';
     const feedback = app.state.feedback || {};
     const feedbackFailed = feedback.healthy === false;
-    $('#feedback-health').textContent = feedbackFailed ? 'Unavailable' : connection.connected ? 'Live feedback' : 'Simulated';
+    $('#health-score').textContent = feedbackFailed ? 'Check' : connection.simulated ? 'Simulation' : connection.connected ? 'Online' : 'Offline';
+    $('#feedback-health').textContent = feedbackFailed ? 'Unavailable' : connection.connected ? 'Live feedback' : connection.simulated ? 'Simulated' : 'Unknown';
     $('#checker-health').textContent = feedbackFailed ? 'Safe stop required' : connection.connected ? 'Verified' : 'Standby';
     $('#footer-source').textContent = feedbackFailed ? 'Feedback unavailable · safe stop' : connection.connected ? 'Z21 API connected' : connection.simulated ? 'Simulation API' : 'Embedded sample state';
     $('.footer-indicator').style.background = feedbackFailed ? 'var(--red)' : connection.connected ? 'var(--green)' : 'var(--yellow)';
@@ -638,10 +757,21 @@
     }).filter((edge) => edge.from && edge.to);
   }
 
+  function fitGraphViewport() {
+    const layout = app.state.layout;
+    const items = [...(layout.blocks || []), ...(layout.waypoints || []), ...(layout.turntables || [])];
+    if (!items.length) { $('#layout-svg').setAttribute('viewBox', '0 0 980 350'); return; }
+    const left = Math.min(...items.map((item) => Number(item.x) || 0)) - 70;
+    const top = Math.min(...items.map((item) => Number(item.y) || 0)) - 80;
+    const right = Math.max(...items.map((item) => (Number(item.x) || 0) + (Number(item.width) || 140))) + 70;
+    const bottom = Math.max(...items.map((item) => (Number(item.y) || 0) + (Number(item.height) || 56))) + 65;
+    $('#layout-svg').setAttribute('viewBox', `${left} ${top} ${Math.max(320, right - left)} ${Math.max(220, bottom - top)}`);
+  }
+
   function renderGraph() {
     const layout = app.state.layout;
     $('#layout-panel').classList.toggle('is-editing', app.layoutEditing);
-    $('#toggle-layout-edit').textContent = app.layoutEditing ? 'Editing on' : 'Edit layout';
+    $('#toggle-layout-edit').textContent = app.layoutEditing ? 'Editor' : 'Edit layout';
     const blocks = layout.blocks || [];
     const blockMap = Object.fromEntries(blocks.flatMap((block) => [[block.id, block], [String(block.id || '').toLowerCase(), block]]));
     const edges = normalizedEdges(layout, blocks);
@@ -660,13 +790,14 @@
         <circle class="node-light" cx="${Number(block.x) + 14}" cy="${Number(block.y) + 16}" r="4"></circle>
         <text class="label" x="${Number(block.x) + 26}" y="${Number(block.y) + 20}">${escapeHtml(label)}</text>
         <text class="meta" x="${Number(block.x) + 14}" y="${Number(block.y) + height - 15}">${escapeHtml(train ? train.name : block.station || status.toUpperCase())}</text>
-        ${train ? `<text class="meta" x="${Number(block.x) + width - 31}" y="${Number(block.y) + 20}">#${escapeHtml(train.number)}</text>` : ''}
+        <title>${escapeHtml(label)}${train ? ` · ${escapeHtml(train.name)} #${escapeHtml(train.number)}` : ''}</title>
       </g>`;
     }).join('');
     const turnoutMarkup = (layout.turnouts || []).slice(0, 4).map((turnout, index) => {
       const block = blockMap[turnout.from] || blocks.find((item) => item.id === ['b11', 'b12', 'b07', 'b09'][index]);
       if (!block) return '';
       const center = blockCenter(block);
+      center.y += Number(block.height || 56) / 2 + 16;
       const locked = turnout.lockedBy ? ` · locked by ${turnout.lockedBy}` : '';
       return `<g class="turnout-node ${turnout.lockedBy ? 'is-locked' : ''}" data-turnout-id="${escapeHtml(turnout.id)}" tabindex="0" role="button" aria-label="Toggle turnout ${escapeHtml(turnout.name)}${escapeHtml(locked)}"><path class="turnout-marker" d="M ${center.x} ${center.y - 10} L ${center.x + 10} ${center.y} L ${center.x} ${center.y + 10} L ${center.x - 10} ${center.y} Z"></path><text class="meta" text-anchor="middle" x="${center.x}" y="${center.y + 25}">${escapeHtml(turnout.name || 'TO')}${turnout.lockedBy ? ' · LOCKED' : ''}</text></g>`;
     }).join('');
@@ -686,6 +817,7 @@
       return `<g class="turntable-node" data-turntable-id="${escapeHtml(turntable.id)}" tabindex="0" role="button" aria-label="Align turntable ${escapeHtml(turntable.name || turntable.id)}"><circle cx="${x}" cy="${y}" r="18"></circle><line x1="${x - 13}" y1="${y}" x2="${x + 13}" y2="${y}"></line><text class="meta" x="${x + 23}" y="${y + 3}">${escapeHtml(turntable.name || turntable.id)}</text></g>`;
     }).join('');
     $('#layout-svg').innerHTML = `<g class="graph-layer" style="transform-origin: 490px 175px;">${edgeMarkup}${nodeMarkup}${waypointMarkup}${turntableMarkup}${turnoutMarkup}${signalMarkup}</g>`;
+    if (!app.layoutDrag) fitGraphViewport();
     $$('[data-block-id]', $('#layout-svg')).forEach((node) => {
       node.addEventListener('click', () => selectBlock(node.dataset.blockId));
       node.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') selectBlock(node.dataset.blockId); });
@@ -813,7 +945,10 @@
     const scans = Array.isArray(app.state.scans) ? app.state.scans : [];
     if (!scans.length) {
       select.innerHTML = '<option value="">No scans configured</option>';
-      host.innerHTML = '<div class="scan-empty"><div><strong>No photo scans configured</strong>Add entries to the scan manifest to anchor the 3D viewer to your layout.</div></div>';
+      if (app.scanViewer) { app.scanViewer.destroy(); app.scanViewer = null; }
+      host.innerHTML = '<div class="scan-empty"><div><strong>Your layout, in perspective</strong>Add a layout photograph in Settings to begin.</div></div>';
+      $('#scan-title').textContent = 'No photo selected';
+      $('#scan-description').textContent = 'Upload a photograph from Settings.';
       return;
     }
     select.innerHTML = scans.map((scan) => `<option value="${escapeHtml(scan.id)}">${escapeHtml(scan.label || scan.id)}</option>`).join('');
@@ -1360,12 +1495,49 @@
   }
 
   function updateWorkspaceVisibility() {
-    $('#systematic-panel').classList.toggle('is-hidden', app.layoutView !== 'systematic');
-    $('#layout-panel').classList.toggle('is-hidden', app.layoutView === 'systematic');
-    $('#scan-panel').classList.toggle('is-hidden', app.workspace !== 'scans');
+    const page = app.workspace;
+    const trackPage = ['dispatch', 'layout'].includes(page);
+    document.body.dataset.workspace = page;
+    $('.dashboard').classList.toggle('is-hidden', page === 'settings');
+    $('#settings-page').classList.toggle('is-hidden', page !== 'settings');
+    $('.sidebar').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
+    $('#systematic-panel').classList.toggle('is-hidden', !trackPage || app.layoutView !== 'systematic');
+    $('#layout-panel').classList.toggle('is-hidden', !trackPage);
+    $('#layout-panel').classList.toggle('systematic-only', app.layoutView === 'systematic');
+    $('#map-stage').classList.toggle('is-hidden', app.layoutView === 'systematic');
+    $('.map-summary').classList.toggle('is-hidden', app.layoutView === 'systematic');
+    $('#graph-editor-tools').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
+    $$('.map-legend .editor-action').forEach((button) => button.classList.toggle('is-hidden', page !== 'layout'));
+    $('#scan-panel').classList.toggle('is-hidden', page !== 'scans');
+    $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
+    $('#train-editor-panel').classList.toggle('is-hidden', page !== 'trains');
+    $('.bottom-grid').classList.toggle('is-hidden', !['trains', 'timetable'].includes(page));
+    $('#timetable-panel').classList.toggle('is-hidden', page !== 'timetable');
+    $('#assembler-panel').classList.toggle('is-hidden', page !== 'trains');
+    $('#fit-layout').classList.toggle('is-hidden', !trackPage);
+    $('.search-box').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
+    const titles = { dispatch: 'Dispatch', layout: 'Layout editor', trains: 'Your trains', timetable: 'Timetable', scans: '3D workspace' };
+    $('#workspace-title').textContent = titles[page] || 'Settings';
+    $('#workspace-context').textContent = `${app.state.layout.blocks.length} blocks · ${app.state.trains.length} trains`;
+    $$('.mode-tab').forEach((button) => {
+      const active = button.dataset.workspace === page;
+      button.classList.toggle('is-active', active);
+      if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
+    });
     $$('.toolbar-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.layoutView === app.layoutView));
-    if (app.workspace === 'timetable') $('#timetable-panel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    if (app.workspace === 'scans') $('#scan-panel').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  function navigateWorkspace(page) {
+    app.workspace = page;
+    if (page === 'layout') { app.layoutView = 'editor'; app.layoutEditing = true; }
+    else { app.layoutEditing = false; if (page === 'dispatch' && app.layoutView === 'editor') app.layoutView = 'graph'; }
+    renderGraph();
+    updateWorkspaceVisibility();
+    if (page === 'scans') { renderScans(); window.requestAnimationFrame(() => app.scanViewer && app.scanViewer.resize()); }
+    if (page === 'settings') { renderScanLibrary(); if (!app.settingsDirty) renderSettings(); }
+    window.history.replaceState(null, '', `#${page}`);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    $(page === 'settings' ? '#settings-title' : '#workspace-title').focus({ preventScroll: true });
   }
 
   function selectTrain(id) {
@@ -1373,6 +1545,7 @@
     app.selectedTrainId = id;
     app.consistDraft = null;
     renderSidebar(); renderTrainList(); renderEditor(); renderAssembler();
+    if (app.workspace === 'dispatch') navigateWorkspace('trains');
     showToast(`${selectedTrain().name} selected`, 'success');
   }
 
@@ -1439,12 +1612,9 @@
 
   function svgPoint(event) {
     const svg = $('#layout-svg');
-    const rect = svg.getBoundingClientRect();
-    const viewBox = svg.viewBox.baseVal;
-    return {
-      x: (event.clientX - rect.left) * viewBox.width / rect.width,
-      y: (event.clientY - rect.top) * viewBox.height / rect.height
-    };
+    const point = svg.createSVGPoint();
+    point.x = event.clientX; point.y = event.clientY;
+    return point.matrixTransform(svg.getScreenCTM().inverse());
   }
 
   function beginBlockDrag(event, blockId) {
@@ -1461,8 +1631,8 @@
     const block = app.state.layout.blocks.find((item) => item.id === app.layoutDrag.blockId);
     if (!block) return;
     const point = svgPoint(event);
-    block.x = Math.max(0, Math.min(840, Math.round(app.layoutDrag.original.x + point.x - app.layoutDrag.start.x)));
-    block.y = Math.max(0, Math.min(290, Math.round(app.layoutDrag.original.y + point.y - app.layoutDrag.start.y)));
+    block.x = Math.max(0, Math.round(app.layoutDrag.original.x + point.x - app.layoutDrag.start.x));
+    block.y = Math.max(0, Math.round(app.layoutDrag.original.y + point.y - app.layoutDrag.start.y));
     renderGraph();
   }
 
@@ -1598,20 +1768,12 @@
     await sendCommand({ type: 'add_scan', scan: { id: `scan-${Date.now()}`, label: label.trim() || fallbackLabel, description: 'Linked photo scan', image: image.trim(), anchor: { x: 0.5, y: 0.48 } } });
   }
 
-  function useLocalScan(event) {
+  async function useLocalScan(event) {
     const file = event.target.files && event.target.files[0];
     event.target.value = '';
-    if (!file || !file.type.startsWith('image/')) {
-      showToast('Choose an image file for the photo-scan viewer.', 'warning');
-      return;
-    }
-    const id = `local-scan-${Date.now()}`;
-    const image = URL.createObjectURL(file);
-    app.scanObjectUrls[id] = image;
-    app.state.scans.push({ id, label: file.name, description: 'Local browser preview · not yet persisted', image, anchor: { x: 0.5, y: 0.48 } });
-    app.selectedScanId = id;
-    renderScans();
-    showToast('Local photo scan loaded for this browser session.', 'success');
+    if (!file) return;
+    try { await uploadScan(file); showToast('Photo saved on this controller.', 'success'); }
+    catch (error) { showToast(error.message, 'warning'); }
   }
 
   async function toggleTurnout(id) {
@@ -1656,7 +1818,30 @@
   }
 
   function setupEvents() {
-    $$('.mode-tab').forEach((button) => button.addEventListener('click', () => { app.workspace = button.dataset.workspace; renderSidebar(); updateWorkspaceVisibility(); if (app.workspace === 'layout') $('#layout-panel').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }));
+    $$('.mode-tab').forEach((button) => button.addEventListener('click', () => navigateWorkspace(button.dataset.workspace)));
+    $('#app-settings-form').addEventListener('submit', saveAppSettings);
+    $('#app-settings-form').addEventListener('input', () => { app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; });
+    $('#setting-theme').addEventListener('change', (event) => applyTheme(event.target.value));
+    $('#setting-routing-adaptive').addEventListener('change', (event) => { $('#setting-routing-idle').disabled = !event.target.checked; });
+    $('#settings-discard').addEventListener('click', () => { app.settingsDirty = false; renderSettings(); applyTheme(app.settings.theme); $('#settings-save-status').textContent = app.settingsLoaded ? 'Changes discarded.' : 'Controller settings have not loaded yet.'; });
+    $('#settings-scan-library').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-view-scan]');
+      if (button) { app.selectedScanId = button.dataset.viewScan; navigateWorkspace('scans'); }
+    });
+    $('#settings-upload-scan').addEventListener('click', async () => {
+      const button = $('#settings-upload-scan');
+      button.disabled = true;
+      $('#settings-upload-status').textContent = 'Uploading photograph…';
+      try {
+        await uploadScan($('#settings-scan-file').files[0]);
+        $('#settings-scan-file').value = '';
+        $('#settings-upload-status').textContent = 'Photo saved. Open it from your library below.';
+      } catch (error) { $('#settings-upload-status').textContent = error.message; }
+      finally { button.disabled = false; }
+    });
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if ($('#setting-theme').value === 'system') applyTheme('system');
+    });
     $('#open-layout-assets').addEventListener('click', () => openLayoutAssetsEditor($('#layout-asset-kind').value));
     $('#close-layout-assets').addEventListener('click', closeLayoutAssetsEditor);
     $('#cancel-layout-asset').addEventListener('click', closeLayoutAssetsEditor);
@@ -1680,7 +1865,6 @@
     $('#link-scan').addEventListener('click', linkScan);
     $('#use-local-scan').addEventListener('click', () => $('#scan-file').click());
     $('#scan-file').addEventListener('change', useLocalScan);
-    $('#toggle-layout-edit').addEventListener('click', () => { app.layoutEditing = !app.layoutEditing; renderGraph(); showToast(app.layoutEditing ? 'Layout editor enabled' : 'Layout editor locked', app.layoutEditing ? 'success' : 'warning'); });
     $('#add-layout-block').addEventListener('click', addLayoutBlock);
     $('#edit-selected-block').addEventListener('click', () => openBlockEditor());
     $('#block-editor-form').addEventListener('submit', saveBlockEditor);
@@ -1699,7 +1883,12 @@
       renderSidebar();
       sendCommand({ type: 'set_mode', mode: app.controlMode === 'safe' ? 'stopped' : app.controlMode });
     }));
-    $$('.toolbar-tab').forEach((button) => button.addEventListener('click', () => { app.layoutView = button.dataset.layoutView; updateWorkspaceVisibility(); }));
+    $$('.toolbar-tab').forEach((button) => button.addEventListener('click', () => {
+      if (button.dataset.layoutView === 'editor' && app.workspace !== 'layout') { navigateWorkspace('layout'); return; }
+      app.layoutView = button.dataset.layoutView;
+      app.layoutEditing = app.workspace === 'layout' && app.layoutView === 'editor';
+      renderGraph(); updateWorkspaceVisibility();
+    }));
     $$('.editor-tab').forEach((button) => button.addEventListener('click', () => { app.editorTab = button.dataset.editorTab; renderEditor(); }));
     $('#speed-slider').addEventListener('input', (event) => { $('#speed-readout').textContent = event.target.value; });
     $('#apply-speed').addEventListener('click', () => setSpeed($('#speed-slider').value));
@@ -1710,10 +1899,10 @@
     $('#simulation-rate-select').addEventListener('change', (event) => { app.simRate = Number(event.target.value) || 1; renderSidebar(); showToast(`Simulation rate set to ${app.simRate}×`, 'success'); });
     $('#refresh-button').addEventListener('click', () => { showToast('Refreshing controller state…', 'success'); bootstrap(); });
     $('#train-search').addEventListener('input', (event) => { app.filter = event.target.value; renderTrainList(); });
-    $('#fit-layout').addEventListener('click', () => { app.zoom = 1; $('#layout-svg').style.transform = 'scale(1)'; $('#layout-zoom-label').textContent = '100%'; showToast('Layout fitted to workspace', 'success'); });
+    $('#fit-layout').addEventListener('click', () => { app.zoom = 1; $('#layout-svg').style.transform = 'scale(1)'; $('#layout-zoom-label').textContent = '100%'; fitGraphViewport(); showToast('Layout fitted to workspace', 'success'); });
     $('#layout-zoom-in').addEventListener('click', () => changeZoom(.1));
     $('#layout-zoom-out').addEventListener('click', () => changeZoom(-.1));
-    $('#open-settings').addEventListener('click', () => { app.editorTab = 'settings'; renderEditor(); $('#train-editor-panel').scrollIntoView({ block: 'nearest', behavior: 'smooth' }); });
+    $('#open-settings').addEventListener('click', () => navigateWorkspace('settings'));
     $('#add-train').addEventListener('click', () => {
       const id = `local-${Date.now()}`;
       const train = { id, number: '', name: 'New service', class: 'Manual', status: 'Ready', speed: 0, position: 'B04', block_id: 'B04', origin: 'Origin', destination: 'Destination', direction: 'Eastbound', decoder: 'Not assigned', length: 0, length_mm: 0, maxSpeed: 120, consist: [] };
@@ -1763,8 +1952,11 @@
   document.addEventListener('DOMContentLoaded', () => {
     applyDynamicStyles();
     setupEvents();
+    renderSettings(); applyTheme(app.settings.theme);
     renderAll();
+    const initialPage = window.location.hash.slice(1);
+    if (['dispatch', 'layout', 'trains', 'timetable', 'scans', 'settings'].includes(initialPage)) navigateWorkspace(initialPage);
     bootstrap();
-    window.setInterval(pollController, 5000);
+    schedulePolling();
   });
 })();

@@ -4,3 +4,5 @@ __pycache__/
 data/*.sqlite3
 data/scans/*
 !data/scans/.gitkeep
+artifacts/
+node_modules/

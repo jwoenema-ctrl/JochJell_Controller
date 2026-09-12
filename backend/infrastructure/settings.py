@@ -1,0 +1,88 @@
+"""Validated, durable application preferences; never a hardware activation switch."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+import ipaddress
+import json
+from pathlib import Path
+import sqlite3
+from threading import RLock
+from typing import Any, Mapping
+
+
+DEFAULT_SETTINGS = {
+    "theme": "system",
+    "z21_host": "192.168.0.111",
+    "z21_port": 21105,
+    "ui_refresh_ms": 5000,
+    "routing": {"adaptive": True, "busy_interval_ms": 1000, "idle_interval_ms": 5000},
+}
+
+
+def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Validate an entire patch before applying it; accept partial nested updates."""
+
+    if not isinstance(value, dict):
+        raise ValueError("settings must be an object")
+    unknown = set(value) - set(DEFAULT_SETTINGS)
+    if unknown:
+        raise ValueError(f"unknown settings: {', '.join(sorted(unknown))}")
+    result = deepcopy(dict(current or DEFAULT_SETTINGS))
+    routing = value.get("routing", {})
+    if not isinstance(routing, dict):
+        raise ValueError("routing must be an object")
+    if set(routing) - set(DEFAULT_SETTINGS["routing"]):
+        raise ValueError("unknown routing setting")
+    result.update({key: item for key, item in value.items() if key != "routing"})
+    result["routing"].update(routing)
+    if result["theme"] not in ("system", "light", "dark"):
+        raise ValueError("theme must be system, light, or dark")
+    try:
+        host = result["z21_host"]
+        if not isinstance(host, str):
+            raise ValueError()
+        # The Z21 LAN transport uses IPv4 UDP. DNS names and URLs are not accepted.
+        result["z21_host"] = str(ipaddress.IPv4Address(host.strip()))
+    except (ValueError, ipaddress.AddressValueError):
+        raise ValueError("z21_host must be a valid IPv4 address") from None
+    for key, low, high in (("z21_port", 1, 65535), ("ui_refresh_ms", 1000, 60000)):
+        if type(result[key]) is not int or not low <= result[key] <= high:
+            raise ValueError(f"{key} must be an integer between {low} and {high}")
+    if type(result["routing"]["adaptive"]) is not bool:
+        raise ValueError("routing.adaptive must be a boolean")
+    for key in ("busy_interval_ms", "idle_interval_ms"):
+        item = result["routing"][key]
+        if type(item) is not int or not 250 <= item <= 60000:
+            raise ValueError(f"routing.{key} must be an integer between 250 and 60000")
+    return result
+
+
+class SQLiteSettingsRepository:
+    """Keep settings alongside the train database, isolated from layout saves."""
+
+    def __init__(self, path: str | Path = ":memory:") -> None:
+        if str(path) != ":memory:":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = RLock()
+        self._connection = sqlite3.connect(str(path), check_same_thread=False)
+        with self._connection:
+            self._connection.execute("CREATE TABLE IF NOT EXISTS app_settings (id INTEGER PRIMARY KEY CHECK (id = 1), data_json TEXT NOT NULL)")
+
+    def load(self) -> dict[str, Any]:
+        with self._lock:
+            row = self._connection.execute("SELECT data_json FROM app_settings WHERE id = 1").fetchone()
+        return validate_settings(json.loads(row[0])) if row else deepcopy(DEFAULT_SETTINGS)
+
+    def save(self, settings: Mapping[str, Any]) -> dict[str, Any]:
+        validated = validate_settings(dict(settings))
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO app_settings (id, data_json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data_json = excluded.data_json",
+                (json.dumps(validated, separators=(",", ":")),),
+            )
+        return validated
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()

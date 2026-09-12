@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#09111f">
   <title>H0 Control Desk</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="minimal.css">
 </head>
 <body>
   <div class="app-shell">
@@ -21,8 +22,10 @@
       <nav class="mode-nav" aria-label="Primary workspace">
         <button class="mode-tab is-active" data-workspace="dispatch">Dispatch</button>
         <button class="mode-tab" data-workspace="layout">Layout editor</button>
+        <button class="mode-tab" data-workspace="trains">Trains</button>
         <button class="mode-tab" data-workspace="timetable">Timetable</button>
         <button class="mode-tab" data-workspace="scans">3D scans</button>
+        <button class="mode-tab" data-workspace="settings">Settings</button>
       </nav>
 
       <div class="topbar-actions">
@@ -127,7 +130,7 @@
               <p class="eyebrow">SYSTEM HEALTH</p>
               <h2>Controller services</h2>
             </div>
-            <span class="health-score" id="health-score">96%</span>
+            <span class="health-score" id="health-score">Checking</span>
           </div>
           <div class="health-list">
             <div class="health-row"><span class="health-check">✓</span><span>State controller</span><span class="health-value">Ready</span></div>
@@ -141,13 +144,13 @@
       <section class="workspace" aria-label="Controller workspace">
         <div class="workspace-heading">
           <div>
-            <p class="eyebrow">NETWORK OVERVIEW <span class="separator">/</span> DISPATCH BOARD</p>
-            <h2>West yard <span class="heading-muted">· 12 blocks online</span></h2>
+            <p class="eyebrow" id="workspace-context">YOUR RAILWAY</p>
+            <h2 id="workspace-title" tabindex="-1">Dispatch</h2>
           </div>
           <div class="workspace-tools">
-            <label class="search-box"><span>⌕</span><input id="train-search" type="search" placeholder="Find train or block…"></label>
+            <label class="search-box"><span>⌕</span><input id="train-search" type="search" aria-label="Find a train" placeholder="Find a train…"></label>
             <button class="button button-soft" id="fit-layout">Fit layout</button>
-            <button class="button button-soft" id="open-settings">Settings <span>⌄</span></button>
+            <button class="button button-soft" id="open-settings">Settings</button>
           </div>
         </div>
 
@@ -190,7 +193,7 @@
 
         <section class="panel systematic-panel is-hidden" id="systematic-panel">
           <div class="panel-heading">
-            <div><p class="eyebrow">LINEAR TRACK PLAN</p><h2>West yard systematic view</h2></div>
+            <div><p class="eyebrow">LINEAR TRACK PLAN</p><h2>Systematic track view</h2></div>
             <span class="panel-action">3 platforms · 2 routes</span>
           </div>
           <div class="systematic-view" id="systematic-view"></div>
@@ -251,6 +254,38 @@
         </div>
       </section>
     </main>
+
+    <section id="settings-page" class="is-hidden" aria-labelledby="settings-title">
+      <header class="settings-header"><p class="eyebrow">WORKSPACE PREFERENCES</p><h2 id="settings-title" tabindex="-1">Settings</h2><p class="settings-intro">Make this control desk your own. Changes are saved on your controller.</p></header>
+      <form id="app-settings-form" class="settings-form">
+        <section class="settings-section" aria-labelledby="appearance-heading">
+          <div class="settings-section-heading"><h3 id="appearance-heading">Appearance</h3><p>A quieter workspace, day or night.</p></div>
+          <div class="settings-row"><div><label for="setting-theme">Theme</label><p class="settings-help">System follows your device. Preview changes instantly.</p></div><div class="settings-control"><select id="setting-theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
+          <div class="settings-row"><div><label for="setting-ui-refresh">Status refresh</label><p class="settings-help">How often the interface checks the controller.</p></div><div class="settings-control"><input id="setting-ui-refresh" type="number" min="1" max="60" step="1" required><span>seconds</span></div></div>
+        </section>
+        <section class="settings-section" aria-labelledby="connection-heading">
+          <div class="settings-section-heading"><h3 id="connection-heading">Z21 connection</h3><p>Configure the command station on your local network.</p></div>
+          <div class="settings-row"><div><label for="setting-z21-host">IP address</label><p class="settings-help">Saving an address does not connect or enable track power.</p></div><div class="settings-control"><input id="setting-z21-host" type="text" placeholder="192.168.0.111" spellcheck="false" autocomplete="off" required></div></div>
+          <div class="settings-row"><div><label for="setting-z21-port">UDP port</label><p class="settings-help">The standard Z21 port is 21105.</p></div><div class="settings-control"><input id="setting-z21-port" type="number" min="1" max="65535" step="1" required></div></div>
+          <p class="settings-help" id="settings-connection-note">The controller starts in simulation unless real Z21 operation is explicitly enabled.</p>
+        </section>
+        <section class="settings-section" aria-labelledby="routing-heading">
+          <div class="settings-section-heading"><h3 id="routing-heading">Routing</h3><p>Keep route plans in step with your layout.</p></div>
+          <div class="settings-row"><div><label for="setting-routing-adaptive">Adaptive refresh</label><p class="settings-help">Use the active interval for moving trains or active schedules, and the idle interval when the layout is quiet.</p></div><div class="settings-control"><input id="setting-routing-adaptive" type="checkbox" role="switch"></div></div>
+          <div class="settings-row"><div><label for="setting-routing-busy">Active interval</label><p class="settings-help">Also used as the fixed interval when adaptive refresh is off.</p></div><div class="settings-control"><input id="setting-routing-busy" type="number" min="0.25" max="60" step="0.25" required><span>seconds</span></div></div>
+          <div class="settings-row"><div><label for="setting-routing-idle">Idle interval</label><p class="settings-help">Layout edits still invalidate route plans immediately.</p></div><div class="settings-control"><input id="setting-routing-idle" type="number" min="0.25" max="60" step="0.25" required><span>seconds</span></div></div>
+          <p class="settings-help" id="settings-routing-status">Route refresh recalculates plans; it does not advance simulation or send movement commands.</p>
+        </section>
+        <div class="settings-actions"><p class="settings-status" id="settings-save-status" role="status" aria-live="polite">Loading saved preferences…</p><button type="button" class="button button-soft" id="settings-discard">Discard changes</button><button type="submit" class="button button-primary" id="settings-save">Save changes</button></div>
+      </form>
+      <section class="settings-section settings-upload" aria-labelledby="photos-heading">
+        <div class="settings-section-heading"><h3 id="photos-heading">Photo scans</h3><p>Add a layout photograph to your 3D workspace. Uploaded images stay on this controller.</p></div>
+        <p class="settings-help">PNG, JPEG or WebP, up to 10 MB. A photo is displayed on a 3D surface; this does not reconstruct a full 3D model from photographs.</p>
+        <div class="settings-row"><div><label for="settings-scan-file">Layout photograph</label><input id="settings-scan-file" type="file" accept="image/png,image/jpeg,image/webp" aria-describedby="settings-upload-status"></div><button type="button" class="button button-primary" id="settings-upload-scan">Upload photo</button></div>
+        <p class="settings-status" id="settings-upload-status" role="status" aria-live="polite">Choose a photograph to add it to your library.</p>
+        <div class="settings-library" id="settings-scan-library"></div>
+      </section>
+    </section>
 
     <footer class="footer-bar">
       <span>H0 Control Desk <span class="footer-muted">· local workspace</span></span>
