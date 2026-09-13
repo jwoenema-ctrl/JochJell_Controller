@@ -7,6 +7,7 @@ from threading import RLock
 from typing import Iterable, Mapping, Sequence
 
 from .interfaces import CommandResult, TrackSnapshot, TrainMotion
+from backend.services.connection_speed import ConnectionSpeedPolicy, next_connection
 
 
 @dataclass
@@ -78,6 +79,37 @@ class SimulatedTrackSystem:
         self._powered = True
         self._tick = 0
         self._lock = RLock()
+        self._speed_policy = ConnectionSpeedPolicy()
+
+    def configure_speed_limits(self, policy: ConnectionSpeedPolicy) -> None:
+        with self._lock:
+            self._speed_policy = policy
+            self._refresh_safety_targets()
+
+    def _connection_limit(self, train: _Train) -> float:
+        return self._speed_policy.normalized_limit(train.train_id,
+            next_connection(train.block_id, train.route, train.direction))
+
+    def get_train_speed_limit(self, train_id: str) -> float | None:
+        with self._lock:
+            train = self._trains.get(train_id)
+            return self._speed_policy.limit_kmh(train_id,
+                next_connection(train.block_id, train.route, train.direction)) if train else None
+
+    def rename_block(self, old: str, new: str) -> None:
+        """Rename without resetting train position, direction or speed."""
+        with self._lock:
+            self._blocks.discard(old)
+            self._blocks.add(new)
+            for train in self._trains.values():
+                if train.block_id == old:
+                    train.block_id = new
+                train.route = tuple(new if item == old else item for item in train.route)
+            self._authorities = {key: tuple(new if item == old else item for item in route)
+                                 for key, route in self._authorities.items()}
+            for signal in self._signals.values():
+                if signal.protects_block_id == old:
+                    signal.protects_block_id = new
 
     def add_block(self, block_id: str) -> None:
         """Register a block name for occupancy validation and display."""
@@ -156,6 +188,22 @@ class SimulatedTrackSystem:
             train.commanded_speed = float(speed)
             self._refresh_safety_targets()
         return CommandResult(True, "set_train_speed", "target speed updated")
+
+    def get_train_direction(self, train_id: str) -> bool:
+        with self._lock:
+            train = self._trains.get(train_id)
+            return train.direction == 1 if train else True
+
+    def set_train_direction(self, train_id: str, *, forward: bool) -> CommandResult:
+        with self._lock:
+            train = self._trains.get(train_id)
+            if train is None:
+                return CommandResult(False, "set_direction", "unknown train")
+            if train.speed > 0 or train.target_speed > 0 or train.commanded_speed > 0:
+                return CommandResult(False, "set_direction", "stop the train before changing direction")
+            train.direction = 1 if forward else -1
+            self._refresh_safety_targets()
+            return CommandResult(True, "set_direction", "direction updated")
 
     def stop_train(self, train_id: str) -> CommandResult:
         """Set one train's target speed to zero."""
@@ -320,6 +368,7 @@ class SimulatedTrackSystem:
             boundary = self._next_safety_boundary(train, occupied_by)
             train.target_speed = self._effective_target(train, boundary)
             train.speed = self._approach_speed(train.speed, train.target_speed)
+            train.speed = min(train.speed, self._connection_limit(train))
             if train.speed <= 0:
                 continue
 
@@ -344,6 +393,12 @@ class SimulatedTrackSystem:
                 train.position -= 1.0
                 train.route_index = next_index
                 train.block_id = train.route[train.route_index]
+                # Any residual time in this tick must use the new zone's cap.
+                new_speed = min(train.speed, self._connection_limit(train))
+                if train.speed > 0:
+                    train.position *= new_speed / train.speed
+                train.speed = new_speed
+                train.target_speed = self._effective_target(train, self._next_safety_boundary(train, occupied_by))
                 if occupied_by.get(previous_block) == train.train_id:
                     del occupied_by[previous_block]
                 occupied_by[train.block_id] = train.train_id
@@ -360,12 +415,13 @@ class SimulatedTrackSystem:
     def _effective_target(self, train: _Train, boundary: _SafetyBoundary | None) -> float:
         if not self._powered:
             return 0.0
+        requested = min(train.commanded_speed, self._connection_limit(train))
         if boundary is None:
-            return train.commanded_speed
-        projected_speed = self._approach_speed(train.speed, train.commanded_speed)
+            return requested
+        projected_speed = self._approach_speed(train.speed, requested)
         if self.braking_distance(max(train.speed, projected_speed)) >= boundary.distance:
             return 0.0
-        return train.commanded_speed
+        return requested
 
     def _next_safety_boundary(
         self,

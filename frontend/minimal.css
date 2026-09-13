@@ -1,4 +1,13 @@
 /* Theme overrides. app.js owns visibility; workspace hooks only tune layout. */
+.layout-info { padding: 18px 20px; }
+.layout-info-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.layout-info-heading h3 { margin: 0; font-size: 16px; }
+.layout-info-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.layout-info-metrics > div { border-left: 2px solid var(--line); padding-left: 12px; min-width: 0; }
+.layout-info-metrics strong { display: block; font-size: 20px; margin: 5px 0; overflow-wrap: anywhere; }
+.layout-info small { color: var(--muted); font-size: 12px; }
+#layout-info-trains { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .layout-info-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 :root,
 html[data-theme="light"] {
   color-scheme: light;
@@ -82,6 +91,8 @@ body ::selection { background: var(--line-bright); color: var(--text); }
 .brand-mark { width: 34px; height: 34px; padding: 6px; background: var(--panel-soft); box-shadow: none; border-radius: 10px; }
 .brand-mark span { background: var(--text); box-shadow: none; width: 4px; }
 .brand-mark span:nth-child(3) { height: 21px; }
+.brand-mark.brand-logo { width: 48px; height: 48px; padding: 4px; background: #f5f6f8; flex: 0 0 auto; }
+.brand-logo img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .eyebrow { color: var(--faint); font-size: 11px; line-height: 1.4; letter-spacing: .055em; font-weight: 600; margin-bottom: 5px; }
 h1 { font-size: 18px; line-height: 1.3; letter-spacing: -.025em; font-weight: 600; }
 h2 { font-size: 16px; line-height: 1.4; font-weight: 600; }
@@ -261,6 +272,11 @@ body .rolling-stock-label { font-size: 12px; }
 body .empty-state { font-size: 13px; }
 
 /* Settings deliberately occupies its own page, outside the operational desk. */
+.direction-control { padding: 0 20px 18px; }
+.direction-buttons { display: flex; gap: 8px; margin-top: 8px; }
+.direction-buttons button { flex: 1; }
+.direction-buttons button[aria-pressed="true"] { background: var(--primary-bg); color: var(--primary-text); border-color: var(--primary-bg); }
+#direction-status { font-size: 11px; color: var(--muted); margin-top: 8px; }
 #settings-page { width: 100%; max-width: 900px; margin: 36px auto 56px; }
 .settings-header { margin-bottom: 34px; }
 .settings-header h2 { font-size: 34px; font-weight: 600; letter-spacing: -.04em; }
@@ -368,3 +384,18 @@ body .empty-state { font-size: 13px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
+/* Direct train controls and desktop-only connection actions. */
+.settings-native-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+#speed-command-status { flex: 1; font-size: 11px; line-height: 1.5; }
+.editor-tabs { flex-wrap: wrap; }
+.graph-train-marker { pointer-events: none; }
+.graph-train-marker circle { fill: var(--blue-bright, #3975de); stroke: var(--surface, white); stroke-width: 2; }
+.graph-train-marker text { fill: var(--text); font-size: 10px; font-weight: 600; }
+.graph-train-marker .marker-label { fill: var(--panel, white); stroke: var(--blue-bright, #3975de); stroke-width: 1; }
+.graph-train-marker .marker-leader { stroke: var(--blue-bright, #3975de); stroke-width: 1.5; fill: none; }
+.graph-motion-note { font-size: 11px; color: var(--faint); padding: 0 18px 10px; }
+.connection-limit-editor { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--line); }
+.connection-limit-editor > div { flex: 1 1 200px; }
+.connection-limit-editor label { display: grid; gap: 5px; font-size: 11px; }
+.connection-limit-editor select, .connection-limit-editor input { max-width: 220px; min-height: 32px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); padding: 5px 8px; }
+#connection-limit-status { flex-basis: 100%; }

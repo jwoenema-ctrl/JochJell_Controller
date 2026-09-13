@@ -78,6 +78,12 @@ class TrackSystem(Protocol):
     def set_train_speed(self, train_id: str, speed: float) -> CommandResult:
         """Set a train's normalized target speed."""
 
+    def get_train_direction(self, train_id: str) -> bool:
+        """Return the controller's last known decoder direction (True is forward)."""
+
+    def set_train_direction(self, train_id: str, *, forward: bool) -> CommandResult:
+        """Set decoder direction while stationary, without starting movement."""
+
     def stop_train(self, train_id: str) -> CommandResult:
         """Request a normal stop for one train."""
 

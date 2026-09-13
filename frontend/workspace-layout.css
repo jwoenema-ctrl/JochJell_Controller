@@ -1,0 +1,26 @@
+/* Load after minimal.css. Nodes are rearranged in DOM order for keyboard users. */
+.workspace-layout-enabled > .workspace { display: flex; flex-direction: column; gap: 20px; }
+.workspace-layout-enabled > .workspace > .lower-grid,
+.workspace-layout-enabled > .workspace > .bottom-grid { display: none !important; }
+.workspace-layout-enabled > .workspace > .panel { margin-top: 0; margin-bottom: 0; flex-shrink: 0; }
+.workspace-layout-enabled > .workspace > .workspace-heading { margin-bottom: 0; }
+body[data-workspace="dispatch"] .workspace-layout-enabled[data-control-side="right"],
+body[data-workspace="trains"] .workspace-layout-enabled[data-control-side="right"] { grid-template-columns: minmax(0, 1fr) 278px; }
+.workspace-layout-settings h4 { font-size: 14px; margin: 20px 0 10px; }
+.workspace-panel-order { list-style: none; padding: 0; margin: 0; }
+.workspace-panel-order li { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.workspace-panel-order li > span { flex: 1; min-width: 0; font-size: 14px; }
+.workspace-panel-order button { min-height: 40px; }
+.workspace-layout-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 24px 0 16px; }
+.workspace-layout-settings [hidden] { display: none !important; }
+.workspace-layout-settings button:focus-visible,
+.workspace-layout-settings select:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+.workspace-layout-settings button:disabled { opacity: .45; cursor: default; }
+@media (max-width: 1100px) {
+  body[data-workspace="dispatch"] .workspace-layout-enabled[data-control-side],
+  body[data-workspace="trains"] .workspace-layout-enabled[data-control-side] { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 480px) {
+  .workspace-panel-order li { flex-wrap: wrap; }
+  .workspace-panel-order li > span { flex-basis: 100%; }
+}

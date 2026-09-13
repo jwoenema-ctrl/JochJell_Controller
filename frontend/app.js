@@ -88,7 +88,7 @@
     controlMode: 'manual',
     workspace: 'dispatch',
     layoutView: 'graph',
-    editorTab: 'settings',
+    editorTab: 'datasheet',
     simRate: 1,
     zoom: 1,
     filter: '',
@@ -100,11 +100,60 @@
     selectedScanId: 'sample-yard',
     scanObjectUrls: {},
     layoutEditing: false,
-    nextBlockNumber: 13,
     layoutDrag: null,
     nextConsistItemNumber: 1,
     layoutAssetEditing: null
   };
+
+  // A dial draft is separate from measured speed: requesting zero is not proof
+  // that a locomotive has stopped. Only acknowledged state unlocks direction.
+  let speedTimer = null;
+  let speedEpoch = 0;
+  let speedDraft = null;
+  let speedInFlight = Promise.resolve();
+  const speedChoices = new Map();
+  const motionSamples = new Map();
+  let workspaceLayout = null;
+
+  function cancelSpeedDraft() {
+    clearTimeout(speedTimer);
+    speedTimer = null;
+    speedDraft = null;
+    speedEpoch += 1;
+  }
+
+  function queueSpeed(value, immediate = false) {
+    const train = selectedTrain();
+    if (!train || app.source !== 'api' || app.state.track_power === false || app.nativeModePending || app.powerPending || app.controlPending) return;
+    const speed = Math.max(0, Math.min(Number(train.maxSpeed || 140), Number(value) || 0));
+    speedChoices.set(train.id, speed);
+    speedDraft = { trainId: train.id, mode: trainControlMode(train), speed, epoch: speedEpoch };
+    $('#speed-readout').textContent = String(Math.round(speed));
+    clearTimeout(speedTimer);
+    if (immediate) flushSpeedDraft(); else speedTimer = setTimeout(flushSpeedDraft, 250);
+  }
+
+  function flushSpeedDraft() {
+    clearTimeout(speedTimer);
+    const draft = speedDraft;
+    speedDraft = null;
+    if (!draft) return;
+    speedInFlight = speedInFlight.then(async () => {
+      const train = selectedTrain();
+      if (draft.epoch !== speedEpoch || !train || train.id !== draft.trainId || trainControlMode(train) !== draft.mode || app.state.track_power === false || app.source !== 'api') return;
+      app.speedSending = true;
+      renderSidebar();
+      try {
+        const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'set_speed', train_id: draft.trainId, speed_kmh: draft.speed }) });
+        if (draft.epoch === speedEpoch) { mergePayload(response); renderAll(); }
+        $('#speed-command-status').textContent = `Requested ${Math.round(draft.speed)} km/h`;
+      } catch (error) {
+        cancelSpeedDraft();
+        $('#speed-command-status').textContent = 'Speed not confirmed';
+        showToast(error.message, 'warning');
+      } finally { app.speedSending = false; renderSidebar(); }
+    });
+  }
 
   const DEFAULT_SETTINGS = { theme: 'system', z21_host: '192.168.0.111', z21_port: 21105, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
   app.settings = clone(DEFAULT_SETTINGS);
@@ -222,6 +271,7 @@
     const value = unwrap(payload);
     if (!value || typeof value !== 'object') return;
     if (value.layout) app.state.layout = { ...app.state.layout, ...value.layout };
+    if (value.layout_info) app.state.layout_info = value.layout_info;
     if (Array.isArray(value.blocks)) app.state.layout.blocks = value.blocks;
     if (Array.isArray(value.edges)) app.state.layout.edges = value.edges;
     if (Array.isArray(value.turnouts)) app.state.layout.turnouts = value.turnouts;
@@ -230,12 +280,30 @@
     if (Array.isArray(value.turntables)) app.state.layout.turntables = value.turntables;
     if (Array.isArray(value.stations)) app.state.layout.stations = value.stations;
     if (Array.isArray(value.platforms)) app.state.layout.platforms = value.platforms;
-    if (Array.isArray(value.trains)) app.state.trains = value.trains;
+    if (Array.isArray(value.trains)) {
+      const previous = selectedTrain();
+      const next = previous && value.trains.find((train) => train.id === previous.id);
+      if (previous && (!next || trainControlMode(previous) !== trainControlMode(next))) {
+        cancelSpeedDraft();
+        speedChoices.delete(previous.id);
+      }
+      app.state.trains = value.trains;
+      const now = performance.now();
+      value.trains.forEach((train) => {
+        const motion = train.motion;
+        if (!motion) { motionSamples.delete(train.id); return; }
+        const signature = JSON.stringify(motion);
+        if (motionSamples.get(train.id)?.signature !== signature) motionSamples.set(train.id, { signature, receivedAt: now });
+      });
+    }
     if (Array.isArray(value.trainDatabase)) mergeTrainDatabaseRecords(value.trainDatabase);
     if (Array.isArray(value.trains) && value.trains.length && value.trains[0] && value.trains[0].train_id) mergeTrainDatabaseRecords(value.trains);
     if (Array.isArray(value.schedules)) app.state.schedules = value.schedules;
     if (Array.isArray(value.scans)) app.state.scans = value.scans;
-    if (typeof value.track_power === 'boolean') app.state.track_power = value.track_power;
+    if (typeof value.track_power === 'boolean') {
+      if (!value.track_power) { cancelSpeedDraft(); speedChoices.clear(); }
+      app.state.track_power = value.track_power;
+    }
     if (value.feedback) app.state.feedback = { ...app.state.feedback, ...value.feedback };
     if (value.simulation) app.state.simulation = { ...app.state.simulation, ...value.simulation };
     if (value.connection) app.state.connection = { ...app.state.connection, ...value.connection };
@@ -343,9 +411,11 @@
       renderTrainList();
       renderSchedules();
       updateSync('Controller state refreshed', 'success');
+    } else {
+      app.state.layout_info = null;
     }
     if (results[3].status === 'fulfilled') showSettingsRuntime(results[3].value.runtime);
-    renderConnection(); renderGraph(); renderSystematicView(); renderStats();
+    renderConnection(); renderSidebar(); renderGraph(); renderSystematicView(); renderStats();
   }
 
   function applyTheme(theme) {
@@ -394,6 +464,7 @@
       const response = await fetchJson('/api/settings');
       app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
       app.settingsLoaded = true;
+      workspaceLayout?.receiveSettings(response.settings);
       if (!app.settingsDirty) {
         renderSettings(); applyTheme(app.settings.theme);
         $('#settings-save-status').textContent = 'Preferences are up to date.';
@@ -420,6 +491,7 @@
     try {
       const response = await fetchJson('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
       app.settings = response.settings;
+      workspaceLayout?.receiveSettings(response.settings);
       app.settingsLoaded = true; app.settingsDirty = false;
       applyTheme(app.settings.theme); renderSettings(); schedulePolling(); showSettingsRuntime(response.runtime);
       $('#settings-save-status').textContent = 'Saved on this controller.';
@@ -701,18 +773,32 @@
   function renderSidebar() {
     const train = selectedTrain();
     if (!train) return;
+    const direction = String(train.direction || '').toLowerCase();
+    const directionLocked = app.directionPending || app.speedSending || (speedDraft && speedDraft.speed > 0) || Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 || Number(train.motion && train.motion.requested_speed) > 0 || trainControlMode(train) === 'automatic' || app.source !== 'api';
+    ['forward', 'reverse'].forEach((value) => {
+      const button = $(`#direction-${value}`);
+      button.setAttribute('aria-pressed', String(direction === value));
+      button.disabled = Boolean(directionLocked);
+    });
+    $('#direction-status').textContent = app.directionPending ? 'Sending direction…' : app.speedSending ? 'Waiting for speed confirmation…' : trainControlMode(train) === 'automatic' ? 'Switch this train to manual to change direction.' : Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 ? 'Stop and wait for the train to halt before reversing.' : 'Choose decoder direction. Speed stays at zero.';
     $('#selected-train-name').textContent = train.name || `Train ${train.number || ''}`;
     $('#selected-train-badge').textContent = train.number || '—';
     $('#selected-train-origin').textContent = train.origin || 'Origin';
     $('#selected-train-destination').textContent = train.destination || 'Destination';
-    $('#speed-readout').textContent = Math.round(Number(train.speed) || 0);
-    $('#speed-slider').value = Math.round(Number(train.speed) || 0);
+    const dialSpeed = speedChoices.has(train.id) ? speedChoices.get(train.id) : Number(train.speed) || 0;
+    $('#speed-readout').textContent = Math.round(dialSpeed);
+    $('#speed-slider').max = Number(train.maxSpeed || 140);
+    $('#speed-slider').value = Math.round(dialSpeed);
+    $('#speed-slider').disabled = app.source !== 'api' || app.state.track_power === false || app.nativeModePending || app.powerPending || app.controlPending;
+    $('#speed-command-status').textContent = `${train.actual_speed_kmh == null ? 'Commanded' : 'Actual'} ${Math.round(Number(train.actual_speed_kmh ?? train.speed) || 0)} km/h${train.speed_limit_kmh == null ? '' : ` · limit ${train.speed_limit_kmh} km/h`} · auto-applies`;
     $('#simulation-clock').textContent = app.state.simulation.clock || '00:00:00';
     $('#simulation-date').textContent = app.state.simulation.date || 'Simulation date';
-    $('#simulation-rate').textContent = app.simRate === 1 ? 'Real time' : `${app.simRate}× accelerated`;
+    $('#simulation-rate').textContent = app.simRate === 1 ? 'Real time' : `Real time · ${app.simRate}× step`;
     $('#simulation-state').textContent = app.state.simulation.running ? 'RUNNING' : 'PAUSED';
     $('#simulation-toggle').textContent = app.state.simulation.running ? 'Pause' : 'Resume';
-    $('#track-power-toggle').textContent = app.state.track_power === false ? 'Power on' : 'Power off';
+    $('#track-power-toggle').textContent = app.powerPending ? 'Changing power…' : app.state.track_power === false ? 'Power on' : 'Power off';
+    $('#track-power-toggle').disabled = Boolean(app.powerPending);
+    $('#layout-power-toggle').onclick = toggleTrackPower;
     $('#simulation-rate-select').value = String(app.simRate);
     $$('.control-mode').forEach((button) => button.classList.toggle('is-active', button.dataset.controlMode === app.controlMode));
     $$('.mode-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.workspace === app.workspace));
@@ -816,7 +902,19 @@
       const x = Number(turntable.x || 0); const y = Number(turntable.y || 0);
       return `<g class="turntable-node" data-turntable-id="${escapeHtml(turntable.id)}" tabindex="0" role="button" aria-label="Align turntable ${escapeHtml(turntable.name || turntable.id)}"><circle cx="${x}" cy="${y}" r="18"></circle><line x1="${x - 13}" y1="${y}" x2="${x + 13}" y2="${y}"></line><text class="meta" x="${x + 23}" y="${y + 3}">${escapeHtml(turntable.name || turntable.id)}</text></g>`;
     }).join('');
-    $('#layout-svg').innerHTML = `<g class="graph-layer" style="transform-origin: 490px 175px;">${edgeMarkup}${nodeMarkup}${waypointMarkup}${turntableMarkup}${turnoutMarkup}${signalMarkup}</g>`;
+    const markers = app.state.trains.map((train) => {
+      const motion = train.motion || {};
+      const from = blockMap[String(motion.from_block_id || motion.block_id || train.position || '').toLowerCase()];
+      if (!from) return '';
+      const to = blockMap[String(motion.to_block_id || '').toLowerCase()];
+      const point = blockCenter(from);
+      const label = String(train.name || train.id);
+      const labelWidth = Math.min(210, Math.max(52, label.length * 6 + 16));
+      return `<g class="graph-train-marker" data-motion-train-id="${escapeHtml(train.id)}" data-position-source="${escapeHtml(motion.source || 'unknown')}" transform="translate(${point.x} ${point.y})"><path class="marker-leader" d="M 0 -8 L 0 -37 L 12 -37"></path><circle r="7"></circle><rect class="marker-label" x="9" y="-57" width="${labelWidth}" height="22" rx="7"></rect><text x="17" y="-42">${escapeHtml(label.length > 31 ? label.slice(0, 30) + '…' : label)}</text><title>${escapeHtml(label)} · ${motion.source === 'simulation' ? 'Simulation position; interpolation between updates' : 'Reported block only; exact real position unknown'}</title></g>${to ? `<path class="motion-path" data-motion-path-id="${escapeHtml(train.id)}" d="${edgePath(from, to)}" fill="none" stroke="none"></path>` : ''}`;
+    }).join('');
+    $('#layout-svg').innerHTML = `<g class="graph-layer" style="transform-origin: 490px 175px;">${edgeMarkup}${nodeMarkup}${waypointMarkup}${turntableMarkup}${turnoutMarkup}${signalMarkup}${markers}</g>`;
+    $('#graph-motion-note').textContent = app.state.connection.simulated ? 'Simulation positions · estimated interpolation between updates, capped at 2 seconds. Block boundaries wait for controller confirmation.' : 'Real trains: reported block only. Exact within-block positions are unknown; no movement is invented.';
+    updateMotionMarkers(performance.now());
     if (!app.layoutDrag) fitGraphViewport();
     $$('[data-block-id]', $('#layout-svg')).forEach((node) => {
       node.addEventListener('click', () => selectBlock(node.dataset.blockId));
@@ -826,6 +924,33 @@
     $$('[data-turnout-id]', $('#layout-svg')).forEach((node) => node.addEventListener('click', () => toggleTurnout(node.dataset.turnoutId)));
     $$('[data-signal-id]', $('#layout-svg')).forEach((node) => node.addEventListener('click', () => toggleSignal(node.dataset.signalId)));
     $$('[data-turntable-id]', $('#layout-svg')).forEach((node) => node.addEventListener('click', () => alignTurntable(node.dataset.turntableId)));
+  }
+
+  function updateMotionMarkers(now) {
+    const markers = $$('.graph-train-marker', $('#layout-svg'));
+    markers.forEach((marker) => {
+      const train = app.state.trains.find((item) => item.id === marker.dataset.motionTrainId);
+      const motion = train && train.motion;
+      if (!motion || motion.source !== 'simulation' || motion.position == null || !Number.isFinite(Number(motion.position))) return;
+      const path = $$('.motion-path', $('#layout-svg')).find((item) => item.dataset.motionPathId === train.id);
+      if (!path) return;
+      const sample = motionSamples.get(train.id);
+      const age = sample ? Math.max(0, (now - sample.receivedAt) / 1000) : 0;
+      const elapsed = app.state.simulation.running && app.state.track_power && app.source === 'api' ? Math.min(age, 2) : 0;
+      const position = Math.max(0, Math.min(1, Number(motion.position)));
+      // Never cross a block boundary on an estimate. Repeated stale samples do
+      // not reset the clock, and hardware never enters this interpolation path.
+      const progress = Math.max(position, Math.min(.98, position + Math.max(0, Number(motion.speed) || 0) * elapsed));
+      const point = path.getPointAtLength(path.getTotalLength() * progress);
+      marker.setAttribute('transform', `translate(${point.x} ${point.y})`);
+      marker.dataset.progress = String(progress);
+      marker.dataset.estimated = String(elapsed > 0 && Number(motion.speed) > 0);
+    });
+  }
+
+  function animateTrainMarkers(now) {
+    if (!document.hidden && ['dispatch', 'layout'].includes(app.workspace)) updateMotionMarkers(now);
+    window.requestAnimationFrame(animateTrainMarkers);
   }
 
   function renderSystematicView() {
@@ -1462,7 +1587,24 @@
     $('#block-count').textContent = blocks.length;
     $('#turnout-count').textContent = (app.state.layout.turnouts || []).length;
     $('#free-count').textContent = blocks.filter((block) => block.status === 'free').length;
-    $('#route-count').textContent = blocks.filter((block) => block.status === 'route').length;
+    const info = app.state.layout_info;
+    $('#route-count').textContent = info ? info.active_routes : '—';
+    const power = info && info.power || {};
+    const metrics = [
+      ['Track power', !info ? 'Unknown' : power.available ? (power.track_power ? 'On' : 'Off') : (app.state.track_power ? 'On' : 'Off'), power.available ? 'Z21 reported' : app.state.connection.simulated ? 'Simulation' : 'Commanded state'],
+      ['Consumption', power.available ? power.estimated_watts.toFixed(1) + ' W' : 'Unavailable', power.available ? 'Estimated track load' : power.reason || 'No readings'],
+      ['Current / voltage', power.available ? power.current_a.toFixed(2) + ' A / ' + power.voltage_v.toFixed(1) + ' V' : '—', power.short_circuit ? 'Short circuit detected' : 'Z21 measurements'],
+      ['Trains on track', info ? info.train_count : '—', 'Assigned positions'],
+      ['Blocks occupied', info ? info.occupied_blocks + ' / ' + info.block_count : '—', 'Occupied / total'],
+      ['Manual trains', info ? info.manual_trains : '—', 'Manual control'],
+      ['Automatic trains', info ? info.automatic_trains : '—', 'Automatic control'],
+      ['Route operations', info ? info.active_routes : '—', 'Executing or waiting for clearance']
+    ];
+    $('#layout-info-metrics').innerHTML = metrics.map(([label, value, note]) => '<div><small>' + escapeHtml(label) + '</small><strong>' + escapeHtml(String(value)) + '</strong><small>' + escapeHtml(note) + '</small></div>').join('');
+    $('#layout-info-trains').textContent = info ? (info.trains.length ? info.trains.map(t => t.name + ' · ' + t.block_id + ' (' + t.mode + ')').join('  |  ') : 'No trains assigned to the track.') : 'Waiting for controller information.';
+    $('#layout-info-note').textContent = (info ? info.stopped_trains + ' stopped · ' : '') + 'Positions are controller assignments, with occupancy feedback where available. Power readings are not mains energy usage.';
+    $('#layout-power-toggle').textContent = app.powerPending ? 'Changing power…' : app.state.track_power ? 'Power off' : 'Power on';
+    $('#layout-power-toggle').disabled = Boolean(app.powerPending);
     const block = selectedBlock();
     if (block) {
       const train = block.trainId ? app.state.trains.find((item) => item.id === block.trainId) : null;
@@ -1482,6 +1624,41 @@
     to.innerHTML = options;
     if (blocks.some((block) => block.id === previousFrom)) from.value = previousFrom;
     if (blocks.some((block) => block.id === previousTo)) to.value = previousTo;
+    const trainSelect = $('#connection-limit-train');
+    const previousTrain = trainSelect.value;
+    trainSelect.innerHTML = '<option value="">All trains (default)</option>' + app.state.trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || train.id)}</option>`).join('');
+    trainSelect.value = previousTrain;
+    if (!app.connectionLimitDirty) loadConnectionLimit();
+  }
+
+  function loadConnectionLimit() {
+    app.connectionLimitDirty = false;
+    const from = $('#connection-from').value.toLowerCase();
+    const to = $('#connection-to').value.toLowerCase();
+    const trainId = $('#connection-limit-train').value;
+    const connection = (app.state.layout.connections || []).find((item) => String(item.from).toLowerCase() === from && String(item.to).toLowerCase() === to);
+    const limit = connection && (trainId ? (connection.train_speed_limits || {})[trainId] : connection.speed_limit_kmh);
+    $('#connection-limit-speed').value = limit == null ? '' : String(limit);
+    $('#connection-limit-speed').placeholder = trainId ? 'Inherit default' : 'No default limit';
+    $('#save-connection-limit').disabled = !connection;
+    $('#connection-limit-status').textContent = connection ? `${from.toUpperCase()} → ${to.toUpperCase()} · ${trainId ? 'Train override; blank inherits default' : 'All trains; blank removes default'}${connection.speed_limit_kmh == null ? '' : ` · default ${connection.speed_limit_kmh} km/h`}` : 'Select an existing directed connection before editing its limit.';
+  }
+
+  async function saveConnectionLimit() {
+    const input = $('#connection-limit-speed');
+    if (!input.checkValidity()) { input.reportValidity(); return; }
+    const value = input.value.trim();
+    const command = { type: 'set_connection_speed_limit', from: $('#connection-from').value, to: $('#connection-to').value, speed_limit_kmh: value === '' ? null : Number(value) };
+    const trainId = $('#connection-limit-train').value;
+    if (trainId) command.train_id = trainId;
+    $('#save-connection-limit').disabled = true;
+    try {
+      const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(command) });
+      app.connectionLimitDirty = false;
+      mergePayload(response); renderAll();
+      $('#connection-limit-status').textContent = 'Limit applied. Save layout to keep it after restart.';
+    } catch (error) { $('#connection-limit-status').textContent = `Not saved: ${error.message}`; }
+    finally { $('#save-connection-limit').disabled = false; }
   }
 
   function editConnection(action) {
@@ -1503,10 +1680,12 @@
     $('.sidebar').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     $('#systematic-panel').classList.toggle('is-hidden', !trackPage || app.layoutView !== 'systematic');
     $('#layout-panel').classList.toggle('is-hidden', !trackPage);
+    $('#layout-info-panel').classList.toggle('is-hidden', !trackPage);
     $('#layout-panel').classList.toggle('systematic-only', app.layoutView === 'systematic');
     $('#map-stage').classList.toggle('is-hidden', app.layoutView === 'systematic');
     $('.map-summary').classList.toggle('is-hidden', app.layoutView === 'systematic');
     $('#graph-editor-tools').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
+    $('#connection-limit-editor').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
     $$('.map-legend .editor-action').forEach((button) => button.classList.toggle('is-hidden', page !== 'layout'));
     $('#scan-panel').classList.toggle('is-hidden', page !== 'scans');
     $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
@@ -1525,6 +1704,7 @@
       if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
     });
     $$('.toolbar-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.layoutView === app.layoutView));
+    workspaceLayout?.setPage(app.workspace);
   }
 
   function navigateWorkspace(page) {
@@ -1542,6 +1722,7 @@
 
   function selectTrain(id) {
     if (!app.state.trains.some((train) => train.id === id)) return;
+    cancelSpeedDraft();
     app.selectedTrainId = id;
     app.consistDraft = null;
     renderSidebar(); renderTrainList(); renderEditor(); renderAssembler();
@@ -1552,7 +1733,8 @@
   function selectBlock(id) {
     if (!app.state.layout.blocks.some((block) => block.id === id)) return;
     app.selectedBlockId = id;
-    renderGraph(); renderSystematicView(); renderStats();
+    $$('.block-node', $('#layout-svg')).forEach((node) => node.classList.toggle('is-selected', node.dataset.blockId === id));
+    renderSystematicView(); renderStats();
     const block = selectedBlock();
     showToast(`${block.name || block.id}: ${block.status || 'free'} block`, 'success');
   }
@@ -1578,23 +1760,21 @@
     event.preventDefault();
     const block = app.state.layout.blocks.find((item) => item.id === app.editingBlockId);
     if (!block) return;
-    block.name = $('#block-name').value.trim() || block.id;
-    block.length_mm = Math.max(0, Number($('#block-length').value) || 0);
-    block.station = $('#block-station').value.trim();
-    renderAll();
-    $('#block-editor').close();
-    await sendCommand({ type: 'update_block', block_id: block.id, block: { name: block.name, length_mm: block.length_mm, station: block.station } });
-    app.editingBlockId = null;
-    showToast(`${block.name} updated`, 'success');
+    try {
+      const id = $('#block-id').value.trim().toUpperCase();
+      const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'update_block', block_id: block.id, block: { id, name: $('#block-name').value.trim() || id, length_mm: Math.max(0, Number($('#block-length').value) || 0), station: $('#block-station').value.trim() } }) });
+      mergePayload(response);
+      app.selectedBlockId = id.toLowerCase();
+      app.editingBlockId = null;
+      $('#block-editor').close();
+      renderAll();
+      showToast(id + ' updated. Save layout to keep your changes.', 'success');
+    } catch (error) { showToast(error.message, 'warning'); }
   }
 
-  function addLayoutBlock() {
+  async function addLayoutBlock() {
     const index = app.state.layout.blocks.length;
-    const number = app.nextBlockNumber++;
-    const id = `b${String(number).padStart(2, '0')}`;
     const block = {
-      id,
-      name: `NEW-${number}`,
       x: 62 + (index % 5) * 160,
       y: 224 + (Math.floor(index / 5) % 2) * 78,
       width: 126,
@@ -1603,11 +1783,15 @@
       station: 'New section'
     };
     app.layoutEditing = true;
-    app.state.layout.blocks.push(block);
-    app.selectedBlockId = id;
-    renderAll();
-    sendCommand({ type: 'add_block', block });
-    showToast(`${block.name} added to the layout editor`, 'success');
+    try {
+      const previousIds = new Set(app.state.layout.blocks.map(item => item.id));
+      const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'add_block', block }) });
+      mergePayload(response);
+      const added = app.state.layout.blocks.find(item => !previousIds.has(item.id));
+      if (added) app.selectedBlockId = added.id;
+      renderAll();
+      showToast('Block added. Save layout to keep your changes.', 'success');
+    } catch (error) { showToast(error.message, 'warning'); }
   }
 
   function svgPoint(event) {
@@ -1669,8 +1853,9 @@
   function setTrainMode(mode) {
     const train = selectedTrain();
     if (!train || !TRAIN_CONTROL_MODES.some((option) => option.value === mode)) return;
+    cancelSpeedDraft();
+    speedChoices.delete(train.id);
     train.mode = mode;
-    if (mode === 'stopped') train.speed = 0;
     train.status = trainStatusForMode(train, mode);
     renderSidebar();
     renderTrainList();
@@ -1679,6 +1864,18 @@
   }
 
   async function sendCommand(command) {
+    const changesControl = ['set_train_mode', 'set_mode', 'track_power', 'emergency_stop', 'stop_all'].includes(command.type);
+    let releaseControl = null;
+    if (changesControl) {
+      app.controlPending = (app.controlPending || 0) + 1;
+      cancelSpeedDraft();
+      speedChoices.clear();
+      renderSidebar();
+      const previous = speedInFlight;
+      const gate = new Promise((resolve) => { releaseControl = resolve; });
+      speedInFlight = previous.then(() => gate);
+      await previous;
+    }
     try {
       const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(command) });
       mergePayload(response);
@@ -1690,20 +1887,49 @@
       showToast('Controller command accepted', 'success');
       return response;
     } catch (error) {
-      app.state.connection = { connected: false, simulated: true, label: 'Simulation fallback', detail: 'Command staged locally' };
-      updateSync('Controller unavailable · command staged locally', 'warning');
-      renderConnection();
-      showToast('Controller unavailable; change kept in local simulation.', 'warning');
+      updateSync('Command not accepted by controller', 'warning');
+      showToast(error.message, 'warning');
       return null;
-    }
+    } finally { if (changesControl) { app.controlPending -= 1; releaseControl(); renderSidebar(); } }
   }
 
   function setSpeed(speed) {
     const train = selectedTrain();
     if (!train) return;
-    train.speed = Math.max(0, Math.min(Number(train.maxSpeed || 140), Number(speed) || 0));
-    renderSidebar(); renderTrainList();
-    sendCommand({ type: 'set_speed', train_id: train.id, speed_kmh: train.speed });
+    cancelSpeedDraft();
+    if (Number(speed) === 0) {
+      // Stop remains actionable while an earlier mode/speed request is pending.
+      // It targets the explicitly selected train, even if selection then changes.
+      speedChoices.set(train.id, 0);
+      speedInFlight = speedInFlight.then(async () => {
+        app.speedSending = true; renderSidebar();
+        try {
+          const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'set_speed', train_id: train.id, speed_kmh: 0 }) });
+          mergePayload(response); renderAll();
+        } catch (error) { showToast(`Stop not confirmed: ${error.message}`, 'warning'); }
+        finally { app.speedSending = false; renderSidebar(); }
+      });
+      renderSidebar();
+      return;
+    }
+    queueSpeed(speed, true);
+    renderSidebar();
+  }
+
+  async function setDirection(direction) {
+    const train = selectedTrain();
+    if (!train || app.directionPending || app.controlPending || Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 || trainControlMode(train) === 'automatic' || app.source !== 'api') return;
+    cancelSpeedDraft();
+    const epoch = speedEpoch;
+    app.directionPending = true; renderSidebar();
+    try {
+      await speedInFlight;
+      if (epoch !== speedEpoch || selectedTrain()?.id !== train.id) return;
+      const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'set_direction', train_id: train.id, direction }) });
+      mergePayload(response); renderAll();
+      showToast(`Direction set to ${direction}. Speed remains zero.`, 'success');
+    } catch (error) { showToast(error.message, 'warning'); }
+    finally { app.directionPending = false; renderSidebar(); }
   }
 
   function localTick() {
@@ -1785,15 +2011,13 @@
   }
 
   async function toggleTrackPower() {
+    if (app.powerPending) return;
+    cancelSpeedDraft();
     const enabled = app.state.track_power === false;
-    const previous = app.state.track_power;
-    app.state.track_power = enabled;
-    renderSidebar();
-    const response = await sendCommand({ type: 'track_power', enabled });
-    if (!response) {
-      app.state.track_power = previous;
-      renderSidebar();
-    }
+    app.powerPending = true;
+    renderSidebar(); renderStats();
+    try { await sendCommand({ type: 'track_power', enabled }); }
+    finally { app.powerPending = false; renderSidebar(); renderStats(); }
   }
 
   async function toggleSignal(id) {
@@ -1818,6 +2042,45 @@
   }
 
   function setupEvents() {
+    const updateNativeControls = () => {
+      const available = Boolean(window.pywebview && window.pywebview.api && typeof window.pywebview.api.switch_mode === 'function');
+      $('#settings-connect-z21').disabled = !available || Boolean(app.nativeModePending);
+      $('#settings-use-simulation').disabled = !available || Boolean(app.nativeModePending);
+      if (available && !app.nativeModePending) $('#settings-native-status').textContent = 'Desktop connection controls ready. Save settings before connecting.';
+    };
+    const switchNativeMode = async (mode) => {
+      if (app.nativeModePending || !window.pywebview || !window.pywebview.api) return;
+      if (app.settingsDirty) { $('#settings-native-status').textContent = 'Save or discard your settings changes before switching mode.'; return; }
+      cancelSpeedDraft();
+      speedChoices.clear();
+      app.nativeModePending = true;
+      updateNativeControls(); renderSidebar();
+      $('#settings-native-status').textContent = 'Waiting for desktop confirmation…';
+      try {
+        await speedInFlight;
+        const result = await window.pywebview.api.switch_mode(mode);
+        if (result && (result.error || result.ok === false || result.accepted === false)) throw new Error(result.error || result.message || (result.cancelled ? 'Connection change cancelled.' : 'Connection mode was not changed.'));
+        $('#settings-native-status').textContent = result && (result.message || result.status) || 'Connection mode change requested.';
+      } catch (error) { $('#settings-native-status').textContent = error.message || 'Connection change failed.'; }
+      finally {
+        app.nativeModePending = false;
+        $('#settings-connect-z21').disabled = false;
+        $('#settings-use-simulation').disabled = false;
+        renderSidebar();
+      }
+    };
+    updateNativeControls();
+    window.addEventListener('pywebviewready', updateNativeControls);
+    $('#settings-connect-z21').addEventListener('click', () => switchNativeMode('z21'));
+    $('#settings-use-simulation').addEventListener('click', () => switchNativeMode('simulation'));
+    $('#layout-svg').addEventListener('dblclick', (event) => {
+      const node = event.target.closest('.block-node');
+      if (!node) return;
+      event.preventDefault();
+      app.layoutDrag = null;
+      app.selectedBlockId = node.dataset.blockId;
+      openBlockEditor();
+    });
     $$('.mode-tab').forEach((button) => button.addEventListener('click', () => navigateWorkspace(button.dataset.workspace)));
     $('#app-settings-form').addEventListener('submit', saveAppSettings);
     $('#app-settings-form').addEventListener('input', () => { app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; });
@@ -1872,6 +2135,9 @@
     $('#close-block-editor').addEventListener('click', () => { app.editingBlockId = null; $('#block-editor').close(); });
     $('#connect-blocks').addEventListener('click', () => editConnection('connect_blocks'));
     $('#disconnect-blocks').addEventListener('click', () => editConnection('disconnect_blocks'));
+    ['#connection-from', '#connection-to', '#connection-limit-train'].forEach((selector) => $(selector).addEventListener('change', loadConnectionLimit));
+    $('#connection-limit-speed').addEventListener('input', () => { app.connectionLimitDirty = true; });
+    $('#save-connection-limit').addEventListener('click', saveConnectionLimit);
     $('#save-layout').addEventListener('click', saveLayout);
     $('#load-layout').addEventListener('click', loadSavedLayout);
     $('#layout-svg').addEventListener('pointermove', moveBlockDrag);
@@ -1890,13 +2156,18 @@
       renderGraph(); updateWorkspaceVisibility();
     }));
     $$('.editor-tab').forEach((button) => button.addEventListener('click', () => { app.editorTab = button.dataset.editorTab; renderEditor(); }));
-    $('#speed-slider').addEventListener('input', (event) => { $('#speed-readout').textContent = event.target.value; });
-    $('#apply-speed').addEventListener('click', () => setSpeed($('#speed-slider').value));
+    $('#speed-slider').addEventListener('input', (event) => queueSpeed(event.target.value));
+    $('#speed-slider').addEventListener('change', flushSpeedDraft);
+    $('#speed-slider').addEventListener('pointerup', flushSpeedDraft);
+    $('#speed-slider').addEventListener('pointercancel', cancelSpeedDraft);
+    window.addEventListener('pagehide', cancelSpeedDraft);
     $('#stop-train').addEventListener('click', () => setSpeed(0));
+    $('#direction-forward').addEventListener('click', () => setDirection('forward'));
+    $('#direction-reverse').addEventListener('click', () => setDirection('reverse'));
     $('#simulation-toggle').addEventListener('click', () => { app.state.simulation.running = !app.state.simulation.running; renderSidebar(); sendCommand({ type: app.state.simulation.running ? 'resume_simulation' : 'pause_simulation' }); });
     $('#simulation-tick').addEventListener('click', tickSimulation);
     $('#track-power-toggle').addEventListener('click', toggleTrackPower);
-    $('#simulation-rate-select').addEventListener('change', (event) => { app.simRate = Number(event.target.value) || 1; renderSidebar(); showToast(`Simulation rate set to ${app.simRate}×`, 'success'); });
+    $('#simulation-rate-select').addEventListener('change', (event) => { app.simRate = Number(event.target.value) || 1; renderSidebar(); showToast(`Fast-forward multiplier set to ${app.simRate}×; live clock remains real time.`, 'success'); });
     $('#refresh-button').addEventListener('click', () => { showToast('Refreshing controller state…', 'success'); bootstrap(); });
     $('#train-search').addEventListener('input', (event) => { app.filter = event.target.value; renderTrainList(); });
     $('#fit-layout').addEventListener('click', () => { app.zoom = 1; $('#layout-svg').style.transform = 'scale(1)'; $('#layout-zoom-label').textContent = '100%'; fitGraphViewport(); showToast('Layout fitted to workspace', 'success'); });
@@ -1931,7 +2202,7 @@
       if (!$('#schedule-number').value) $('#schedule-number').value = train.number || '';
       if (!$('#schedule-service').value || $('#schedule-service').value === 'New service') $('#schedule-service').value = train.name || '';
     });
-    $('#assembler-train-select').addEventListener('change', (event) => { app.selectedTrainId = event.target.value; app.consistDraft = null; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); });
+    $('#assembler-train-select').addEventListener('change', (event) => { cancelSpeedDraft(); app.selectedTrainId = event.target.value; app.consistDraft = null; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); });
     $('#add-car').addEventListener('click', addRollingStock);
     $('#save-consist').addEventListener('click', saveConsist);
     $('#close-editor').addEventListener('click', () => { $('#train-editor-panel').classList.toggle('is-collapsed'); showToast($('#train-editor-panel').classList.contains('is-collapsed') ? 'Train profile collapsed' : 'Train profile expanded', 'success'); });
@@ -1952,6 +2223,9 @@
   document.addEventListener('DOMContentLoaded', () => {
     applyDynamicStyles();
     setupEvents();
+    if (window.WorkspaceLayout) workspaceLayout = window.WorkspaceLayout.create({ root: document, request: fetchJson });
+    document.addEventListener('workspace-layout-saved', (event) => { app.settings = event.detail; });
+    window.requestAnimationFrame(animateTrainMarkers);
     renderSettings(); applyTheme(app.settings.theme);
     renderAll();
     const initialPage = window.location.hash.slice(1);

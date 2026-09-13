@@ -125,6 +125,7 @@ class Dispatcher:
         state = self.register_train(train_id)
         state.mode = ControlMode(mode)
         if state.mode is ControlMode.STOPPED:
+            state.manual_speed = state.automatic_speed = 0.0
             self.track_system.stop_train(train_id)
         return True
 
@@ -139,18 +140,24 @@ class Dispatcher:
             return _rejected("manual_speed", "train is not in manual mode")
         state.manual_speed = float(speed)
         state.last_command = "manual_speed"
-        return self.track_system.set_train_speed(train_id, state.manual_speed)
+        result = self.track_system.set_train_speed(train_id, state.manual_speed)
+        if hasattr(result, "accepted") and not result.accepted:
+            state.manual_speed = 0.0
+        return result
 
     def automatic_speed(self, train_id: str, speed: float) -> Any:
         """Store an automatic target; it is applied during :meth:`tick`."""
 
         _validate_speed(speed)
         state = self.register_train(train_id)
-        state.automatic_speed = float(speed)
-        state.last_command = "automatic_speed"
         if state.mode is not ControlMode.AUTOMATIC:
             return _rejected("automatic_speed", "train is not in automatic mode")
-        return self.track_system.set_train_speed(train_id, state.automatic_speed)
+        state.automatic_speed = float(speed)
+        state.last_command = "automatic_speed"
+        result = self.track_system.set_train_speed(train_id, state.automatic_speed)
+        if hasattr(result, "accepted") and not result.accepted:
+            state.automatic_speed = 0.0
+        return result
 
     def emergency_stop(self) -> tuple[str, ...]:
         """Stop every registered train and put it in STOPPED mode."""
@@ -159,6 +166,7 @@ class Dispatcher:
         for train_id, state in sorted(self._trains.items()):
             self.track_system.stop_train(train_id)
             state.mode = ControlMode.STOPPED
+            state.manual_speed = state.automatic_speed = 0.0
             state.last_command = "emergency_stop"
             stopped.append(train_id)
         return tuple(stopped)

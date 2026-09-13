@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping
 from backend.core.models import (
     Block,
     BlockState,
+    ConnectionSpeedLimit,
     LayoutSnapshot,
     Platform,
     Point,
@@ -83,6 +84,10 @@ def _state(value: Any, occupied_by: str | None) -> BlockState:
     selected = str(value or "").lower()
     if occupied_by:
         return BlockState.OCCUPIED
+    if selected in {BlockState.OCCUPIED.value, BlockState.RESERVED.value}:
+        # These are live runtime facts, not durable editor metadata. A train
+        # may have left since the last saved block label was written.
+        return BlockState.FREE
     try:
         return BlockState(selected or BlockState.FREE.value)
     except ValueError:
@@ -102,6 +107,7 @@ def snapshot_from_ui(
     turntables: Iterable[Mapping[str, Any]] = (),
     platforms: Iterable[Mapping[str, Any]] = (),
     scans: Iterable[Mapping[str, Any]] = (),
+    connection_limits: Iterable[Mapping[str, Any]] = (),
     revision: int = 0,
 ) -> LayoutSnapshot:
     """Build a validated domain snapshot from the current application state."""
@@ -223,6 +229,7 @@ def snapshot_from_ui(
                 destination_block_id=_canonical_block_id(value.get("destination_block_id")) or None,
                 consist_ids=tuple(str(item.get("id", item.get("name", "vehicle"))) for item in value.get("consist", ()) if isinstance(item, Mapping)),
                 mass_g=float(value.get("mass_g", 0) or 0),
+                requested_speed_kmh=0.0 if mode is TrainMode.STOPPED else min(max_speed, float(value.get("requested_speed_kmh", speed))),
             )
         )
 
@@ -347,6 +354,12 @@ def snapshot_from_ui(
         trains=tuple(domain_trains),
         schedules=tuple(domain_schedules),
         scans=domain_scans,
+        connection_limits=tuple(ConnectionSpeedLimit(
+            _canonical_block_id(rule.get("from", rule.get("from_block_id"))),
+            _canonical_block_id(rule.get("to", rule.get("to_block_id"))),
+            rule.get("speed_limit_kmh"),
+            tuple((_canonical_train_id(key), value) for key, value in rule.get("train_speed_limits", {}).items()),
+        ) for rule in connection_limits),
     )
 
 
@@ -374,6 +387,7 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
             "address": train.decoder_address,
             "mode": train.mode.value,
             "speed": train.speed_kmh,
+            "requested_speed_kmh": train.requested_speed_kmh if train.requested_speed_kmh is not None else train.speed_kmh,
             "direction": "forward",
             "block_id": train.current_block_id,
             "length_mm": train.length_mm,
@@ -511,4 +525,8 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
         "schedules": schedules,
         "platforms": platforms,
         "scans": scans,
+        "connection_limits": [{"from": rule.from_block_id, "to": rule.to_block_id,
+                               "speed_limit_kmh": rule.speed_limit_kmh,
+                               "train_speed_limits": dict(rule.train_speed_limits)}
+                              for rule in snapshot.connection_limits],
     }

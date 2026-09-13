@@ -1,0 +1,30 @@
+H0 Control Desk - Embedded Windows edition (x64)
+
+Run H0-Control-Desk-Native.exe. The full control desk opens inside its own window,
+starting in simulation mode. No browser tab, Python installation, or Visual Studio
+is needed. Layout editing, Settings, photo scans and train controls stay in the app.
+
+Requirements: Windows 10/11 x64 with Microsoft Edge WebView2 Runtime and .NET Framework.
+The app uses WebView2 internally to render the existing interface. This is not a
+rewrite using native Windows widgets, and it does not launch Chrome or Edge.
+WebView2 runtime: https://developer.microsoft.com/microsoft-edge/webview2/
+
+Use Settings > Connection > Connect to real Z21 using the address saved in Settings.
+Connection actions are no longer in the top application menu. Physical operation
+requires confirmation. Switching stops trains, requests power off and saves the
+current layout before reopening it in the chosen mode. Verify decoder addresses
+and feedback. Settings also offers a return to simulation.
+Close the window, or choose Controller > Stop and exit, to stop and power off.
+Always keep a physical emergency stop available.
+
+Data is shared with the browser-launcher desktop edition in:
+%LOCALAPPDATA%\H0 Control Desk\
+Close the other desktop edition before starting this one. Your source-code server
+on port 8080 uses separate data unless you explicitly transfer its database.
+
+The embedded window uses a private local loopback server with a dynamically chosen
+port; it is not a cloud service. No personal data is included in this download.
+The executable is unsigned and has no automatic updater.
+
+Build: python -m pip install -r requirements-native.txt
+       ./scripts/build_native_windows.ps1

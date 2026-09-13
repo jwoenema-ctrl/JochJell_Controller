@@ -49,6 +49,13 @@ async function shot(page, name) {
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(url);
   await page.waitForFunction(() => document.querySelector('#sync-message').textContent.includes('online'));
+  assert.equal(await page.locator('#direction-reverse').isDisabled(), true, 'Automatic train direction is locked');
+  await page.locator('.train-row').filter({ hasText: 'ICE 3' }).click();
+  await page.locator('#direction-reverse').click();
+  await page.waitForFunction(() => document.querySelector('#direction-reverse').getAttribute('aria-pressed') === 'true');
+  assert.equal(await page.locator('#speed-readout').textContent(), '0');
+  await page.locator('#direction-forward').click();
+  await page.waitForFunction(() => document.querySelector('#direction-forward').getAttribute('aria-pressed') === 'true');
   await page.getByRole('button', { name: 'Settings', exact: true }).first().click();
   await page.waitForFunction(() => document.querySelector('#settings-save-status').textContent.includes('up to date'));
   assert.equal(await page.locator('.dashboard').isVisible(), false, 'Settings must be a distinct page');
@@ -132,6 +139,25 @@ async function shot(page, name) {
     if (['Settings', '3D scans'].includes(name)) await shot(page, name === 'Settings' ? 'settings-mobile' : 'scans-mobile');
   }
 
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.locator('.mode-nav').getByRole('button', { name: 'Layout editor', exact: true }).click();
+  assert.equal(await page.locator('#layout-info-panel').isVisible(), true);
+  assert.match(await page.locator('#layout-info-metrics').textContent(), /Not measured in simulation/);
+  await page.locator('#add-layout-block').click();
+  await page.waitForFunction(() => document.querySelector('#block-count').textContent === '5');
+  await page.locator('#layout-power-toggle').click();
+  await page.waitForFunction(() => document.querySelector('#layout-power-toggle').textContent === 'Power on');
+  await page.locator('#edit-selected-block').click();
+  await page.locator('#block-id').fill('TEST-YARD');
+  await page.locator('#block-editor button[type="submit"]').click();
+  await page.waitForFunction(() => !document.querySelector('#block-editor').open);
+  let layoutState = await (await page.request.get(url + '/api/state')).json();
+  assert.ok(JSON.stringify(layoutState).includes('test-yard'));
+  assert.equal(await page.locator('#route-count').textContent(), '0');
+  await shot(page, 'layout-info-dark');
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth) <= 2);
+  await shot(page, 'layout-info-mobile');
   await stopServer();
   url = await startServer();
   await page.goto(`${url}/#settings`);

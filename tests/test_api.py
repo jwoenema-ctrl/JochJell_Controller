@@ -32,6 +32,7 @@ class ApiTests(unittest.TestCase):
     def test_http_state_and_command_round_trip(self) -> None:
         app = ControllerApplication.sample()
         server = make_server("127.0.0.1", 0, app)
+        app.stop_motion_clock()  # Explicit stepping assertions use a fixed clock.
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -74,7 +75,9 @@ class ApiTests(unittest.TestCase):
             )
             with urllib.request.urlopen(tick_request, timeout=2) as response:
                 ticked = json.loads(response.read())
-            self.assertEqual(ticked["tick"], 5)
+            self.assertEqual(ticked["tick"], 3000)
+            self.assertEqual(ticked["simulation"]["elapsed_seconds"], 300)
+            self.assertEqual(ticked["simulation"]["clock"], "00:05:00")
         finally:
             server.shutdown()
             server.server_close()

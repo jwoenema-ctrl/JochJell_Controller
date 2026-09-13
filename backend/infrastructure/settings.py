@@ -11,12 +11,61 @@ from threading import RLock
 from typing import Any, Mapping
 
 
+WORKSPACE_PANELS = {
+    "dispatch": ["layout-info", "node-graph", "systematic", "trains"],
+    "layout": ["layout-info", "node-graph", "systematic"],
+    "trains": ["trains", "train-profile", "assembler"],
+    "timetable": ["timetable"],
+    "scans": ["scans"],
+}
+CONTROL_PANELS = ["control-center", "selected-train", "simulation", "connection-health"]
+DEFAULT_WORKSPACE_LAYOUT = {
+    "pages": {
+        page: {
+            "order": panels.copy(),
+            "sidebar_order": CONTROL_PANELS.copy() if page in ("dispatch", "trains") else [],
+            "sidebar_side": "left",
+        }
+        for page, panels in WORKSPACE_PANELS.items()
+    }
+}
+
+
+def validate_workspace_layout(value: Any, current: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Merge per-page patches without accepting arbitrary DOM selectors or CSS."""
+    if not isinstance(value, dict) or set(value) - {"pages"}:
+        raise ValueError("workspace_layout must be an object containing pages")
+    pages = value.get("pages", {})
+    if not isinstance(pages, dict) or set(pages) - set(WORKSPACE_PANELS):
+        raise ValueError("unknown workspace page")
+    result = deepcopy(DEFAULT_WORKSPACE_LAYOUT)
+    if current:
+        for page, preferences in current.get("pages", {}).items():
+            if page in result["pages"]:
+                result["pages"][page].update(deepcopy(preferences))
+    for page, patch in pages.items():
+        if not isinstance(patch, dict) or set(patch) - {"order", "sidebar_order", "sidebar_side"}:
+            raise ValueError(f"invalid workspace preferences for {page}")
+        result["pages"][page].update(deepcopy(patch))
+    for page, preferences in result["pages"].items():
+        if preferences["sidebar_side"] not in ("left", "right"):
+            raise ValueError("sidebar_side must be left or right")
+        for key in ("order", "sidebar_order"):
+            order = preferences[key]
+            expected = DEFAULT_WORKSPACE_LAYOUT["pages"][page][key]
+            if (not isinstance(order, list) or any(not isinstance(item, str) for item in order)
+                    or len(order) != len(expected) or set(order) != set(expected)):
+                raise ValueError(f"{page}.{key} must contain each available panel exactly once")
+    return result
+
+
 DEFAULT_SETTINGS = {
     "theme": "system",
     "z21_host": "192.168.0.111",
     "z21_port": 21105,
     "ui_refresh_ms": 5000,
     "routing": {"adaptive": True, "busy_interval_ms": 1000, "idle_interval_ms": 5000},
+    "workspace_layout": DEFAULT_WORKSPACE_LAYOUT,
 }
 
 
@@ -28,13 +77,16 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
     unknown = set(value) - set(DEFAULT_SETTINGS)
     if unknown:
         raise ValueError(f"unknown settings: {', '.join(sorted(unknown))}")
-    result = deepcopy(dict(current or DEFAULT_SETTINGS))
+    result = deepcopy(DEFAULT_SETTINGS)
+    if current:
+        result.update(deepcopy(dict(current)))
     routing = value.get("routing", {})
     if not isinstance(routing, dict):
         raise ValueError("routing must be an object")
     if set(routing) - set(DEFAULT_SETTINGS["routing"]):
         raise ValueError("unknown routing setting")
-    result.update({key: item for key, item in value.items() if key != "routing"})
+    result["workspace_layout"] = validate_workspace_layout(value.get("workspace_layout", {}), result["workspace_layout"])
+    result.update({key: item for key, item in value.items() if key not in ("routing", "workspace_layout")})
     result["routing"].update(routing)
     if result["theme"] not in ("system", "light", "dark"):
         raise ValueError("theme must be system, light, or dark")

@@ -46,6 +46,8 @@ from backend.infrastructure.settings import SQLiteSettingsRepository, validate_s
 from backend.infrastructure.scan_store import MAX_UPLOAD_BODY_BYTES, ScanStore
 from backend.runtime import ControllerRuntime
 from backend.services.dispatcher import ControlMode
+from backend.services.connection_speed import ConnectionSpeedPolicy, next_connection
+from backend.services.block_editor import block_id as validate_block_id, next_block_id, rename_references
 from backend.services.scheduler import ScheduleStop as RuntimeScheduleStop
 
 
@@ -108,6 +110,7 @@ class ControllerApplication:
         },
     ])
     simulation_running: bool = True
+    connection_limits: list[dict[str, Any]] = field(default_factory=list)
     database_path: str = ":memory:"
     layout_id: str = "default"
     layout_name: str = "Sample H0 layout"
@@ -124,6 +127,9 @@ class ControllerApplication:
     _routing_last_at: str | None = field(default=None, init=False)
     _routing_refresh_count: int = field(default=0, init=False)
     _routing_error: str | None = field(default=None, init=False)
+    _motion_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _motion_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _scheduler_remainder_seconds: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compose the domain runtime once and mirror the initial UI fixture into it."""
@@ -139,6 +145,10 @@ class ControllerApplication:
             else:
                 self.runtime = ControllerRuntime.create(database_path=self.database_path)
         self.runtime.connection.check()
+        if self.z21_host:
+            self.track_power = False
+            for train in self.trains:
+                train.update(mode="stopped", speed=0, requested_speed_kmh=0)
         self._sync_runtime_from_ui()
         self._domain_event_subscription = self.runtime.events.subscribe(Event, self._record_domain_event)
         self._last_train_blocks = {str(train.get("id")): str(train.get("block_id", "")) for train in self.trains}
@@ -221,6 +231,7 @@ class ControllerApplication:
     def close(self) -> None:
         """Close the composed runtime and its persistence connections."""
 
+        self.stop_motion_clock()
         self.stop_background_refresh()
         subscription = getattr(self, "_domain_event_subscription", None)
         if subscription is not None:
@@ -319,6 +330,43 @@ class ControllerApplication:
             self._routing_wake.clear()
             self._routing_thread = threading.Thread(target=self._routing_loop, name="h0-route-refresh", daemon=True)
             self._routing_thread.start()
+
+    def start_motion_clock(self) -> None:
+        """One clock per application, independent of browser tabs and route planning."""
+        with self._lock:
+            if self._motion_thread and self._motion_thread.is_alive():
+                return
+            self._motion_stop.clear()
+            self._motion_thread = threading.Thread(target=self._motion_loop, name="h0-motion", daemon=True)
+            self._motion_thread.start()
+
+    def _motion_loop(self) -> None:
+        interval = self.runtime.track.tick_seconds if self.simulation_mode else 1.0
+        next_tick = time.monotonic() + interval
+        while not self._motion_stop.wait(max(0, next_tick - time.monotonic())):
+            try:
+                with self._lock:
+                    if self.track_power and (not self.simulation_mode or self.simulation_running):
+                        self.tick(1, elapsed_seconds=interval)
+                next_tick += interval
+                if next_tick < time.monotonic() - interval:
+                    # Never burst hardware commands after a suspended computer.
+                    next_tick = time.monotonic() + interval
+            except Exception as exc:
+                with self._lock:
+                    self.simulation_running = False
+                    self.events.append({"type": "motion_clock_error", "detail": str(exc)})
+                    self.runtime.dispatcher.emergency_stop()
+                return
+
+    def stop_motion_clock(self) -> None:
+        self._motion_stop.set()
+        worker = self._motion_thread
+        if worker and worker is not threading.current_thread():
+            worker.join(timeout=5)
+            if worker.is_alive():
+                raise RuntimeError("motion controller did not stop")
+        self._motion_thread = None
 
     def _routing_loop(self) -> None:
         while not self._routing_stop.is_set():
@@ -420,10 +468,11 @@ class ControllerApplication:
             turntables=self.turntables,
             platforms=self.platforms,
             scans=self.scans,
+            connection_limits=self.connection_limits,
             revision=self.runtime.layout.snapshot().version if self.runtime is not None else 0,
         )
 
-    def _sync_runtime_from_ui(self) -> None:
+    def _sync_runtime_from_ui(self, *, apply_motion: bool = True) -> None:
         """Keep the typed runtime aligned with the current display fixture."""
 
         if self.runtime is None:
@@ -431,6 +480,7 @@ class ControllerApplication:
         snapshot = self._domain_snapshot()
         self.runtime.layout.replace(snapshot)
         graph = self.runtime.layout.graph()
+        self._apply_speed_policy(snapshot)
         self.runtime.dispatcher.set_graph(graph)
         desired_train_ids = {str(train["id"]) for train in self.trains}
         for existing_id in tuple(self.runtime.dispatcher.trains):
@@ -489,14 +539,17 @@ class ControllerApplication:
                 if mode is ControlMode.AUTOMATIC:
                     train["route"] = list(desired_route)
                     train.setdefault("destination_block_id", desired_route[-1])
-            self.runtime.dispatcher.set_mode(train_id, mode)
+            if not apply_motion:
+                continue
             if self.z21_host:
                 # A physical layout is observed/commanded only after the user
                 # sends an explicit UI command; startup should not move trains.
+                self.runtime.dispatcher.register_train(train_id, mode=mode)
                 continue
+            self.runtime.dispatcher.set_mode(train_id, mode)
             if mode is ControlMode.STOPPED:
                 continue
-            normalized = max(0.0, min(1.0, float(train.get("speed", 0)) / max(1.0, float(train.get("maxSpeed", 140)))))
+            normalized = max(0.0, min(1.0, float(train.get("requested_speed_kmh", train.get("speed", 0))) / max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140))))))
             if mode is ControlMode.AUTOMATIC:
                 self.runtime.dispatcher.automatic_speed(train_id, normalized)
             else:
@@ -540,6 +593,16 @@ class ControllerApplication:
                 self.runtime.scheduler.add_stop(RuntimeScheduleStop(schedule_id, train_id, station_id, arrival_tick, arrival_tick + 1, str(row.get("platform", "")) or None))
         if was_running or self.simulation_running:
             self.runtime.scheduler.start(tick=current_tick)
+
+    def _apply_speed_policy(self, snapshot: LayoutSnapshot) -> None:
+        try:
+            self.runtime.track.configure_speed_limits(ConnectionSpeedPolicy(snapshot.connection_limits,
+                {train.id: train.max_speed_kmh for train in snapshot.trains}))
+        except Exception:
+            self.runtime.dispatcher.emergency_stop()
+            for train in self.trains:
+                train.update(mode="stopped", speed=0, requested_speed_kmh=0)
+            raise
 
     def _sync_train_database(self) -> None:
         """Persist the editable model/decode fields in the runtime database."""
@@ -821,7 +884,9 @@ class ControllerApplication:
                         )
                     )
                 train["block_id"] = motion.block_id
-                train["speed"] = round(float(motion.target_speed) * float(train.get("maxSpeed", 140)))
+                train["speed"] = round(float(motion.target_speed) * float(train.get("maxSpeed", train.get("max_speed_kmh", 140))))
+                control = self.runtime.dispatcher.trains.get(train_id)
+                train["requested_speed_kmh"] = (control.desired_speed if control else 0) * float(train.get("maxSpeed", train.get("max_speed_kmh", 140)))
                 if previous_blocks.get(train_id) is None:
                     current_blocks[train_id] = str(motion.block_id)
         self._last_train_blocks = current_blocks
@@ -864,8 +929,57 @@ class ControllerApplication:
         with self._lock:
             return self._snapshot()
 
+    def layout_info(self) -> dict[str, Any]:
+        """Controller positions, occupancy and executing operations, not catalogue totals."""
+        block_ids = {str(block["id"]).upper() for block in self.blocks}
+        trains = [train for train in self.trains if str(train.get("block_id", "")).upper() in block_ids]
+        if not self.simulation_mode:
+            reported = {motion.train_id for motion in self.runtime.track.get_snapshot().trains}
+            trains = [train for train in trains if train["id"] in reported]
+        controls = self.runtime.dispatcher.trains if self.runtime else {}
+        routes = self.runtime.route_updater.desired_routes if self.runtime else {}
+        active = [train for train in trains
+                  if self.track_power and (not self.simulation_mode or self.simulation_running)
+                  and (control := controls.get(str(train["id"]))) is not None
+                  and control.mode is ControlMode.AUTOMATIC and control.desired_speed > 0
+                  and len(route := routes.get(str(train["id"]), ())) > 1
+                  and str(train.get("block_id", "")).upper() != route[-1]]
+        telemetry = dict(getattr(self, "_power_telemetry", {"available": False, "reason":
+            "Not measured in simulation" if self.simulation_mode else "Waiting for Z21 readings"}))
+        if not self.simulation_mode and time.monotonic() - getattr(self, "_power_read_at", 0) > 15:
+            telemetry = {"available": False, "reason": "No fresh Z21 power readings"}
+        return {"block_count": len(block_ids),
+                "occupied_blocks": sum(block["status"] == "occupied" for block in self._ui_blocks()),
+                "train_count": len(trains),
+                "manual_trains": sum(str(t.get("mode", "")).lower() == "manual" for t in trains),
+                "automatic_trains": sum(str(t.get("mode", "")).lower() == "automatic" for t in trains),
+                "stopped_trains": sum(str(t.get("mode", "")).lower() not in {"manual", "automatic"} for t in trains),
+                "active_routes": len(active), "power": telemetry,
+                "trains": [{"id": t["id"], "name": t.get("name", t["id"]),
+                            "block_id": t["block_id"], "mode": t.get("mode", "stopped")} for t in trains]}
+
+    def check_connection(self) -> None:
+        # Serialize all UDP request/response traffic with commands and state updates.
+        with self._lock:
+            if self.runtime is None:
+                return
+            connection = self.runtime.connection.check()
+            if self.z21_host and connection.status.connected:
+                if time.monotonic() - getattr(self, "_power_read_at", 0) >= 5:
+                    self._power_telemetry = self.runtime.track.read_power_telemetry()
+                    self._power_read_at = time.monotonic()
+            if self.z21_host and not self.runtime.track.connection_status().connected:
+                self._power_telemetry = {"available": False, "reason": "Z21 disconnected"}
+                self.runtime.dispatcher.emergency_stop()
+                self.track_power = False
+                for train in self.trains:
+                    train["mode"] = ControlMode.STOPPED.value
+                    train["speed"] = 0
+                self._sync_ui_from_runtime()
+
     def _ui_snapshot(self) -> dict[str, Any]:
         snapshot = self._snapshot()
+        elapsed_seconds = int(self.runtime.track.get_snapshot().time_seconds)
         return {
             "simulation_mode": snapshot["simulation_mode"],
             "mode": "simulation" if self.simulation_mode else "manual",
@@ -880,16 +994,23 @@ class ControllerApplication:
             "simulation": {
                 "running": self.simulation_running,
                 "rate": 1,
-                "clock": f"{(self.tick_count * 60 // 3600) % 24:02d}:{(self.tick_count * 60 // 60) % 60:02d}:{(self.tick_count * 60) % 60:02d}",
+                "clock": f"{(elapsed_seconds // 3600) % 24:02d}:{(elapsed_seconds // 60) % 60:02d}:{elapsed_seconds % 60:02d}",
+                "elapsed_seconds": self.runtime.track.get_snapshot().time_seconds,
+                "schedule_minutes": self.runtime.scheduler.current_tick,
                 "date": "Simulation",
             },
             "tick": snapshot["tick"],
             "track_power": snapshot["track_power"],
+            "motion_clock": {"running": bool(self._motion_thread and self._motion_thread.is_alive()),
+                             "interval_seconds": self.runtime.track.tick_seconds if self.simulation_mode else 1.0},
+            "layout_info": self.layout_info(),
             "feedback": snapshot["feedback"],
             "layout": {
                 "name": self.layout_name,
                 "blocks": self._ui_blocks(),
                 "edges": self._ui_edges(),
+                "connection_limits": self._ui_connection_limits(),
+                "connections": self._ui_connections(),
                 "turnouts": self._ui_turnouts(),
                 "stations": list(self.stations),
                 "signals": list(self.signals),
@@ -919,6 +1040,8 @@ class ControllerApplication:
         for block in self.blocks:
             block_id = str(block["id"])
             occupants = [train["id"] for train in self.trains if train.get("block_id") == block_id]
+            if not self.simulation_mode:
+                occupants = [motion.train_id for motion in self.runtime.track.get_snapshot().trains if motion.block_id == block_id]
             feedback_occupants = list(self.feedback_occupancy.get(block_id, ()))
             reservation_owner = reservations.get(block_id) or reservations.get(block_id.upper())
             default_x, default_y = positions.get(block_id, (62, 224))
@@ -945,6 +1068,48 @@ class ControllerApplication:
             if entry and diverging:
                 links.add((entry, diverging))
         return [{"from": left, "to": right, "status": "free"} for left, right in sorted(links)]
+
+    def _ui_connection_limits(self) -> list[dict[str, Any]]:
+        return [{"from": row["from"].lower(), "to": row["to"].lower(),
+                 "speed_limit_kmh": row.get("speed_limit_kmh"),
+                 "train_speed_limits": {self._ui_train_id(key): value for key, value in row.get("train_speed_limits", {}).items()}}
+                for row in self.connection_limits]
+
+    def _ui_connections(self) -> list[dict[str, Any]]:
+        rules = {(r["from"], r["to"]): r for r in self._ui_connection_limits()}
+        pairs = {(e["from"], e["to"]) for e in self._ui_edges()}
+        pairs |= {(right, left) for left, right in pairs}
+        return [{"from": left, "to": right, "speed_limit_kmh": None, "train_speed_limits": {},
+                 **rules.get((left, right), {})} for left, right in sorted(pairs)]
+
+    def _train_motion_state(self, train: dict[str, Any]) -> dict[str, Any]:
+        train_id = str(train["id"])
+        motion = next((m for m in self.runtime.track.get_snapshot().trains if m.train_id == train_id), None)
+        control = self.runtime.dispatcher.trains.get(train_id)
+        maximum = float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140)
+        requested = control.desired_speed if control else 0.0
+        route = tuple(motion.route) if motion else tuple(self.runtime.route_updater.desired_routes.get(train_id, ()))
+        block = motion.block_id if motion else str(train.get("block_id", "")) if self.simulation_mode else ""
+        if not self.simulation_mode and motion is None:
+            route = ()
+        direction = 1 if self.runtime.track.get_train_direction(train_id) else -1
+        connection = next_connection(block, route, direction)
+        limit = self.runtime.track.get_train_speed_limit(train_id)
+        effective = motion.target_speed if motion else self.runtime.track.get_effective_speed(train_id) if not self.simulation_mode else 0.0
+        return {"requested_speed_kmh": round(requested * maximum, 4),
+                "effective_speed_kmh": round(effective * maximum, 4),
+                "actual_speed_kmh": round(motion.speed * maximum, 4) if motion and self.simulation_mode else None,
+                "speed_limit_kmh": limit,
+                "motion": {"block_id": block.lower(), "route": [item.lower() for item in route],
+                           "position": motion.position if motion and self.simulation_mode else None,
+                           "speed": motion.speed if motion and self.simulation_mode else None,
+                           "effective_speed": effective,
+                           "requested_speed": requested, "direction": direction,
+                           "from_block_id": connection[0].lower() if connection else block.lower(),
+                           "to_block_id": connection[1].lower() if connection else None,
+                           "source": "simulation" if self.simulation_mode else "reported" if motion else "unknown",
+                           "time_seconds": self.runtime.track.get_snapshot().time_seconds,
+                           "tick_seconds": self.runtime.track.tick_seconds}}
 
     def _topology_edges(self) -> list[dict[str, Any]]:
         """Return editable block adjacency; turnout branches remain separately controlled."""
@@ -1010,12 +1175,12 @@ class ControllerApplication:
                 "class": "Automatic" if train.get("mode") == "automatic" else "Stopped" if train.get("mode") in {"stopped", "safe", "stop"} else "Manual",
                 "status": "Stopped" if train.get("mode") in {"stopped", "safe", "stop"} else "Running" if train.get("speed", 0) else "Ready",
                 "speed": train.get("speed", 0),
-                "position": train.get("block_id", "—"),
+                "position": train.get("block_id", "—") if self.simulation_mode or any(m.train_id == train["id"] for m in self.runtime.track.get_snapshot().trains) else "—",
                 "route": train.get("route", []),
                 "destination_block_id": train.get("destination_block_id"),
                 "origin": train.get("origin", "Layout"),
                 "destination": train.get("destination", "Layout"),
-                "direction": "Forward" if train.get("direction") == "forward" else "Reverse",
+                "direction": "Forward" if (self.runtime.track.get_train_direction(str(train["id"])) if self.runtime else train.get("direction", "forward") == "forward") else "Reverse",
                 "decoder": f"Z21-{train.get('address', '')}",
                 "manufacturer": train.get("manufacturer", ""),
                 "model_number": train.get("model_number", train.get("model", "")),
@@ -1025,18 +1190,43 @@ class ControllerApplication:
                 "length": display_length,
                 "maxSpeed": max_speed,
                 "consist": train.get("consist", []),
+                **self._train_motion_state(train),
             })
         return result
 
-    def tick(self, steps: int = 1) -> dict[str, Any]:
+    def advance_simulation(self, seconds: float, rate: float = 1) -> dict[str, Any]:
+        """Deliberate fast-forward uses real simulated seconds, never hardware."""
+        if not self.simulation_mode:
+            raise ValueError("Fast-forward is only available in simulation")
+        if not math.isfinite(seconds) or not math.isfinite(rate) or seconds <= 0 or rate <= 0 or seconds * rate > 600:
+            raise ValueError("Choose a positive simulation interval of at most 600 seconds")
+        with self._lock:
+            interval = self.runtime.track.tick_seconds
+            remaining = max(1, math.ceil(seconds * rate / interval))
+            while remaining:
+                count = min(100, remaining)
+                self.tick(count, elapsed_seconds=count * interval)
+                remaining -= count
+            return self._ui_snapshot()
+
+    def tick(self, steps: int = 1, *, elapsed_seconds: float | None = None) -> dict[str, Any]:
         with self._lock:
             safe_steps = max(1, min(int(steps), 100))
-            if not self.simulation_running:
+            if self.simulation_mode and not self.simulation_running:
                 self.events.append({"type": "simulation_tick_skipped", "reason": "simulation paused"})
                 return self._ui_snapshot()
             if self.runtime is not None:
                 self.runtime.tick(safe_steps)
-                schedule_events = self.runtime.scheduler.advance(safe_steps) if self.runtime.scheduler.running else ()
+                schedule_steps = safe_steps
+                if elapsed_seconds is not None:
+                    # Timetable service uses minute ticks. The shared 10 Hz
+                    # motion clock must not advance a timetable minute per frame.
+                    schedule_steps = 0
+                    if self.runtime.scheduler.running:
+                        self._scheduler_remainder_seconds += elapsed_seconds
+                        schedule_steps = int((self._scheduler_remainder_seconds + 1e-9) // 60)
+                        self._scheduler_remainder_seconds -= schedule_steps * 60
+                schedule_events = self.runtime.scheduler.advance(schedule_steps) if self.runtime.scheduler.running else ()
                 for schedule_event in schedule_events:
                     state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
                     schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]
@@ -1098,6 +1288,11 @@ class ControllerApplication:
         self.platforms = projected.get("platforms", [])
         self.schedules = projected.get("schedules", [])
         self.scans = projected.get("scans", self.scans)
+        self.connection_limits = projected.get("connection_limits", [])
+        if self.z21_host:
+            self.runtime.dispatcher.emergency_stop()
+            for train in self.trains:
+                train.update(mode="stopped", speed=0, requested_speed_kmh=0)
         self.layout_id = selected_id
         self.layout_name = next((record.name for record in self.runtime.layout_repository.list() if record.layout_id == selected_id), f"Saved layout {selected_id}")
         self._sync_runtime_from_ui()
@@ -1243,6 +1438,7 @@ class ControllerApplication:
                 turntables=collections.get("turntables", self.turntables),
                 platforms=collections.get("platforms", self.platforms),
                 scans=self.scans,
+                connection_limits=self.connection_limits,
                 revision=self.runtime.layout.snapshot().version if self.runtime is not None else 0,
             )
         except KeyError as exc:
@@ -1314,17 +1510,100 @@ class ControllerApplication:
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             kind = str(payload.get("type", "")).lower()
-            if kind in {"speed", "set_speed", "drive"}:
+            if kind == "set_connection_speed_limit":
+                left = str(payload.get("from", payload.get("from_block_id", ""))).strip().upper()
+                right = str(payload.get("to", payload.get("to_block_id", ""))).strip().upper()
+                if not any(c["from"].upper() == left and c["to"].upper() == right for c in self._ui_connections()):
+                    raise ValueError("speed limit requires an existing directed connection")
+                rows = deepcopy(self.connection_limits)
+                rule = next((r for r in rows if (r["from"], r["to"]) == (left, right)), None)
+                if rule is None:
+                    rule = {"from": left, "to": right, "speed_limit_kmh": None, "train_speed_limits": {}}
+                    rows.append(rule)
+                if "train_id" in payload:
+                    train_id = self._canonical_train_id(str(payload["train_id"]))
+                    if not any(t["id"] == train_id for t in self.trains):
+                        raise ValueError("unknown train for connection speed limit")
+                    if "speed_limit_kmh" not in payload:
+                        raise ValueError("speed_limit_kmh is required; null removes an override")
+                    if payload["speed_limit_kmh"] is None:
+                        rule["train_speed_limits"].pop(train_id, None)
+                    else:
+                        rule["train_speed_limits"][train_id] = payload["speed_limit_kmh"]
+                else:
+                    if "speed_limit_kmh" in payload:
+                        rule["speed_limit_kmh"] = payload["speed_limit_kmh"]
+                    if "train_speed_limits" in payload:
+                        if not isinstance(payload["train_speed_limits"], dict):
+                            raise ValueError("train_speed_limits must be an object")
+                        rule["train_speed_limits"] = {self._canonical_train_id(key): value for key, value in payload["train_speed_limits"].items()}
+                candidate = snapshot_from_ui(**{key: getattr(self, key) for key in
+                    ("blocks", "turnouts", "trains", "schedules", "stations", "signals", "waypoints", "turntables", "platforms", "scans")},
+                    edges=self._topology_edges(), connection_limits=rows)
+                self.connection_limits = snapshot_to_ui(candidate)["connection_limits"]
+                self.runtime.layout.replace(candidate)
+                self._apply_speed_policy(candidate)
+                self._sync_ui_from_runtime()
+                self.events.append({"type": "connection_speed_limit_changed", "from": left, "to": right})
+            elif kind == "report_train_position":
+                if self.simulation_mode:
+                    raise ValueError("simulator positions are determined by movement, not position reports")
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((t for t in self.trains if t["id"] == train_id), None)
+                block = str(payload.get("block_id", "")).strip().upper()
+                route = tuple(str(item).upper() for item in payload.get("route", ()))
+                graph = self.runtime.layout.graph()
+                if train is None or graph.node(block) is None or block not in route:
+                    raise ValueError("known train, block and route containing that block are required")
+                if any(not any(e.target_id == right for e in graph.neighbors(left)) for left, right in zip(route, route[1:])):
+                    raise ValueError("reported route must follow existing connections")
+                result = self.runtime.track.report_train_position(train_id, block, route)
+                if not result.accepted:
+                    self.runtime.dispatcher.emergency_stop()
+                    raise ValueError(result.detail or "could not apply speed limit at reported position")
+                train["block_id"] = block
+                train["route"] = list(route)
+                self.runtime.route_updater.set_route(train_id, route)
+                self._sync_ui_from_runtime()
+            elif kind == "set_direction":
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((item for item in self.trains if item["id"] == train_id), None)
+                direction = payload.get("direction")
+                if train is None:
+                    raise ValueError(f"Unknown train: {train_id}")
+                if direction not in ("forward", "reverse"):
+                    raise ValueError("direction must be forward or reverse")
+                if self.runtime is None:
+                    raise ValueError("controller runtime unavailable")
+                control = self.runtime.dispatcher.register_train(train_id)
+                if control.mode is ControlMode.AUTOMATIC:
+                    raise ValueError("switch this train to manual control before changing direction")
+                motion = next((item for item in self.runtime.track.get_snapshot().trains if item.train_id == train_id), None)
+                if float(train.get("speed", 0)) > 0 or control.desired_speed > 0 or (motion and (motion.speed > 0 or motion.target_speed > 0)):
+                    raise ValueError("stop the train and wait for it to halt before changing direction")
+                result = self.runtime.track.set_train_direction(train_id, forward=direction == "forward")
+                if not result.accepted:
+                    raise ValueError(result.detail or "direction command rejected")
+                control.manual_speed = control.automatic_speed = 0.0
+                train["direction"] = direction
+                self.events.append({"type": "train_direction_changed", "train_id": train_id, "direction": direction})
+            elif kind in {"speed", "set_speed", "drive"}:
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 train = next((item for item in self.trains if item["id"] == train_id), None)
                 if train is None:
                     raise ValueError(f"Unknown train: {train_id}")
+                if "direction" in payload and payload["direction"] != train.get("direction", "forward"):
+                    raise ValueError("use set_direction while stopped to change direction")
                 requested_speed = payload.get("speed", payload.get("speed_kmh", 0))
-                train["speed"] = max(0, min(140, int(requested_speed)))
-                if "direction" in payload:
-                    train["direction"] = str(payload["direction"])
+                requested_speed = float(requested_speed)
+                if not math.isfinite(requested_speed) or requested_speed < 0:
+                    raise ValueError("speed must be a finite non-negative number")
+                maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140))))
+                requested_speed = min(maximum, requested_speed)
+                if requested_speed > 0 and not self.track_power:
+                    raise ValueError("switch track power on before requesting movement")
                 if self.runtime is not None:
-                    normalized = train["speed"] / max(1.0, float(train.get("maxSpeed", 140)))
+                    normalized = requested_speed / maximum
                     control = self.runtime.dispatcher.register_train(train_id)
                     if control.mode is ControlMode.AUTOMATIC:
                         result = self.runtime.dispatcher.automatic_speed(train_id, normalized)
@@ -1332,6 +1611,7 @@ class ControllerApplication:
                         result = self.runtime.dispatcher.manual_speed(train_id, normalized)
                     if hasattr(result, "accepted") and not result.accepted:
                         raise ValueError(result.detail or "train speed command rejected")
+                train["speed"] = train["requested_speed_kmh"] = requested_speed
                 self._publish_domain_event(
                     TrainSpeedChanged(
                         train_id=train_id,
@@ -1595,8 +1875,8 @@ class ControllerApplication:
                 self.events.append({"type": "feedback_polled", "groups": list(groups), "accepted": all(result.accepted for result in results)})
             elif kind == "add_block":
                 block = dict(payload.get("block", {}))
-                block_id = str(block.get("id", "")).strip()
-                if not block_id or any(item.get("id") == block_id for item in self.blocks):
+                block_id = validate_block_id(block["id"] if "id" in block else next_block_id(self.blocks))
+                if any(str(item.get("id", "")).upper() == block_id for item in self.blocks):
                     raise ValueError("block ID is required and must be unique")
                 block["id"] = block_id
                 block.setdefault("name", block_id)
@@ -1604,7 +1884,7 @@ class ControllerApplication:
                 block.setdefault("y", 224)
                 block.setdefault("status", "free")
                 self.blocks.append(block)
-                self._sync_runtime_from_ui()
+                self._sync_runtime_from_ui(apply_motion=False)
                 self.events.append({"type": "block_added", "block_id": block_id})
             elif kind == "update_block":
                 block_id = str(payload.get("block_id", payload.get("id", ""))).strip().upper()
@@ -1612,13 +1892,41 @@ class ControllerApplication:
                 if block is None:
                     raise ValueError(f"Unknown block: {block_id}")
                 updates = dict(payload.get("block", {}))
+                if "length_mm" in updates:
+                    length = float(updates["length_mm"])
+                    if not math.isfinite(length) or length < 0:
+                        raise ValueError("Block length must be a finite non-negative number")
+                new_id = validate_block_id(updates.get("id", block_id))
+                if new_id != block_id:
+                    if self.track_power:
+                        raise ValueError("Switch track power off before renaming a block ID")
+                    if any(str(item["id"]).upper() == new_id for item in self.blocks):
+                        raise ValueError("Block ID already exists")
+                    collections = ("blocks", "turnouts", "trains", "stations", "signals",
+                                   "waypoints", "turntables", "platforms", "schedules", "scans", "connection_limits")
+                    updated = {key: rename_references(getattr(self, key), block_id, new_id)
+                               for key in collections}
+                    for item in updated["blocks"]:
+                        if str(item["id"]).upper() == block_id:
+                            item["id"] = new_id
+                    snapshot_from_ui(**updated, edges=rename_references(self._topology_edges(), block_id, new_id))
+                    self.runtime.track.rename_block(block_id, new_id)
+                    for key, value in updated.items():
+                        setattr(self, key, value)
+                    self.feedback_map = {key: new_id if str(value).upper() == block_id else value for key, value in self.feedback_map.items()}
+                    self.feedback_occupancy = {new_id if key.upper() == block_id else key: value for key, value in self.feedback_occupancy.items()}
+                    self._last_train_blocks = {key: new_id if value.upper() == block_id else value for key, value in self._last_train_blocks.items()}
+                    for train_id, route in self.runtime.route_updater.desired_routes.items():
+                        self.runtime.route_updater.set_route(train_id, tuple(new_id if item.upper() == block_id else item for item in route))
+                    block_id = new_id
+                    block = next(item for item in self.blocks if item["id"] == new_id)
                 if "name" in updates:
                     block["name"] = str(updates["name"]).strip() or block_id
                 if "length_mm" in updates:
                     block["length_mm"] = max(0, float(updates["length_mm"]))
                 if "station" in updates:
                     block["station"] = str(updates["station"]).strip()
-                self._sync_runtime_from_ui()
+                self._sync_runtime_from_ui(apply_motion=False)
                 raw_state = str(block.get("status", "free")).lower()
                 block_state = BlockState.OCCUPIED if raw_state == "occupied" else BlockState.RESERVED if raw_state in {"route", "reserved"} else BlockState.OUT_OF_SERVICE if raw_state in {"out_of_service", "offline"} else BlockState.FREE
                 self._publish_domain_event(BlockStateChanged(block_id=block_id, state=block_state, occupied_by=block.get("occupied_by")))
@@ -1651,6 +1959,8 @@ class ControllerApplication:
                     neighbours.discard(other_id)
                     block["neighbor_ids"] = sorted(neighbours)
                     block.pop("neighborIds", None)
+                self.connection_limits = [rule for rule in self.connection_limits
+                    if {rule["from"], rule["to"]} != {left_id, right_id}]
                 self._sync_runtime_from_ui()
                 self.events.append({"type": "blocks_disconnected", "from": left_id, "to": right_id})
             elif self._command_layout_asset(kind, payload):
@@ -1771,7 +2081,7 @@ class ControllerApplication:
                 selected_mode = ControlMode.STOPPED if requested_mode in {"stopped", "stop", "safe"} else ControlMode(requested_mode)
                 train["mode"] = selected_mode.value
                 if selected_mode is ControlMode.STOPPED:
-                    train["speed"] = 0
+                    train["speed"] = train["requested_speed_kmh"] = 0
                 if self.runtime is not None:
                     result = self.runtime.mode_switcher.switch(train_id, selected_mode)
                     if not result.accepted:
@@ -1799,7 +2109,7 @@ class ControllerApplication:
                     for train in self.trains:
                         train["mode"] = selected_mode.value
                         if selected_mode is ControlMode.STOPPED:
-                            train["speed"] = 0
+                            train["speed"] = train["requested_speed_kmh"] = 0
                         self.runtime.mode_switcher.switch(train["id"], selected_mode)
                         self._publish_domain_event(
                             TrainModeChanged(
@@ -1894,19 +2204,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 return self._send_json({"error": "train model not found"}, HTTPStatus.NOT_FOUND)
             return self._send_json(record)
         if parsed.path == "/api/connection":
-            if self.application.runtime is not None:
-                connection = self.application.runtime.connection.check()
-                if self.application.z21_host and not connection.status.connected:
-                    # A dashboard health check is also a safety boundary.  If
-                    # the command station disappears while the runtime is
-                    # paused, stop application targets immediately instead of
-                    # waiting for the next dispatch tick.
-                    self.application.runtime.dispatcher.emergency_stop()
-                    self.application.track_power = False
-                    for train in self.application.trains:
-                        train["mode"] = ControlMode.STOPPED.value
-                        train["speed"] = 0
-                    self.application._sync_ui_from_runtime()
+            self.application.check_connection()
             snapshot = self.application.state()
             return self._send_json(snapshot["connection"])
         if parsed.path == "/api/events":
@@ -1952,6 +2250,8 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 )
                 return self._send_json({"result": result, "state": self.application.state()})
             if parsed.path == "/api/simulation/tick":
+                if not self.application.simulation_mode:
+                    raise ValueError("Fast-forward is only available in simulation")
                 query = parse_qs(parsed.query)
                 if "steps" in query:
                     steps = int(query["steps"][0])
@@ -1959,7 +2259,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
                     payload = self._read_json()
                     seconds = float(payload.get("seconds", 60))
                     rate = float(payload.get("rate", 1))
-                    steps = max(1, math.ceil((seconds / 60) * rate))
+                    return self._send_json(self.application.advance_simulation(seconds, rate))
                 return self._send_json(self.application.tick(steps))
             if parsed.path == "/api/layouts" or parsed.path.startswith("/api/layouts/"):
                 payload = self._read_json()
@@ -1989,7 +2289,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
     def _send_static(self, requested_path: str) -> None:
         requested_path = unquote(requested_path)
         if requested_path.startswith("/scans/"):
-            asset_root = SCAN_DIR
+            asset_root = self.application._scan_store.directory
             relative = requested_path.removeprefix("/scans/")
         else:
             asset_root = FRONTEND_DIR
@@ -2017,6 +2317,7 @@ def make_server(host: str = "127.0.0.1", port: int = 8080, application: Controll
 
     class ControllerHTTPServer(ThreadingHTTPServer):
         def server_close(self) -> None:
+            app.stop_motion_clock()
             app.stop_background_refresh()
             super().server_close()
             if application is None:
@@ -2024,6 +2325,7 @@ def make_server(host: str = "127.0.0.1", port: int = 8080, application: Controll
 
     server = ControllerHTTPServer((host, port), BoundHandler)
     app.start_background_refresh()
+    app.start_motion_clock()
     return server
 
 

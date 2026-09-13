@@ -2,7 +2,65 @@
 
 Modular Python controller and browser dashboard for an H0 model railway using the Roco/Z21 LAN interface.
 
+## Personalized controls
+
+- In Settings, use **Panel arrangement** to reorder each page's panels or move
+  the control panels to the right. Save the arrangement to retain it after restart.
+- Double-click a graph block to open its editor. Train profiles open on **Data sheet**.
+- The speed dial applies its last chosen value automatically. Changing train,
+  stopping or switching control mode cancels a queued dial change; direction
+  remains locked until the train has stopped.
+- Connection speed restrictions support a default limit and individual train
+  overrides. See [connection limits and motion](docs/CONNECTION_SPEED_LIMITS.md).
+- The HTTP controller owns a single motion clock, independent of open windows.
+  Graph markers interpolate simulation positions; physical positions are not
+  invented when feedback cannot locate a train within a block.
+- The supplied [transparent logo](docs/LOGO.md) is used by the interface and executables.
+
 ## Run locally
+
+### Windows executable
+
+For the all-in-one app-window edition, use `dist/H0-Control-Desk-Native.exe`.
+It embeds the complete interface using [pywebview](https://pywebview.flowrl.com/guide/usage.html)
+and Microsoft WebView2: no external browser or separate controller window opens.
+It starts in simulation; use **Settings → Connection → Connect to real Z21** for an
+explicitly confirmed connection. The Controller menu retains Stop and exit only.
+Switching saves the current layout after stopping trains and switching power off.
+It shares the desktop launcher's AppData, so close the
+other edition first. Microsoft Edge WebView2 Runtime is required on the destination PC.
+Build with `python -m pip install -r requirements-native.txt` followed by
+`./scripts/build_native_windows.ps1`. See [embedded edition notes](docs/WINDOWS_NATIVE.txt).
+
+The original browser-launcher edition is still available:
+
+Run `dist/H0-Control-Desk.exe`, choose Simulation, and click **Start controller**.
+The self-contained Windows x64 executable includes Python, the backend, and frontend assets;
+Visual Studio and Python are not required on the destination PC. A small desktop controller
+window opens the interface in your default browser. Keep that window open while operating;
+**Stop controller and exit** stops the controller and requests track power off.
+
+App data is stored separately in `%LOCALAPPDATA%/H0 Control Desk/`, not inside the executable.
+Existing development data is not bundled or overwritten. To transfer it, close both controllers
+and copy your `controller.sqlite3` and `scans` folder into that app-data directory, backing up
+any existing destination files first. Only one desktop controller can use port 8765 at a time.
+Physical Z21 control must be selected explicitly in the launcher and confirmed; it uses the
+IP address saved in Settings. This build is unsigned and has no installer or automatic updater.
+
+Build it on Windows using the [PyInstaller packaging tools](https://www.pyinstaller.org/en/stable/usage.html):
+
+```powershell
+python -m pip install -r requirements-build.txt
+./scripts/build_windows.ps1
+```
+
+The selected-train panel includes Forward / Reverse. Direction changes require a stationary
+train under manual or stopped control; they never start the train. Z21 direction is sent in a
+zero-speed DCC packet, and later speed commands retain that direction. In simulation, reverse
+traverses the configured route backwards; it does not create a new route. Direction is live
+controller state, not a persisted train preference, and new controller sessions start forward.
+
+### From source
 
 From the repository root:
 

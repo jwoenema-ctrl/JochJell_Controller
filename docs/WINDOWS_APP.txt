@@ -1,0 +1,22 @@
+H0 Control Desk - Windows x64
+
+1. Extract the ZIP and run H0-Control-Desk.exe.
+2. Leave Simulation selected and click Start controller.
+3. The control desk opens in your default browser. No Python installation is needed.
+4. Keep the small controller window open. Use Stop controller and exit when finished.
+
+Forward / Reverse is in the selected train panel. Stop first and use manual control.
+The direction command never starts the train. Hardware direction has been tested with
+packet-level test doubles, not with a connected physical Z21 command station.
+
+Data: %LOCALAPPDATA%\H0 Control Desk\
+Default desktop address: http://127.0.0.1:8765
+The source-code server on port 8080 uses its own separate data directory.
+
+This app is unsigned. It has no installer or automatic updates.
+The program includes no personal layouts, train database, photographs or credentials.
+Close the app before replacing the EXE with a newer version; data stays in AppData.
+
+For physical operation, save the Z21 IP in Settings, stop the launcher, restart it,
+select Z21, and confirm. Verify decoder addresses, feedback and layout configuration
+before operating actual trains. Never use software as your only emergency stop.

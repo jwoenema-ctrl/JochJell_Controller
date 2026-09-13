@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import math
 from typing import Iterable, Mapping
 
-from .interfaces import CommandResult, ConnectionStatus, TrackSnapshot
+from .interfaces import CommandResult, ConnectionStatus, TrackSnapshot, TrainMotion
+from backend.services.connection_speed import ConnectionSpeedPolicy, next_connection
+from .z21_telemetry import decode_system_state
+from .z21 import encode_dataset
 from .z21 import Z21LanTransport, build_rbus_get_data, build_set_loco_drive, build_set_track_power, build_set_turnout, decode_rbus_feedback
 
 
@@ -31,6 +35,63 @@ class Z21TrackSystem:
         self._snapshot = TrackSnapshot(0, 0.0, False)
         self._feedback_healthy = not bool(self._feedback_map)
         self._feedback_error = ""
+        self._speed_policy = ConnectionSpeedPolicy()
+        self._requested_speeds: dict[str, float] = {}
+        self._effective_speeds: dict[str, float] = {}
+
+    def configure_speed_limits(self, policy: ConnectionSpeedPolicy) -> None:
+        self._speed_policy = policy
+        for train_id, requested in tuple(self._requested_speeds.items()):
+            if requested and self._limited_speed(train_id, requested) != self._effective_speeds.get(train_id, 0.0):
+                result = self.set_train_speed(train_id, requested)
+                if not result.accepted:
+                    raise ValueError(result.detail or "connection speed limit command failed")
+
+    def get_effective_speed(self, train_id: str) -> float:
+        """Last accepted command, not a measured physical velocity."""
+        return self._effective_speeds.get(train_id, 0.0)
+
+    def get_train_speed_limit(self, train_id: str) -> float | None:
+        motion = next((m for m in self._snapshot.trains if m.train_id == train_id), None)
+        if motion and motion.block_id in motion.route:
+            return self._speed_policy.limit_kmh(train_id, next_connection(motion.block_id, motion.route, motion.direction))
+        limits = [value for edge in self._speed_policy.rules
+                  if (value := self._speed_policy.limit_kmh(train_id, edge)) is not None]
+        return min(limits) if limits else None
+
+    def _limited_speed(self, train_id: str, speed: float) -> float:
+        motion = next((m for m in self._snapshot.trains if m.train_id == train_id), None)
+        if motion is not None:
+            connection = next_connection(motion.block_id, motion.route, motion.direction)
+            if connection is not None or motion.block_id in motion.route:
+                return min(speed, self._speed_policy.normalized_limit(train_id, connection))
+        # Without a reported traversal, never assume that a restricted zone
+        # has been cleared. Use the most restrictive applicable configured cap.
+        return min([speed] + [self._speed_policy.normalized_limit(train_id, edge)
+                              for edge in self._speed_policy.rules])
+
+    def report_train_position(self, train_id: str, block_id: str, route: tuple[str, ...]) -> CommandResult:
+        old = next((m for m in self._snapshot.trains if m.train_id == train_id), None)
+        motion = TrainMotion(train_id, block_id, 0.0, old.speed if old else self.get_effective_speed(train_id),
+                             old.target_speed if old else self.get_effective_speed(train_id),
+                             1 if self.get_train_direction(train_id) else -1, route)
+        self._snapshot = replace(self._snapshot, trains=tuple(m for m in self._snapshot.trains if m.train_id != train_id) + (motion,))
+        requested = self._requested_speeds.get(train_id, 0.0)
+        if requested and self._limited_speed(train_id, requested) != motion.target_speed:
+            return self.set_train_speed(train_id, requested)
+        return CommandResult(True, "report_train_position", "position reported, not measured")
+
+    def set_train_route(self, train_id: str, route: Iterable[str]) -> CommandResult:
+        motion = next((m for m in self._snapshot.trains if m.train_id == train_id), None)
+        if motion is None:
+            return CommandResult(True, "set_train_route", "awaiting identified train position")
+        return self.report_train_position(train_id, motion.block_id, tuple(route))
+
+    def _record_speed(self, train_id: str, speed: float) -> None:
+        self._effective_speeds[train_id] = speed
+        self._snapshot = replace(self._snapshot, trains=tuple(
+            replace(m, speed=speed, target_speed=speed) if m.train_id == train_id else m
+            for m in self._snapshot.trains))
 
     def register_train(self, train_id: str, address: int, *, forward: bool = True) -> None:
         """Bind an application train ID to a validated DCC address."""
@@ -49,15 +110,39 @@ class Z21TrackSystem:
 
         removed = self._train_addresses.pop(train_id, None) is not None
         self._train_directions.pop(train_id, None)
+        self._requested_speeds.pop(train_id, None)
+        self._effective_speeds.pop(train_id, None)
+        self._snapshot = replace(self._snapshot, trains=tuple(m for m in self._snapshot.trains if m.train_id != train_id))
         return removed
 
     def check_connection(self) -> ConnectionStatus:
         status = self.transport.check_connection()
-        self._snapshot = TrackSnapshot(self._snapshot.tick, self._snapshot.time_seconds, status.connected, self._snapshot.trains, self._snapshot.occupied_blocks, self._snapshot.turnouts)
+        self._snapshot = replace(self._snapshot, powered=self._snapshot.powered and status.connected)
         return status
 
     def connection_status(self) -> ConnectionStatus:
         return self.transport.connection_status()
+
+    def read_power_telemetry(self) -> dict:
+        result, datasets = self.transport.request_datasets(
+            encode_dataset(0x0085), expected_header=0x0084, command="system_state")
+        if result.accepted:
+            for dataset in datasets:
+                if dataset.header == 0x0084:
+                    try:
+                        return decode_system_state(dataset.data)
+                    except ValueError:
+                        break
+        return {"available": False, "reason": "No fresh Z21 power readings"}
+
+    def rename_block(self, old: str, new: str) -> None:
+        """Update feedback bindings without sending hardware commands."""
+        self._feedback_map = {key: new if value == old else value for key, value in self._feedback_map.items()}
+        self._snapshot = replace(self._snapshot,
+            trains=tuple(replace(train, block_id=new if train.block_id == old else train.block_id,
+                                 route=tuple(new if item == old else item for item in train.route))
+                         for train in self._snapshot.trains),
+            occupied_blocks={new if key == old else key: value for key, value in self._snapshot.occupied_blocks.items()})
 
     def get_snapshot(self) -> TrackSnapshot:
         return self._snapshot
@@ -69,34 +154,69 @@ class Z21TrackSystem:
         return self._snapshot
 
     def set_train_speed(self, train_id: str, speed: float) -> CommandResult:
+        if not 0.0 <= float(speed) <= 1.0:
+            raise ValueError("speed must be between 0 and 1")
         address = self._train_addresses.get(train_id)
         if address is None:
             return CommandResult(False, "set_train_speed", f"no DCC address registered for {train_id}")
-        return self.set_train_speed_by_address(
+        effective = self._limited_speed(train_id, speed)
+        result = self.set_train_speed_by_address(
             address,
-            speed,
+            effective,
             forward=self._train_directions.get(train_id, True),
+            speed_limit=self._limited_speed(train_id, 1.0) if self.get_train_speed_limit(train_id) is not None else None,
         )
+        if result.accepted:
+            self._requested_speeds[train_id] = speed
+            self._record_speed(train_id, effective)
+        else:
+            self._requested_speeds[train_id] = 0.0
+        return result
 
-    def set_train_speed_by_address(self, address: int, speed: float, *, forward: bool = True) -> CommandResult:
+    def set_train_speed_by_address(self, address: int, speed: float, *, forward: bool = True, speed_limit: float | None = None) -> CommandResult:
         if not 0.0 <= float(speed) <= 1.0:
             raise ValueError("speed must be between 0 and 1")
         dcc_speed = round(float(speed) * 126)
+        if speed_limit is not None:
+            dcc_speed = min(dcc_speed, math.floor(speed_limit * 126))
         # In 128-step DCC, value 1 is reserved for emergency stop. Keep a
         # small but non-zero normalized command a normal drive command.
         if dcc_speed == 1:
-            dcc_speed = 2
+            dcc_speed = 0 if speed_limit is not None and speed_limit * 126 < 2 else 2
         try:
             packet = build_set_loco_drive(address, dcc_speed, forward=forward)
         except ValueError as exc:
             return CommandResult(False, "set_train_speed", str(exc))
         return self.transport.send_dataset(packet, command="set_loco_drive")
 
+    def get_train_direction(self, train_id: str) -> bool:
+        return self._train_directions.get(train_id, True)
+
+    def set_train_direction(self, train_id: str, *, forward: bool) -> CommandResult:
+        """Send a zero-speed direction packet; caller must require a stopped train."""
+        address = self._train_addresses.get(train_id)
+        if address is None:
+            return CommandResult(False, "set_direction", "no DCC address registered")
+        motion = next((m for m in self._snapshot.trains if m.train_id == train_id), None)
+        if self._requested_speeds.get(train_id, 0) > 0 or self.get_effective_speed(train_id) > 0 or (motion and motion.target_speed > 0):
+            return CommandResult(False, "set_direction", "stop the train before changing direction")
+        result = self.stop_by_address(address, forward=forward)
+        if result.accepted:
+            self._train_directions[train_id] = forward
+            self._snapshot = replace(self._snapshot, trains=tuple(
+                replace(m, direction=1 if forward else -1) if m.train_id == train_id else m
+                for m in self._snapshot.trains))
+        return result
+
     def stop_train(self, train_id: str) -> CommandResult:
+        self._requested_speeds[train_id] = 0.0
         address = self._train_addresses.get(train_id)
         if address is None:
             return CommandResult(False, "stop_train", f"no DCC address registered for {train_id}")
-        return self.stop_by_address(address, forward=self._train_directions.get(train_id, True))
+        result = self.stop_by_address(address, forward=self._train_directions.get(train_id, True))
+        if result.accepted:
+            self._record_speed(train_id, 0.0)
+        return result
 
     def stop_by_address(self, address: int, *, forward: bool = True) -> CommandResult:
         packet = build_set_loco_drive(address, 0, forward=forward)
@@ -107,6 +227,10 @@ class Z21TrackSystem:
 
         result = self.transport.send_dataset(build_set_track_power(bool(enabled)), command="set_power")
         if result.accepted:
+            if not enabled:
+                self._requested_speeds.clear()
+                for train_id in tuple(self._effective_speeds):
+                    self._record_speed(train_id, 0.0)
             self._snapshot = TrackSnapshot(
                 self._snapshot.tick,
                 self._snapshot.time_seconds,

@@ -14,6 +14,7 @@ from typing import Any, Mapping, TypeVar
 from backend.core.models import (
     Block,
     BlockState,
+    ConnectionSpeedLimit,
     LayoutSnapshot,
     Platform,
     PhotoScan,
@@ -132,6 +133,7 @@ def snapshot_from_dict(value: Mapping[str, Any]) -> LayoutSnapshot:
         trains=tuple(_build_entity(Train, item) for item in value.get("trains", ())),
         schedules=tuple(_build_entity(Schedule, item) for item in value.get("schedules", ())),
         scans=tuple(_build_entity(PhotoScan, item) for item in value.get("scans", ())),
+        connection_limits=tuple(_build_entity(ConnectionSpeedLimit, item) for item in value.get("connection_limits", ())),
     )
 
 

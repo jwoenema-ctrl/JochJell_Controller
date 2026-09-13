@@ -333,6 +333,7 @@ class Train:
     destination_block_id: str | None = None
     consist_ids: tuple[str, ...] = ()
     mass_g: float = 0.0
+    requested_speed_kmh: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _require_text(self.id, "id"))
@@ -343,6 +344,10 @@ class Train:
         object.__setattr__(self, "max_speed_kmh", _require_non_negative(self.max_speed_kmh, "max_speed_kmh"))
         object.__setattr__(self, "speed_kmh", _require_non_negative(self.speed_kmh, "speed_kmh"))
         object.__setattr__(self, "mass_g", _require_non_negative(self.mass_g, "mass_g"))
+        if self.requested_speed_kmh is not None:
+            object.__setattr__(self, "requested_speed_kmh", _require_non_negative(self.requested_speed_kmh, "requested_speed_kmh"))
+            if self.max_speed_kmh and self.requested_speed_kmh > self.max_speed_kmh:
+                raise ValueError("requested_speed_kmh must not exceed max_speed_kmh")
         if self.max_speed_kmh and self.speed_kmh > self.max_speed_kmh:
             raise ValueError("speed_kmh must not exceed max_speed_kmh")
         object.__setattr__(self, "consist_ids", _unique_ids(self.consist_ids, "consist_ids", allow_self=self.id))
@@ -399,6 +404,36 @@ class Schedule:
             object.__setattr__(self, field_name, getattr(self, field_name).strip())
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectionSpeedLimit:
+    """One directed connection, in scale km/h; overrides replace the default."""
+
+    from_block_id: str
+    to_block_id: str
+    speed_limit_kmh: float | None = None
+    train_speed_limits: tuple[tuple[str, float], ...] = ()
+
+    @property
+    def id(self) -> str:
+        return f"{self.from_block_id}>{self.to_block_id}"
+
+    def __post_init__(self) -> None:
+        _require_text(self.from_block_id, "from_block_id")
+        _require_text(self.to_block_id, "to_block_id")
+        if self.from_block_id == self.to_block_id:
+            raise ValueError("connection endpoints must differ")
+        def speed(value: float) -> float:
+            if isinstance(value, bool):
+                raise ValueError("speed limit must be a number, not a boolean")
+            return _require_non_negative(value, "speed limit")
+        if self.speed_limit_kmh is not None:
+            object.__setattr__(self, "speed_limit_kmh", speed(self.speed_limit_kmh))
+        overrides = tuple((_require_text(key, "train_id"), speed(value)) for key, value in self.train_speed_limits)
+        if len(dict(overrides)) != len(overrides):
+            raise ValueError("duplicate train speed overrides")
+        object.__setattr__(self, "train_speed_limits", overrides)
+
+
 _EntityT = TypeVar("_EntityT")
 
 
@@ -417,6 +452,7 @@ class LayoutSnapshot:
     trains: tuple[Train, ...] = ()
     schedules: tuple[Schedule, ...] = ()
     scans: tuple[PhotoScan, ...] = ()
+    connection_limits: tuple[ConnectionSpeedLimit, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.revision, int) or self.revision < 0:
@@ -432,6 +468,7 @@ class LayoutSnapshot:
             "trains",
             "schedules",
             "scans",
+            "connection_limits",
         ):
             values = tuple(getattr(self, field_name))
             ids = tuple(getattr(value, "id") for value in values)
@@ -446,6 +483,15 @@ class LayoutSnapshot:
         turntable_ids = {turntable.id for turntable in self.turntables}
         platform_ids = {platform.id for platform in self.platforms}
         train_ids = {train.id for train in self.trains}
+        connections = {(b.id, n) for b in self.blocks for n in b.neighbor_ids}
+        for turnout in self.turnouts:
+            for other in (turnout.straight_block_id, turnout.diverging_block_id):
+                connections.update(((turnout.entry_block_id, other), (other, turnout.entry_block_id)))
+        for rule in self.connection_limits:
+            if (rule.from_block_id, rule.to_block_id) not in connections:
+                raise ValueError(f"speed limit references missing connection: {rule.id}")
+            for train_id, _ in rule.train_speed_limits:
+                _require_reference(train_id, rule.id, "train", train_ids)
         graph_node_ids = block_ids | waypoint_ids | turntable_ids
         platform_by_id = {platform.id: platform for platform in self.platforms}
 
