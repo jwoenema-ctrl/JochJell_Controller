@@ -19,7 +19,9 @@ LAN_X_HEADER = 0x0040
 LAN_LOGOFF = 0x0030
 LAN_X_GET_VERSION = 0x21
 LAN_X_GET_VERSION_REPLY = 0x63
-Z21_COMMAND_STATION_ID = 0x12
+# Z21-family command stations normally report 0x12. Some z21start firmware
+# reports 0x13 while using the same documented LAN_X_GET_VERSION framing.
+Z21_COMMAND_STATION_IDS = frozenset((0x12, 0x13))
 LAN_X_SET_LOCO_DRIVE = 0xE4
 LAN_X_SET_TURNOUT = 0x53
 LAN_X_SET_TRACK_POWER_OFF = 0x80
@@ -298,7 +300,7 @@ def _is_version_response(datasets: tuple[Z21Dataset, ...]) -> bool:
         if (
             len(dataset.data) == 5
             and dataset.data[:2] == bytes((LAN_X_GET_VERSION_REPLY, LAN_X_GET_VERSION))
-            and dataset.data[3] == Z21_COMMAND_STATION_ID
+            and dataset.data[3] in Z21_COMMAND_STATION_IDS
         ):
             return True
     return False

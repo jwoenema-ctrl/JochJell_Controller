@@ -54,6 +54,12 @@ def version_reply() -> bytes:
     return encode_dataset(LAN_X_HEADER, b"\x63\x21\x30\x12\x60")
 
 
+def z21start_version_reply() -> bytes:
+    """Reply observed from a z21start running the user's firmware."""
+
+    return encode_dataset(LAN_X_HEADER, b"\x63\x21\x40\x13\x11")
+
+
 def power_broadcast() -> bytes:
     return encode_xbus(0x61, 0x00)
 
@@ -136,6 +142,16 @@ class Z21TransportTests(unittest.TestCase):
         self.assertTrue(status.connected)
         self.assertEqual(len(socket.sent), 2)
         self.assertIn("attempt 2", status.detail)
+
+    def test_connection_accepts_z21start_command_station_id_13(self) -> None:
+        socket = FakeDatagramSocket([z21start_version_reply()])
+        transport = Z21LanTransport(socket_factory=lambda: socket)
+
+        transport.open()
+        status = transport.check_connection()
+
+        self.assertTrue(status.connected)
+        self.assertIn("attempt 1", status.detail)
 
     def test_connection_reports_exhausted_retry_budget(self) -> None:
         socket = FakeDatagramSocket()
