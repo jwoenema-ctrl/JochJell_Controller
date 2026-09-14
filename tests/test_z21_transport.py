@@ -97,6 +97,28 @@ class Z21TransportTests(unittest.TestCase):
         self.assertEqual(socket.sent[0][0], build_get_version())
         self.assertEqual(len(socket.responses), 0)
 
+    def test_connection_retries_a_late_v143_version_reply(self) -> None:
+        socket = FakeDatagramSocket([TimeoutError("first reply was late"), version_reply()])
+        transport = Z21LanTransport(socket_factory=lambda: socket)
+
+        transport.open()
+        status = transport.check_connection()
+
+        self.assertTrue(status.connected)
+        self.assertEqual(len(socket.sent), 2)
+        self.assertIn("attempt 2", status.detail)
+
+    def test_connection_reports_exhausted_retry_budget(self) -> None:
+        socket = FakeDatagramSocket()
+        transport = Z21LanTransport(socket_factory=lambda: socket)
+
+        transport.open()
+        status = transport.check_connection()
+
+        self.assertFalse(status.connected)
+        self.assertEqual(len(socket.sent), 3)
+        self.assertIn("after 3 attempts", status.detail)
+
     def test_connection_rejects_bad_xbus_checksum(self) -> None:
         bad_reply = encode_dataset(LAN_X_HEADER, b"\x63\x21\x30\x12\x61")
         socket = FakeDatagramSocket([bad_reply])

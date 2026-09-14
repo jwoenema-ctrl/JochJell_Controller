@@ -315,7 +315,8 @@ class Z21LanTransport:
         host: str = "192.168.0.111",
         *,
         port: int = Z21_PORT,
-        timeout: float = 0.25,
+        timeout: float = 1.0,
+        connection_attempts: int = 3,
         socket_factory: Callable[[], DatagramSocket] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -325,9 +326,12 @@ class Z21LanTransport:
             raise ValueError("port must be a valid UDP port")
         if timeout <= 0:
             raise ValueError("timeout must be positive")
+        if type(connection_attempts) is not int or connection_attempts < 1:
+            raise ValueError("connection_attempts must be a positive integer")
         self.host = host
         self.port = port
         self.timeout = float(timeout)
+        self.connection_attempts = connection_attempts
         self._socket_factory = socket_factory or self._default_socket
         self._clock = clock
         self._socket: DatagramSocket | None = None
@@ -398,13 +402,27 @@ class Z21LanTransport:
             return self._status
         try:
             request = build_get_version()
-            sent = self._socket.sendto(request, (self.host, self.port))
-            if sent != len(request):
-                raise OSError("short UDP send while checking the Z21 connection")
-            datasets = self._receive_until(_is_version_response, allow_legacy_version_marker=True)
-            if not _is_version_response(datasets):
-                raise ValueError("unexpected Z21 version response")
-            self._status = ConnectionStatus(ConnectionState.CONNECTED, self.endpoint, checked_at=self._clock())
+            for attempt in range(1, self.connection_attempts + 1):
+                sent = self._socket.sendto(request, (self.host, self.port))
+                if sent != len(request):
+                    raise OSError("short UDP send while checking the Z21 connection")
+                try:
+                    datasets = self._receive_until(_is_version_response, allow_legacy_version_marker=True)
+                except TimeoutError:
+                    if attempt == self.connection_attempts:
+                        raise TimeoutError(
+                            f"Z21 version reply timeout after {self.connection_attempts} attempts"
+                        )
+                    continue
+                if not _is_version_response(datasets):
+                    raise ValueError("unexpected Z21 version response")
+                self._status = ConnectionStatus(
+                    ConnectionState.CONNECTED,
+                    self.endpoint,
+                    f"Z21 version reply received on attempt {attempt}",
+                    self._clock(),
+                )
+                break
         except (OSError, TypeError, ValueError) as exc:
             self._status = ConnectionStatus(ConnectionState.DISCONNECTED, self.endpoint, str(exc), self._clock())
         return self._status

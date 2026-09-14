@@ -372,7 +372,7 @@
       const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
       app.state.connection = simulated
         ? { ...app.state.connection, connected: false, simulated: true, label: 'Simulation online', detail: 'No physical trains connected' }
-        : { ...app.state.connection, connected: Boolean(app.state.connection.connected), simulated: false, label: app.state.connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: `${successCount}/${endpoints.length} endpoints responding` };
+        : { ...app.state.connection, connected: Boolean(app.state.connection.connected), simulated: false, label: app.state.connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: app.state.connection.detail || `${successCount}/${endpoints.length} endpoints responding` };
     } else {
       app.state.connection = { connected: false, simulated: true, label: 'Simulation fallback', detail: 'Local sample state' };
     }
@@ -388,7 +388,7 @@
     if (connectionResult && connectionResult.status === 'fulfilled') {
       const connection = unwrap(connectionResult.value) || {};
       const simulated = Boolean(connection.simulated || connection.mode === 'simulation');
-      app.state.connection = { ...app.state.connection, ...connection, simulated, connected: simulated ? false : Boolean(connection.connected), label: simulated ? 'Simulation online' : connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: simulated ? 'No physical trains connected' : 'Live connection check' };
+      app.state.connection = { ...app.state.connection, ...connection, simulated, connected: simulated ? false : Boolean(connection.connected), label: simulated ? 'Simulation online' : connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: simulated ? 'No physical trains connected' : connection.detail || 'No diagnostic detail returned by the controller' };
     } else {
       app.state.connection = { connected: false, simulated: false, label: 'Controller unavailable', detail: 'Check the local server' };
     }
