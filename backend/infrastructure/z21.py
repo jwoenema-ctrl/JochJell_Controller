@@ -431,7 +431,7 @@ class Z21LanTransport:
         """Send a packet only after an explicit successful connection check."""
 
         if not self._status.connected or self._socket is None:
-            return CommandResult(False, command, "Z21 is not connected")
+            return CommandResult(False, command, f"Z21 is not connected at {self.endpoint}: {self._status.detail or self._status.state.value}")
         try:
             packet = bytes(packet)
             _decode_transport_payload(packet)
@@ -456,7 +456,7 @@ class Z21LanTransport:
         """Send one request and decode the combined response datasets."""
 
         if not self._status.connected or self._socket is None:
-            return CommandResult(False, command, "Z21 is not connected"), ()
+            return CommandResult(False, command, f"Z21 is not connected at {self.endpoint}: {self._status.detail or self._status.state.value}"), ()
         try:
             packet = bytes(packet)
             _decode_transport_payload(packet)

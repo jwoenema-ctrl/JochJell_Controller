@@ -70,6 +70,35 @@ def connected_transport(socket: FakeDatagramSocket) -> Z21LanTransport:
 
 
 class Z21TransportTests(unittest.TestCase):
+    def test_disconnected_commands_and_ui_preserve_latest_transport_failure(self):
+        from backend.api.server import ControllerApplication
+        from unittest.mock import Mock
+
+        socket = FakeDatagramSocket()
+        transport = Z21LanTransport(socket_factory=lambda: socket)
+        transport.open()
+        status = transport.check_connection()
+        result = transport.send_dataset(build_set_track_power(False))
+        self.assertIn(status.detail, result.detail)
+        self.assertIn(transport.endpoint, result.detail)
+        request, _ = transport.request_datasets(build_rbus_get_data(0))
+        self.assertIn(status.detail, request.detail)
+
+        app = ControllerApplication.sample()
+        original_track = app.runtime.track
+        try:
+            app.z21_host = transport.host
+            app.simulation_mode = False
+            app.runtime.track = Mock(wraps=original_track)
+            app.runtime.track.connection_status = Mock(return_value=status)
+            payload = app.state()["connection"]
+            self.assertFalse(payload["connected"])
+            self.assertEqual(payload["detail"], status.detail)
+            self.assertEqual(payload["label"], "Z21 disconnected")
+        finally:
+            app.runtime.track = original_track
+            app.close()
+
     def test_documented_framing_and_combined_datasets_round_trip(self) -> None:
         first = encode_dataset(0x0010, b"abc")
         second = encode_xbus(0x61, 0x01)

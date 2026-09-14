@@ -923,7 +923,7 @@ class ControllerApplication:
         self._last_train_blocks = current_blocks
 
     def _snapshot(self) -> dict[str, Any]:
-        connection = self.runtime.connection.status if self.runtime is not None else None
+        connection = self.runtime.track.connection_status() if self.runtime is not None and self.z21_host else self.runtime.connection.status if self.runtime is not None else None
         connected = bool(connection.connected) if connection is not None else self.connected
         feedback_healthy = getattr(self.runtime.track, "feedback_healthy", True) if self.runtime is not None else True
         feedback_error = getattr(self.runtime.track, "feedback_error", "") if self.runtime is not None else ""
@@ -1019,8 +1019,8 @@ class ControllerApplication:
                 "simulated": snapshot["simulation_mode"],
                 "mode": snapshot["connection"]["mode"],
                 "endpoint": snapshot["connection"]["endpoint"],
-                "label": "Simulation fallback" if snapshot["simulation_mode"] else "Z21 controller online",
-                "detail": "Local sample state" if snapshot["simulation_mode"] else "Z21 LAN adapter",
+                "label": "Simulation fallback" if snapshot["simulation_mode"] else "Z21 connected" if snapshot["connected"] else "Z21 disconnected",
+                "detail": "Local sample state" if snapshot["simulation_mode"] else snapshot["connection"]["detail"],
             },
             "simulation": {
                 "running": self.simulation_running,
