@@ -58,6 +58,7 @@ class WlanReleaseContractTests(unittest.TestCase):
             "needs: windows",
             "contents: write",
             "gh release create",
+            '--repo "$GITHUB_REPOSITORY"',
             "H0-Control-Desk-Native.exe",
             "H0-Control-Desk-Native-Windows-x64.zip",
             "SHA256SUMS.txt",

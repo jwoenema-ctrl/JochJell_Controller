@@ -94,4 +94,4 @@ jobs:
             dist/H0-Control-Desk-Native-Windows-x64.zip
             dist/SHA256SUMS.txt
           )
-          gh release create "$GITHUB_REF_NAME" "${assets[@]}" --verify-tag --generate-notes --title "H0 Control Desk $GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --notes "Standalone Windows release with Roco 10814 WLAN support." --title "H0 Control Desk $GITHUB_REF_NAME"
