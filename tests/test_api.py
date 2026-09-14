@@ -306,6 +306,21 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_explicit_speed_resumes_safe_stopped_train_and_stop_command_halts_it(self) -> None:
+        app = ControllerApplication.sample()
+        try:
+            app.command({"type": "set_train_mode", "train_id": "t1", "mode": "stopped"})
+            app.command({"type": "set_speed", "train_id": "t1", "speed": 35})
+            train = next(item for item in app.state()["trains"] if item["id"] == "t1")
+            self.assertEqual(train["mode"], "manual")
+            self.assertEqual(train["speed"], 35)
+            app.command({"type": "stop_train", "train_id": "t1"})
+            train = next(item for item in app.state()["trains"] if item["id"] == "t1")
+            self.assertEqual(train["speed"], 0)
+            self.assertTrue(all(state.desired_speed == 0 for state in app.runtime.dispatcher.trains.values()))
+        finally:
+            app.close()
+
     def test_train_database_detail_commands_are_persisted_and_evented(self) -> None:
         app = ControllerApplication.sample()
         try:

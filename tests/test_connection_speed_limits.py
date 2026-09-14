@@ -293,6 +293,14 @@ class ConnectionAdapterTests(unittest.TestCase):
         self.assertEqual(transport.send_dataset.call_count, before)
         self.assertEqual(track.get_snapshot().trains[0].target_speed, 0)
 
+    def test_physical_decoder_function_is_sent_and_remembered(self):
+        track, transport = self.physical()
+        result = track.set_train_function("train", 3, enabled=True)
+        self.assertTrue(result.accepted)
+        self.assertEqual(transport.set_loco_function.call_args.kwargs, {"enabled": True})
+        self.assertEqual(transport.set_loco_function.call_args.args, (7, 3))
+        self.assertEqual(track.get_train_functions("train"), {3: True})
+
     def test_physical_unknown_position_conservative_and_failures_do_not_replay(self):
         track, transport = self.physical()
         track.set_train_speed("train", .8)

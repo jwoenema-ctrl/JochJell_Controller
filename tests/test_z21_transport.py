@@ -11,6 +11,7 @@ from backend.infrastructure.z21 import (
     Z21LanTransport,
     build_get_version,
     build_rbus_get_data,
+    build_set_loco_function,
     build_set_track_power,
     decode_dataset,
     encode_dataset,
@@ -286,6 +287,14 @@ class Z21TransportTests(unittest.TestCase):
             build_set_loco_drive(3, 1)
         with self.assertRaises(ValueError):
             build_set_loco_drive(0, 0)
+
+    def test_build_set_loco_function_uses_documented_on_off_encoding(self) -> None:
+        on = build_set_loco_function(7, 0, enabled=True)
+        off = build_set_loco_function(7, 1, enabled=False)
+        self.assertEqual(on, encode_xbus(0xE4, 0xF8, 0x00, 0x07, 0x40))
+        self.assertEqual(off, encode_xbus(0xE4, 0xF8, 0x00, 0x07, 0x01))
+        with self.assertRaises(ValueError):
+            build_set_loco_function(7, 32, enabled=True)
 
 
 if __name__ == "__main__":

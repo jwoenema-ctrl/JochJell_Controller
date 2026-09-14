@@ -1267,6 +1267,7 @@ class ControllerApplication:
                 "length": display_length,
                 "maxSpeed": max_speed,
                 "consist": train.get("consist", []),
+                "decoder_function_states": dict(train.get("decoder_function_states", {})),
                 **self._train_motion_state(train),
             })
         return result
@@ -1682,6 +1683,12 @@ class ControllerApplication:
                 if self.runtime is not None:
                     normalized = requested_speed / maximum
                     control = self.runtime.dispatcher.register_train(train_id)
+                    if requested_speed > 0 and control.mode is ControlMode.STOPPED:
+                        # A stopped train is the safe startup state. An explicit
+                        # speed request is the operator's instruction to resume
+                        # it under manual control.
+                        control.mode = ControlMode.MANUAL
+                        train["mode"] = ControlMode.MANUAL.value
                     if control.mode is ControlMode.AUTOMATIC:
                         result = self.runtime.dispatcher.automatic_speed(train_id, normalized)
                     else:
@@ -1697,6 +1704,42 @@ class ControllerApplication:
                     )
                 )
                 self.events.append({"type": "train_command", "train_id": train_id, "speed": train["speed"]})
+            elif kind in {"stop_train", "stop"}:
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((item for item in self.trains if item["id"] == train_id), None)
+                if train is None:
+                    raise ValueError(f"Unknown train: {train_id}")
+                if self.runtime is not None:
+                    result = self.runtime.track.stop_train(train_id)
+                    if hasattr(result, "accepted") and not result.accepted:
+                        raise ValueError(result.detail or "train stop command rejected")
+                    control = self.runtime.dispatcher.register_train(train_id)
+                    control.manual_speed = control.automatic_speed = 0.0
+                    control.last_command = "stop_train"
+                train["speed"] = train["requested_speed_kmh"] = 0
+                self.events.append({"type": "train_stopped", "train_id": train_id})
+            elif kind in {"set_train_function", "set_decoder_function_state", "toggle_train_function"}:
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((item for item in self.trains if item["id"] == train_id), None)
+                if train is None:
+                    raise ValueError(f"Unknown train: {train_id}")
+                raw_number = payload.get("function_number", payload.get("number"))
+                if isinstance(payload.get("function"), dict):
+                    raw_number = payload["function"].get("function_number", payload["function"].get("number", raw_number))
+                try:
+                    function_number = int(raw_number)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("function number must be an integer") from exc
+                if not 0 <= function_number <= 31:
+                    raise ValueError("function number must be between 0 and 31")
+                enabled = bool(payload.get("enabled", payload.get("active", payload.get("state", False))))
+                if self.runtime is not None and hasattr(self.runtime.track, "set_train_function"):
+                    result = self.runtime.track.set_train_function(train_id, function_number, enabled=enabled)
+                    if hasattr(result, "accepted") and not result.accepted:
+                        raise ValueError(result.detail or "decoder function command rejected")
+                states = train.setdefault("decoder_function_states", {})
+                states[str(function_number)] = enabled
+                self.events.append({"type": "train_function_changed", "train_id": train_id, "function_number": function_number, "enabled": enabled})
             elif kind in {"track_power", "power"}:
                 previous_power = self.track_power
                 requested_power = bool(payload.get("enabled", payload.get("value", True)))

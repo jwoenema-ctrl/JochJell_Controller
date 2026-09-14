@@ -1417,6 +1417,45 @@
     showToast('Maintenance record deleted', 'success');
   }
 
+  const DEFAULT_FUNCTION_NAMES = { 0: 'Headlights', 1: 'Horn', 2: 'Whistle', 3: 'Shunting mode', 4: 'Coupler', 5: 'Sound', 6: 'Cab lights', 7: 'Auxiliary' };
+
+  function decoderFunctionRows(train) {
+    const mappings = Array.isArray(train.decoder_functions) ? train.decoder_functions : [];
+    const byNumber = new Map(mappings.map((item) => [Number(item.function_number), item]));
+    const states = train.decoder_function_states && typeof train.decoder_function_states === 'object' ? train.decoder_function_states : {};
+    return Array.from({ length: 32 }, (_, number) => {
+      const mapping = byNumber.get(number) || {};
+      const active = Boolean(states[String(number)]);
+      const available = mapping.enabled !== false;
+      const label = mapping.name || DEFAULT_FUNCTION_NAMES[number] || 'Function ' + number;
+      return '<button type="button" class="function-toggle' + (active ? ' is-on' : '') + '" data-function-number="' + number + '" aria-pressed="' + active + '"' + (available ? '' : ' disabled') + '><strong>F' + number + '</strong><span>' + escapeHtml(label) + '</span><small>' + (active ? 'ON' : 'OFF') + '</small></button>';
+    }).join('');
+  }
+
+  function renderFunctionControls(train, compact) {
+    return '<section class="function-control-panel' + (compact ? ' is-compact' : '') + '"><div class="record-section-heading"><div><p class="eyebrow">DECODER CONTROL</p><h3>Functions <span>F0–F31</span></h3></div><span class="settings-help">Changes are sent to the selected decoder</span></div><div class="function-toggle-grid">' + decoderFunctionRows(train) + '</div></section>';
+  }
+
+  function bindFunctionControls(root) {
+    $$('.function-toggle', root).forEach((button) => button.addEventListener('click', () => toggleTrainFunction(Number(button.dataset.functionNumber), button.getAttribute('aria-pressed') !== 'true')));
+  }
+
+  async function toggleTrainFunction(functionNumber, enabled) {
+    const train = selectedTrain();
+    if (!train || !Number.isInteger(functionNumber)) return;
+    const states = train.decoder_function_states && typeof train.decoder_function_states === 'object' ? train.decoder_function_states : {};
+    const previous = Boolean(states[String(functionNumber)]);
+    train.decoder_function_states = { ...states, [String(functionNumber)]: Boolean(enabled) };
+    renderEditor();
+    renderAssembler();
+    const response = await sendCommand({ type: 'set_train_function', train_id: train.id, function_number: functionNumber, enabled: Boolean(enabled) });
+    if (!response) {
+      train.decoder_function_states[String(functionNumber)] = previous;
+      renderEditor();
+      renderAssembler();
+    } else showToast('F' + functionNumber + (enabled ? ' enabled' : ' disabled'), 'success');
+  }
+
   function renderEditor() {
     const train = selectedTrain();
     const content = $('#editor-content');
@@ -1430,6 +1469,8 @@
       const controlMode = trainControlMode(train);
       const controlModeOptions = TRAIN_CONTROL_MODES.map((option) => `<option value="${option.value}"${option.value === controlMode ? ' selected' : ''}>${option.label}</option>`).join('');
       content.innerHTML = `<div class="field-grid"><div class="field"><label for="editor-name">Service name</label><input id="editor-name" value="${escapeHtml(train.name || '')}"></div><div class="field"><label for="editor-number">DCC address / service no.</label><input id="editor-number" inputmode="numeric" value="${escapeHtml(train.number || '')}"></div><div class="field"><label for="editor-origin">Origin</label><input id="editor-origin" value="${escapeHtml(train.origin || '')}"></div><div class="field"><label for="editor-destination">Destination</label><input id="editor-destination" value="${escapeHtml(train.destination || '')}"></div><div class="field"><label for="editor-destination-block">Destination block</label><select id="editor-destination-block">${destinationOptions || '<option value="">No blocks configured</option>'}</select></div><div class="field train-control-mode-field"><label for="editor-control-mode">Control mode</label><select id="editor-control-mode">${controlModeOptions}</select></div><div class="field"><label for="editor-manufacturer">Manufacturer</label><input id="editor-manufacturer" value="${escapeHtml(train.manufacturer || '')}"></div><div class="field"><label for="editor-model">Model / catalogue no.</label><input id="editor-model" value="${escapeHtml(train.model_number || '')}"></div><div class="field"><label for="editor-era">Railway era</label><input id="editor-era" value="${escapeHtml(train.era || '')}"></div><div class="field"><label for="editor-protocol">Decoder protocol</label><select id="editor-protocol"><option value="DCC"${String(train.decoder_protocol || 'DCC').toUpperCase() === 'DCC' ? ' selected' : ''}>DCC</option><option value="MM"${String(train.decoder_protocol || '').toUpperCase() === 'MM' ? ' selected' : ''}>Motorola</option><option value="SX"${String(train.decoder_protocol || '').toUpperCase() === 'SX' ? ' selected' : ''}>Selectrix</option></select></div><div class="field"><label for="editor-mass">Mass (g)</label><input id="editor-mass" type="number" min="0" step="1" value="${escapeHtml(mass)}"></div><div class="field"><label for="editor-length">Length (mm)</label><input id="editor-length" type="number" min="0" step="1" value="${escapeHtml(lengthMm)}"></div><div class="field"><label for="editor-max-speed">Maximum speed (km/h)</label><input id="editor-max-speed" type="number" min="0" step="1" value="${escapeHtml(train.maxSpeed || 140)}"></div></div><p class="editor-note">Changes are held in the dashboard until saved to the controller. The same profile can drive manual, automatic, and schedule simulation modes.</p><div class="button-row" style="padding: 12px 0 0"><button class="button button-primary" id="save-train-settings">Save profile</button><button class="button button-soft" id="route-selected">Plan route</button></div>`;
+      content.insertAdjacentHTML('beforeend', renderFunctionControls(train, false));
+      bindFunctionControls(content);
       $('#save-train-settings').addEventListener('click', saveTrainSettings);
       $('#editor-control-mode').addEventListener('change', (event) => setTrainMode(event.target.value));
       $('#route-selected').addEventListener('click', () => sendCommand({ type: 'plan_route', train_id: train.id, destination_block_id: $('#editor-destination-block').value }));
@@ -1651,6 +1692,11 @@
     const draftStatus = $('.assembler-panel .tiny-status');
     if (draftStatus) draftStatus.textContent = app.consistDraft && app.consistDraft.trainId === (train && train.id) ? '● Draft' : '● Stored';
     $('#consist-list').innerHTML = consist.length ? consist.map((item, index) => `<div class="consist-item"><span class="consist-icon">${index === 0 ? '▣' : '▤'}</span><span><strong>${escapeHtml(item.name || item.type || 'Vehicle')}</strong><small>${escapeHtml(item.detail || item.type || 'Rolling stock')}</small></span><span class="consist-position">${index === 0 ? 'Front' : `${index + 1}/${consist.length}`}</span><span class="consist-actions"><button type="button" class="icon-button small consist-action" data-consist-action="up" data-consist-index="${index}" aria-label="Move ${escapeHtml(item.name || 'vehicle')} forward"${index === 0 ? ' disabled' : ''}>↑</button><button type="button" class="icon-button small consist-action" data-consist-action="down" data-consist-index="${index}" aria-label="Move ${escapeHtml(item.name || 'vehicle')} backward"${index === consist.length - 1 ? ' disabled' : ''}>↓</button><button type="button" class="icon-button small consist-action" data-consist-action="remove" data-consist-index="${index}" aria-label="Remove ${escapeHtml(item.name || 'vehicle')}">×</button></span></div>`).join('') : '<div class="empty-state">No rolling stock assigned. Choose an entry below to start the consist.</div>';
+    const functionHost = $('#assembler-functions');
+    if (functionHost) {
+      functionHost.innerHTML = train ? renderFunctionControls(train, true) : '';
+      if (train) bindFunctionControls(functionHost);
+    }
     $$('.consist-action', $('#consist-list')).forEach((button) => button.addEventListener('click', () => {
       const index = Number(button.dataset.consistIndex);
       if (button.dataset.consistAction === 'remove') removeConsistItem(index);
@@ -1940,7 +1986,7 @@
   }
 
   async function sendCommand(command) {
-    const changesControl = ['set_train_mode', 'set_mode', 'track_power', 'emergency_stop', 'stop_all'].includes(command.type);
+    const changesControl = ['set_train_mode', 'set_mode', 'track_power', 'emergency_stop', 'stop_all', 'stop_train', 'stop'].includes(command.type);
     let releaseControl = null;
     if (changesControl) {
       app.controlPending = (app.controlPending || 0) + 1;
@@ -1980,7 +2026,7 @@
       speedInFlight = speedInFlight.then(async () => {
         app.speedSending = true; renderSidebar();
         try {
-          const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'set_speed', train_id: train.id, speed_kmh: 0 }) });
+          const response = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'stop_train', train_id: train.id }) });
           mergePayload(response); renderAll();
         } catch (error) { showToast(`Stop not confirmed: ${error.message}`, 'warning'); }
         finally { app.speedSending = false; renderSidebar(); }
@@ -2306,6 +2352,7 @@
   function applyDynamicStyles() {
     const style = document.createElement('style');
     style.textContent = '.is-collapsed .editor-tabs, .is-collapsed .editor-content { display: none; } .is-collapsed { min-height: 0 !important; } .empty-state { padding: 24px 18px; color: var(--faint); font-size: 10px; } #sync-ribbon[data-tone="warning"] .ribbon-icon { color: var(--yellow); } #sync-ribbon[data-tone="success"] .ribbon-icon { color: var(--green); } .systematic-legend { display: flex; justify-content: space-between; gap: 12px; padding: 0 18px 7px; color: var(--faint); font-size: 9px; } .systematic-legend b { color: var(--cyan); font-weight: 600; } .systematic-track { overflow-x: auto; } .systematic-block { flex: 1 1 0; min-width: 52px; padding: 0 5px; white-space: nowrap; } .systematic-block.is-selected { border-color: var(--blue-bright); box-shadow: 0 0 0 1px rgba(92,157,255,.25); color: var(--text); } .systematic-link { position: relative; z-index: 2; flex: 0 0 17px; color: var(--cyan); font-size: 12px; line-height: 1; text-align: center; } .systematic-link.is-gap { color: var(--faint); opacity: .65; } .systematic-status strong.is-occupied { color: var(--orange); } .systematic-status strong.is-route { color: var(--violet); } .rolling-stock-label { display: block; margin: 8px 18px 0; color: var(--faint); font-size: 9px; } .rolling-stock-select { width: calc(100% - 36px); min-height: 28px; margin: 4px 18px 0; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font-size: 10px; } #consist-list .consist-item { grid-template-columns: 25px minmax(0, 1fr) auto auto; } .consist-position { color: var(--faint); font-size: 9px; white-space: nowrap; } .consist-actions { display: inline-flex; gap: 3px; } .consist-actions .icon-button { width: 22px; height: 22px; font-size: 13px; } .consist-actions .icon-button:disabled { cursor: default; opacity: .3; }';
+    style.textContent += ' .function-control-panel { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); } .function-control-panel .record-section-heading { padding: 0 0 8px; } .function-toggle-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; } .function-toggle { min-height: 48px; padding: 6px; border: 1px solid var(--line); border-radius: 7px; background: #0d192a; color: var(--text); text-align: left; cursor: pointer; } .function-toggle:hover { border-color: var(--blue-bright); } .function-toggle.is-on { border-color: var(--cyan); background: rgba(0, 198, 217, .13); box-shadow: inset 0 0 0 1px rgba(0, 198, 217, .16); } .function-toggle:disabled { opacity: .35; cursor: not-allowed; } .function-toggle strong, .function-toggle span, .function-toggle small { display: block; } .function-toggle strong { color: var(--cyan); font-size: 10px; } .function-toggle span { overflow: hidden; margin-top: 2px; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; } .function-toggle small { margin-top: 4px; color: var(--faint); font-size: 8px; letter-spacing: .08em; } .function-toggle.is-on small { color: var(--cyan); } .function-control-panel.is-compact { margin: 12px 18px 0; } .function-control-panel.is-compact .record-section-heading { display: block; } .function-control-panel.is-compact .settings-help { display: block; margin-top: 4px; }';
     document.head.appendChild(style);
   }
 

@@ -38,6 +38,7 @@ class Z21TrackSystem:
         self._speed_policy = ConnectionSpeedPolicy()
         self._requested_speeds: dict[str, float] = {}
         self._effective_speeds: dict[str, float] = {}
+        self._train_functions: dict[str, dict[int, bool]] = {}
 
     def configure_speed_limits(self, policy: ConnectionSpeedPolicy) -> None:
         self._speed_policy = policy
@@ -112,6 +113,7 @@ class Z21TrackSystem:
         self._train_directions.pop(train_id, None)
         self._requested_speeds.pop(train_id, None)
         self._effective_speeds.pop(train_id, None)
+        self._train_functions.pop(train_id, None)
         self._snapshot = replace(self._snapshot, trains=tuple(m for m in self._snapshot.trains if m.train_id != train_id))
         return removed
 
@@ -221,6 +223,28 @@ class Z21TrackSystem:
     def stop_by_address(self, address: int, *, forward: bool = True) -> CommandResult:
         packet = build_set_loco_drive(address, 0, forward=forward)
         return self.transport.send_dataset(packet, command="stop_train")
+
+    def set_train_function(self, train_id: str, function_number: int, *, enabled: bool) -> CommandResult:
+        """Switch one decoder function for a registered physical train."""
+
+        try:
+            function_number = int(function_number)
+        except (TypeError, ValueError):
+            return CommandResult(False, "set_loco_function", "function number must be an integer")
+        if not 0 <= function_number <= 31:
+            return CommandResult(False, "set_loco_function", "function number must be between 0 and 31")
+        address = self._train_addresses.get(train_id)
+        if address is None:
+            return CommandResult(False, "set_loco_function", f"no DCC address registered for {train_id}")
+        result = self.transport.set_loco_function(address, function_number, enabled=bool(enabled))
+        if result.accepted:
+            self._train_functions.setdefault(train_id, {})[function_number] = bool(enabled)
+        return result
+
+    def get_train_functions(self, train_id: str) -> Mapping[int, bool]:
+        """Return the last function states acknowledged by the adapter."""
+
+        return dict(self._train_functions.get(train_id, {}))
 
     def set_power(self, enabled: bool) -> CommandResult:
         """Switch Z21 track voltage using the LAN X-BUS command."""

@@ -23,6 +23,7 @@ LAN_X_GET_VERSION_REPLY = 0x63
 # reports 0x13 while using the same documented LAN_X_GET_VERSION framing.
 Z21_COMMAND_STATION_IDS = frozenset((0x12, 0x13))
 LAN_X_SET_LOCO_DRIVE = 0xE4
+LAN_X_SET_LOCO_FUNCTION = 0xF8
 LAN_X_SET_TURNOUT = 0x53
 LAN_X_SET_TRACK_POWER_OFF = 0x80
 LAN_X_SET_TRACK_POWER_ON = 0x81
@@ -200,6 +201,20 @@ def build_set_loco_drive(
         address_msb |= 0xC0
     direction_and_speed = (0x80 if forward else 0) | speed
     return encode_xbus(0xE4, 0x10 | step_code, address_msb, address & 0xFF, direction_and_speed)
+
+
+def build_set_loco_function(address: int, function_number: int, *, enabled: bool) -> bytes:
+    """Build LAN_X_SET_LOCO_FUNCTION for a DCC locomotive function."""
+
+    if not 1 <= address <= 0x3FFF:
+        raise ValueError("address must be between 1 and 16383")
+    if not 0 <= int(function_number) <= 31:
+        raise ValueError("function_number must be between 0 and 31")
+    address_msb = (address >> 8) & 0x3F
+    if address >= 128:
+        address_msb |= 0xC0
+    function_state = (0x40 if enabled else 0x00) | int(function_number)
+    return encode_xbus(0xE4, LAN_X_SET_LOCO_FUNCTION, address_msb, address & 0xFF, function_state)
 
 
 def build_set_turnout(
@@ -555,6 +570,15 @@ class Z21LanTransport:
         except ValueError as exc:
             return CommandResult(False, "set_loco_drive", str(exc))
         return self.send_dataset(packet, command="set_loco_drive")
+
+    def set_loco_function(self, address: int, function_number: int, *, enabled: bool) -> CommandResult:
+        """Send a DCC decoder function command when connected."""
+
+        try:
+            packet = build_set_loco_function(address, function_number, enabled=enabled)
+        except ValueError as exc:
+            return CommandResult(False, "set_loco_function", str(exc))
+        return self.send_dataset(packet, command="set_loco_function")
 
     def set_turnout(
         self,
