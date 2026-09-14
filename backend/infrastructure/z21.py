@@ -34,6 +34,9 @@ class DatagramSocket(Protocol):
     def settimeout(self, value: float | None) -> None:
         """Set the receive timeout."""
 
+    def connect(self, address: tuple[str, int]) -> None:
+        """Associate this UDP socket with the Z21 endpoint."""
+
     def sendto(self, data: bytes, address: tuple[str, int]) -> int:
         """Send one datagram."""
 
@@ -356,6 +359,15 @@ class Z21LanTransport:
         try:
             self._socket = self._socket_factory()
             self._socket.settimeout(self.timeout)
+            # A connected UDP socket still uses datagrams, but asks Windows
+            # to select and retain the route/interface for this endpoint.
+            # This is important on laptops with multiple adapters (Wi-Fi,
+            # Ethernet, VPN, and virtual switches), and also filters replies
+            # to the configured command station instead of an arbitrary local
+            # datagram source.
+            connect_socket = getattr(self._socket, "connect", None)
+            if callable(connect_socket):
+                connect_socket((self.host, self.port))
             self._status = ConnectionStatus(ConnectionState.CONNECTING, self.endpoint, checked_at=self._clock())
         except (OSError, TypeError, ValueError) as exc:
             socket_obj, self._socket = self._socket, None
