@@ -568,6 +568,15 @@ class ControllerApplication:
                         self.runtime.track.remove_train(train_id)
                     self.runtime.dispatcher.unregister_train(train_id)
                 continue
+            if self.z21_host and hasattr(self.runtime.track, "register_train"):
+                # A physical train may have been created before its decoder
+                # address was entered. Re-bind on every sync so a later edit
+                # reaches the live Z21 adapter, including address changes.
+                self.runtime.track.register_train(
+                    train_id,
+                    int(train["address"]),
+                    forward=str(train.get("direction", "forward")).lower() != "reverse",
+                )
             current_motion = next((motion for motion in self.runtime.track.get_snapshot().trains if motion.train_id == train_id), None)
             if current_motion is not None and current_motion.block_id != block_id and hasattr(self.runtime.track, "remove_train"):
                 self.runtime.track.remove_train(train_id)
@@ -1751,7 +1760,7 @@ class ControllerApplication:
                         train[block_field] = str(train[block_field]).strip().upper()
                 if "number" in updates and str(updates["number"]).strip().isdigit():
                     train["address"] = int(updates["number"])
-                self._sync_train_database()
+                self._sync_runtime_from_ui()
             elif kind == "add_train":
                 train = dict(payload.get("train", {}))
                 train_id = str(train.get("id", "")).strip()

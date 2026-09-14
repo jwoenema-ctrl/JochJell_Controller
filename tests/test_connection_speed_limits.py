@@ -38,6 +38,34 @@ class ConnectionApiTests(unittest.TestCase):
     def limit(self, **kwargs):
         return self.app.command({"type": "set_connection_speed_limit", "from": "a", "to": "b", **kwargs})
 
+    def test_physical_train_address_edit_rebinds_live_z21_track(self):
+        transport = Mock()
+        connected = ConnectionStatus(ConnectionState.CONNECTED, "fake-z21")
+        transport.check_connection.return_value = connected
+        transport.connection_status.return_value = connected
+        transport.send_dataset.return_value = CommandResult(True, "z21", "accepted")
+        track = Z21TrackSystem(transport)
+        runtime = ControllerRuntime._compose(track, database_path=":memory:", connection=ConnectionChecker(track))
+        app = ControllerApplication(
+            runtime=runtime,
+            z21_host="fake-z21",
+            simulation_mode=False,
+            blocks=[{"id": "A", "neighbor_ids": ["B"]}, {"id": "B", "neighbor_ids": ["A"]}],
+            trains=[{"id": "engine", "name": "Engine", "address": None, "block_id": "A", "mode": "manual", "speed": 0}],
+            turnouts=[], schedules=[],
+        )
+        try:
+            self.assertNotIn("engine", track._train_addresses)
+            app.command({"type": "update_train", "train_id": "engine", "train": {"number": "7"}})
+            self.assertEqual(track._train_addresses["engine"], 7)
+            app.command({"type": "set_train_mode", "train_id": "engine", "mode": "manual"})
+            app.command({"type": "track_power", "enabled": True})
+            result = app.command({"type": "set_speed", "train_id": "engine", "speed": 30})
+            self.assertEqual(result["trains"][0]["requested_speed_kmh"], 30)
+            self.assertTrue(transport.send_dataset.called)
+        finally:
+            app.close()
+
     def test_default_override_and_clear_are_directed(self):
         self.limit(speed_limit_kmh=40)
         state = self.limit(train_id="engine", speed_limit_kmh=20)
