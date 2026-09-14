@@ -103,15 +103,13 @@ class DesktopController:
         self.url = f"http://127.0.0.1:{self.server.server_port}"
 
     def close(self):
-        with self.app._lock:
-            self.app.runtime.dispatcher.emergency_stop()
-            result = self.app.runtime.track.set_power(False)
-            if not result.accepted:
-                raise RuntimeError("Track power-off could not be confirmed. Check the Z21 and stop trains physically before exiting.")
+        if getattr(self, '_closed', False):
+            return
+        self._closed = True
+        self.app.close()
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
-        self.app.close()
         self.instance_lock.close()
 
 
@@ -187,17 +185,14 @@ def main():
             messagebox.showerror('Controller could not start', str(error), parent=root)
 
     def quit_app():
-        if controller:
-            try:
+        try:
+            if controller:
                 controller.close()
-            except Exception as error:
-                messagebox.showerror('Stop needs attention', str(error), parent=root)
-                return
-        root.destroy()
+        finally:
+            root.destroy()
 
     start_button = ttk.Button(pane, text='Start controller', command=start)
     start_button.pack(fill='x', pady=4)
-    ttk.Button(pane, text='Stop controller and exit', command=quit_app).pack(fill='x', pady=4)
     root.protocol('WM_DELETE_WINDOW', quit_app)
     root.mainloop()
 

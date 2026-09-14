@@ -25,6 +25,15 @@ class _Z21Socket:
 
 
 class TrackPowerSafetyTests(unittest.TestCase):
+    def test_application_close_powers_down_before_releasing_runtime(self) -> None:
+        app = ControllerApplication.sample()
+        track = app.runtime.track
+
+        app.close()
+
+        self.assertFalse(track.get_snapshot().powered)
+        app.close()
+
     def test_power_off_stops_registered_trains_before_power_change(self) -> None:
         app = ControllerApplication.sample()
         try:

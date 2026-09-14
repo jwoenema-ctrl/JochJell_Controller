@@ -133,6 +133,7 @@ class ControllerApplication:
     _motion_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _motion_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _scheduler_remainder_seconds: float = field(default=0.0, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compose the domain runtime once and mirror the initial UI fixture into it."""
@@ -236,21 +237,57 @@ class ControllerApplication:
         )
 
     def close(self) -> None:
-        """Close the composed runtime and its persistence connections."""
+        """Safely power down the track, then close runtime resources.
 
-        self.stop_motion_clock()
-        self.stop_background_refresh()
-        subscription = getattr(self, "_domain_event_subscription", None)
-        if subscription is not None:
-            subscription.close()
-            self._domain_event_subscription = None
-        if self.runtime is not None:
-            self.runtime.close()
-            self.runtime = None
-        repository = getattr(self, "_settings_repository", None)
-        if repository is not None:
-            repository.close()
-            self._settings_repository = None
+        Shutdown is deliberately best-effort.  The Z21 may already be offline
+        when the window closes, but that must never leave the application open
+        behind a confirmation dialog or prevent its sockets and databases from
+        being released.
+        """
+
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            runtime = self.runtime
+
+        # Do not hold the application lock while joining workers: a worker can
+        # be finishing a tick while waiting for this same lock.
+        try:
+            self.stop_motion_clock()
+        except Exception:
+            pass
+        try:
+            self.stop_background_refresh()
+        except Exception:
+            pass
+        try:
+            if runtime is not None:
+                try:
+                    runtime.dispatcher.emergency_stop()
+                except Exception:
+                    pass
+                try:
+                    # This is the decisive hardware shutdown packet.  It is
+                    # attempted even when the cached connection is stale.
+                    runtime.track.set_power(False)
+                except Exception:
+                    pass
+                self.track_power = False
+        finally:
+            subscription = getattr(self, "_domain_event_subscription", None)
+            if subscription is not None:
+                subscription.close()
+                self._domain_event_subscription = None
+            if runtime is not None:
+                try:
+                    runtime.close()
+                finally:
+                    self.runtime = None
+            repository = getattr(self, "_settings_repository", None)
+            if repository is not None:
+                repository.close()
+                self._settings_repository = None
 
     def _routing_activity(self) -> str:
         if self.runtime is None or not self.track_power or (self.simulation_mode and not self.simulation_running):

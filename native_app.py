@@ -10,7 +10,6 @@ import threading
 import time
 
 import webview
-from webview.menu import Menu, MenuAction, MenuSeparator
 
 from desktop_app import DesktopController, data_directory
 from native_connection import NativeConnectionAPI
@@ -66,12 +65,8 @@ def main():
 
     def closing():
         with lock:
-            try:
-                stop()
-                return True
-            except Exception as error:
-                notice('Stop needs attention', str(error))
-                return False
+            stop()
+            return True
 
     def check_embedded_page():
         nonlocal tested
@@ -146,7 +141,7 @@ def main():
 
     window.events.closing += closing
     window.events.loaded += check_embedded_page
-    menu = [Menu('Controller', [MenuAction('Stop and exit', window.destroy)])]
+    menu = []
     try:
         webview.start(lambda: connect(False), gui='edgechromium', menu=menu, private_mode=False, storage_path=str(directory / 'webview'))
     finally:
