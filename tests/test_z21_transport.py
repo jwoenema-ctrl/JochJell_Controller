@@ -147,6 +147,8 @@ class Z21TransportTests(unittest.TestCase):
         self.assertFalse(status.connected)
         self.assertEqual(len(socket.sent), 3)
         self.assertIn("after 3 attempts", status.detail)
+        self.assertIn("sent 07 00 40 00 21 21 00", status.detail)
+        self.assertIn("no UDP datagram was received", status.detail)
 
     def test_connection_rejects_bad_xbus_checksum(self) -> None:
         bad_reply = encode_dataset(LAN_X_HEADER, b"\x63\x21\x30\x12\x61")
@@ -169,6 +171,8 @@ class Z21TransportTests(unittest.TestCase):
 
         self.assertFalse(status.connected)
         self.assertIn("timeout", status.detail)
+        self.assertIn("last UDP packet from 127.0.0.1:21105", status.detail)
+        self.assertIn("09 00 40 00 63 21 30 99 eb", status.detail.lower())
 
     def test_request_waits_for_expected_header_and_returns_validated_response(self) -> None:
         socket = FakeDatagramSocket([version_reply(), power_broadcast(), rbus_reply()])

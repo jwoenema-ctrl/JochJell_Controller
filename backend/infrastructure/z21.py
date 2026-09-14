@@ -338,6 +338,9 @@ class Z21LanTransport:
         self._socket_factory = socket_factory or self._default_socket
         self._clock = clock
         self._socket: DatagramSocket | None = None
+        self._local_endpoint = ""
+        self._last_response_hex = ""
+        self._last_response_source = ""
         self._status = ConnectionStatus(ConnectionState.DISCONNECTED, self.endpoint)
 
     @property
@@ -368,6 +371,13 @@ class Z21LanTransport:
             connect_socket = getattr(self._socket, "connect", None)
             if callable(connect_socket):
                 connect_socket((self.host, self.port))
+            get_socket_name = getattr(self._socket, "getsockname", None)
+            if callable(get_socket_name):
+                try:
+                    local = get_socket_name()
+                    self._local_endpoint = f"{local[0]}:{local[1]}"
+                except (OSError, TypeError, ValueError, IndexError):
+                    self._local_endpoint = ""
             self._status = ConnectionStatus(ConnectionState.CONNECTING, self.endpoint, checked_at=self._clock())
         except (OSError, TypeError, ValueError) as exc:
             socket_obj, self._socket = self._socket, None
@@ -377,6 +387,7 @@ class Z21LanTransport:
                 except OSError:
                     pass
             self._socket = None
+            self._local_endpoint = ""
             self._status = ConnectionStatus(ConnectionState.ERROR, self.endpoint, str(exc), self._clock())
         return self._status
 
@@ -386,6 +397,7 @@ class Z21LanTransport:
         """Close the local socket and return to a disconnected state."""
 
         socket_obj, self._socket = self._socket, None
+        self._local_endpoint = ""
         if socket_obj is not None:
             try:
                 if self._status.connected:
@@ -414,6 +426,8 @@ class Z21LanTransport:
             return self._status
         try:
             request = build_get_version()
+            self._last_response_hex = ""
+            self._last_response_source = ""
             for attempt in range(1, self.connection_attempts + 1):
                 sent = self._socket.sendto(request, (self.host, self.port))
                 if sent != len(request):
@@ -422,8 +436,14 @@ class Z21LanTransport:
                     datasets = self._receive_until(_is_version_response, allow_legacy_version_marker=True)
                 except TimeoutError:
                     if attempt == self.connection_attempts:
+                        received = (
+                            f"; last UDP packet from {self._last_response_source}: {self._last_response_hex}"
+                            if self._last_response_hex else "; no UDP datagram was received"
+                        )
+                        local = f" from local {self._local_endpoint}" if self._local_endpoint else ""
                         raise TimeoutError(
-                            f"Z21 version reply timeout after {self.connection_attempts} attempts"
+                            f"Z21 version reply timeout after {self.connection_attempts} attempts; "
+                            f"sent {request.hex(' ')}{local}{received}"
                         )
                     continue
                 if not _is_version_response(datasets):
@@ -504,7 +524,12 @@ class Z21LanTransport:
             if remaining <= 0:
                 raise TimeoutError("timed out waiting for the Z21 response")
             self._socket.settimeout(max(0.001, min(self.timeout, remaining)))
-            response, _ = self._socket.recvfrom(Z21_MAX_UDP_PAYLOAD)
+            response, source = self._socket.recvfrom(Z21_MAX_UDP_PAYLOAD)
+            self._last_response_hex = response.hex(" ")
+            try:
+                self._last_response_source = f"{source[0]}:{source[1]}"
+            except (IndexError, TypeError):
+                self._last_response_source = str(source)
             datasets = _decode_transport_payload(
                 response,
                 allow_legacy_version_marker=allow_legacy_version_marker,
