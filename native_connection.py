@@ -27,8 +27,21 @@ class NativeConnectionAPI:
                        "Verify decoder addresses and feedback wiring before operating physical trains.")
             if not window.create_confirmation_dialog("Connect to Z21?" if mode == "z21" else "Use simulation?", message):
                 return {"accepted": False, "cancelled": True}
-            self._switch(mode == "z21")
-            return {"accepted": True}
+            switch_result = self._switch(mode == "z21")
+            response = {"accepted": True, "mode": mode}
+            if isinstance(switch_result, dict):
+                response.update(switch_result)
+                response["accepted"] = True
+            active_controller = self._controller()
+            app = getattr(active_controller, "app", None)
+            if app is not None and callable(getattr(app, "settings_payload", None)):
+                payload = app.settings_payload()
+                runtime = payload.get("runtime", {}) if isinstance(payload, dict) else {}
+                if isinstance(runtime, dict):
+                    response["mode"] = runtime.get("connection_mode", mode)
+                    response["transport_profile"] = runtime.get("transport_profile")
+                    response["transport_status"] = runtime.get("transport_status")
+            return response
         except Exception as error:
             return {"accepted": False, "error": str(error)}
         finally:

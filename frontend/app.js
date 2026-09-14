@@ -155,11 +155,13 @@
     });
   }
 
-  const DEFAULT_SETTINGS = { theme: 'system', z21_host: '192.168.0.111', z21_port: 21105, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
+  const DEFAULT_SETTINGS = { theme: 'system', z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
   app.settings = clone(DEFAULT_SETTINGS);
   app.settingsDirty = false;
   app.settingsLoaded = false;
+  app.settingsRuntime = null;
   app.pollTimer = null;
+  let updateNativeControls = () => {};
 
   const LAYOUT_ASSET_DEFINITIONS = {
     station: {
@@ -438,11 +440,79 @@
     $('#setting-ui-refresh').value = settings.ui_refresh_ms / 1000;
     $('#setting-z21-host').value = settings.z21_host;
     $('#setting-z21-port').value = settings.z21_port;
+    $('#setting-z21-wlan').checked = Boolean(settings.z21_wlan_enabled);
     $('#setting-routing-adaptive').checked = settings.routing.adaptive;
     $('#setting-routing-busy').value = settings.routing.busy_interval_ms / 1000;
     $('#setting-routing-idle').value = settings.routing.idle_interval_ms / 1000;
     $('#setting-routing-idle').disabled = !settings.routing.adaptive;
+    renderWlanPresentation(app.settingsRuntime);
+    updateNativeControls();
     renderScanLibrary();
+  }
+
+  function selectedWlanProfile() {
+    const checkbox = $('#setting-z21-wlan');
+    return checkbox ? checkbox.checked : Boolean(app.settings.z21_wlan_enabled);
+  }
+
+  function runtimeTransportProfile(runtime) {
+    if (!runtime || typeof runtime !== 'object') return null;
+    const transport = runtime.transport && typeof runtime.transport === 'object' ? runtime.transport : {};
+    const raw = runtime.transport_profile ?? runtime.z21_transport_profile ?? runtime.connection_profile ?? transport.profile;
+    if (raw == null) return null;
+    if (typeof raw === 'object') return String(raw.id ?? raw.mode ?? raw.name ?? raw.label ?? '').trim() || null;
+    return String(raw).trim() || null;
+  }
+
+  function runtimeConnectionCheck(runtime) {
+    if (!runtime || typeof runtime !== 'object') return null;
+    const transport = runtime.transport && typeof runtime.transport === 'object' ? runtime.transport : {};
+    const connection = runtime.connection && typeof runtime.connection === 'object' ? runtime.connection : {};
+    return runtime.transport_status ?? runtime.connection_check ?? runtime.transport_check ?? transport.check ?? connection.check ?? null;
+  }
+
+  function profileUsesWlan(profile) {
+    return profile != null && /wlan|wi-?fi|10814/i.test(String(profile));
+  }
+
+  function transportProfileLabel(profile) {
+    if (/simulation/i.test(String(profile))) return 'simulation';
+    return profileUsesWlan(profile) ? 'Roco 10814 WLAN' : 'direct LAN';
+  }
+
+  function connectionCheckSummary(check) {
+    if (check == null) return null;
+    if (typeof check === 'string' || typeof check === 'number') return { text: String(check), tone: '' };
+    if (typeof check === 'boolean') return { text: check ? 'available' : 'not available', tone: check ? 'ok' : 'warning' };
+    if (typeof check !== 'object') return null;
+    const text = check.message ?? check.detail ?? check.status ?? check.label;
+    const ok = check.ok ?? check.ready ?? check.healthy ?? check.available ?? check.connected;
+    if (text == null && ok == null) return null;
+    return { text: String(text ?? (ok ? 'available' : 'not available')), tone: ok === true ? 'ok' : ok === false ? 'warning' : '' };
+  }
+
+  function renderWlanPresentation(runtime) {
+    const enabled = selectedWlanProfile();
+    const host = ($('#setting-z21-host') && $('#setting-z21-host').value.trim()) || app.settings.z21_host || DEFAULT_SETTINGS.z21_host;
+    const port = Number(($('#setting-z21-port') && $('#setting-z21-port').value) || app.settings.z21_port || DEFAULT_SETTINGS.z21_port);
+    const profile = runtimeTransportProfile(runtime);
+    const activeWlan = profile == null ? null : profileUsesWlan(profile);
+    const check = connectionCheckSummary(runtimeConnectionCheck(runtime));
+    const status = $('#settings-transport-status');
+    if (!status) return;
+    const selected = enabled ? 'Roco 10814 WLAN' : 'direct LAN';
+    const parts = [`Selected profile: ${selected} · UDP ${host}:${port}.`];
+    if (profile != null) parts.push(`Controller profile: ${transportProfileLabel(profile)}.`);
+    if (runtime && runtime.restart_required && !/simulation/i.test(String(profile)) && activeWlan !== enabled) parts.push('Save and reconnect to apply this profile.');
+    if (check) parts.push(`Connection check: ${check.text}.`);
+    status.textContent = parts.join(' ');
+    status.dataset.profile = enabled ? 'wlan' : 'lan';
+    status.dataset.check = check && check.tone || '';
+    const connectButton = $('#settings-connect-z21');
+    if (connectButton) {
+      connectButton.textContent = enabled ? 'Connect via WLAN' : 'Connect to real Z21';
+      connectButton.setAttribute('aria-label', enabled ? 'Connect to real Z21 via Roco 10814 WLAN' : 'Connect to real Z21');
+    }
   }
 
   function renderScanLibrary() {
@@ -452,7 +522,9 @@
 
   function showSettingsRuntime(runtime) {
     if (!runtime) return;
+    app.settingsRuntime = runtime;
     $('#settings-connection-note').textContent = (runtime.connection_message || 'Saving never activates hardware. Connection changes take effect at the next explicit Z21 startup.') + (runtime.z21_environment_override ? ' An environment setting currently overrides the saved address or port.' : '');
+    renderWlanPresentation(runtime);
     const routing = runtime.routing;
     if (routing) $('#settings-routing-status').textContent = routing.error
       ? `Route refresh needs attention: ${routing.error}`
@@ -483,6 +555,7 @@
       theme: $('#setting-theme').value,
       z21_host: $('#setting-z21-host').value.trim(),
       z21_port: Number($('#setting-z21-port').value),
+      z21_wlan_enabled: $('#setting-z21-wlan').checked,
       ui_refresh_ms: Number($('#setting-ui-refresh').value) * 1000,
       routing: { adaptive: $('#setting-routing-adaptive').checked, busy_interval_ms: Number($('#setting-routing-busy').value) * 1000, idle_interval_ms: Number($('#setting-routing-idle').value) * 1000 }
     };
@@ -759,7 +832,10 @@
     const connection = app.state.connection || {};
     const dot = $('#connection-dot');
     dot.className = `status-dot ${connection.connected ? '' : connection.simulated ? 'is-simulated' : 'is-offline'}`;
-    $('#connection-label').textContent = connection.label || (connection.connected ? 'Controller online' : 'Simulation fallback');
+    const runtimeProfile = runtimeTransportProfile(app.settingsRuntime);
+    const connectedViaWlan = connection.connected && (runtimeProfile == null ? Boolean(app.settings.z21_wlan_enabled) : profileUsesWlan(runtimeProfile));
+    const genericLabel = !connection.label || /^(Z21 connected|Controller online)$/i.test(connection.label);
+    $('#connection-label').textContent = connectedViaWlan && genericLabel ? 'Z21 via WLAN' : connection.label || (connection.connected ? 'Controller online' : 'Simulation fallback');
     $('#connection-detail').textContent = connection.detail || '';
     const feedback = app.state.feedback || {};
     const feedbackFailed = feedback.healthy === false;
@@ -2042,30 +2118,43 @@
   }
 
   function setupEvents() {
-    const updateNativeControls = () => {
+    updateNativeControls = (preserveStatus = false) => {
       const available = Boolean(window.pywebview && window.pywebview.api && typeof window.pywebview.api.switch_mode === 'function');
-      $('#settings-connect-z21').disabled = !available || Boolean(app.nativeModePending);
+      const wlan = selectedWlanProfile();
+      renderWlanPresentation(app.settingsRuntime);
+      $('#settings-connect-z21').disabled = !available || Boolean(app.nativeModePending) || Boolean(app.settingsDirty);
       $('#settings-use-simulation').disabled = !available || Boolean(app.nativeModePending);
-      if (available && !app.nativeModePending) $('#settings-native-status').textContent = 'Desktop connection controls ready. Save settings before connecting.';
+      if (preserveStatus || app.nativeModePending) return;
+      if (app.settingsDirty) $('#settings-native-status').textContent = `Save or discard your settings changes before ${wlan ? 'connecting via WLAN' : 'connecting to Z21'}.`;
+      else if (available) $('#settings-native-status').textContent = wlan
+        ? 'Desktop controls ready. Connect Windows to the Z21 Wi-Fi before choosing Connect via WLAN.'
+        : 'Desktop connection controls ready.';
+      else $('#settings-native-status').textContent = wlan
+        ? 'Connect via WLAN is available in the standalone Windows app. This browser cannot switch controller mode.'
+        : 'Available in the standalone Windows app. Browser users must restart the controller to change connection mode.';
     };
     const switchNativeMode = async (mode) => {
       if (app.nativeModePending || !window.pywebview || !window.pywebview.api) return;
       if (app.settingsDirty) { $('#settings-native-status').textContent = 'Save or discard your settings changes before switching mode.'; return; }
+      const wlan = mode === 'z21' && selectedWlanProfile();
       cancelSpeedDraft();
       speedChoices.clear();
       app.nativeModePending = true;
       updateNativeControls(); renderSidebar();
-      $('#settings-native-status').textContent = 'Waiting for desktop confirmation…';
+      $('#settings-native-status').textContent = wlan ? 'Waiting for confirmation to connect via WLAN…' : 'Waiting for desktop confirmation…';
       try {
         await speedInFlight;
         const result = await window.pywebview.api.switch_mode(mode);
         if (result && (result.error || result.ok === false || result.accepted === false)) throw new Error(result.error || result.message || (result.cancelled ? 'Connection change cancelled.' : 'Connection mode was not changed.'));
-        $('#settings-native-status').textContent = result && (result.message || result.status) || 'Connection mode change requested.';
+        if (result && (result.transport_profile != null || result.transport_status != null)) {
+          app.settingsRuntime = { ...(app.settingsRuntime || {}), ...(result.transport_profile == null ? {} : { transport_profile: result.transport_profile }), ...(result.transport_status == null ? {} : { transport_status: result.transport_status }) };
+          renderWlanPresentation(app.settingsRuntime);
+        }
+        $('#settings-native-status').textContent = result && (result.message || result.status) || (wlan ? 'WLAN connection requested. Windows must already be connected to the Z21 Wi-Fi.' : 'Connection mode change requested.');
       } catch (error) { $('#settings-native-status').textContent = error.message || 'Connection change failed.'; }
       finally {
         app.nativeModePending = false;
-        $('#settings-connect-z21').disabled = false;
-        $('#settings-use-simulation').disabled = false;
+        updateNativeControls(true);
         renderSidebar();
       }
     };
@@ -2083,7 +2172,7 @@
     });
     $$('.mode-tab').forEach((button) => button.addEventListener('click', () => navigateWorkspace(button.dataset.workspace)));
     $('#app-settings-form').addEventListener('submit', saveAppSettings);
-    $('#app-settings-form').addEventListener('input', () => { app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; });
+    $('#app-settings-form').addEventListener('input', () => { app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; renderWlanPresentation(app.settingsRuntime); updateNativeControls(); });
     $('#setting-theme').addEventListener('change', (event) => applyTheme(event.target.value));
     $('#setting-routing-adaptive').addEventListener('change', (event) => { $('#setting-routing-idle').disabled = !event.target.checked; });
     $('#settings-discard').addEventListener('click', () => { app.settingsDirty = false; renderSettings(); applyTheme(app.settings.theme); $('#settings-save-status').textContent = app.settingsLoaded ? 'Changes discarded.' : 'Controller settings have not loaded yet.'; });

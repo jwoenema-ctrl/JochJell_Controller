@@ -32,6 +32,15 @@ other edition first. Microsoft Edge WebView2 Runtime is required on the destinat
 Build with `python -m pip install -r requirements-native.txt` followed by
 `./scripts/build_native_windows.ps1`. See [embedded edition notes](docs/WINDOWS_NATIVE.txt).
 
+When using the Roco 10814 WLAN Package, first complete the one-time z21start unlock
+and connect Windows to the Z21 router yourself. In **Settings → Connection**, select
+**Use Roco 10814 WLAN**, save the settings, and then choose **Connect via WLAN**.
+That explicit action connects to the real Z21 after checking that Windows routes its
+address through an active wireless adapter. The checkbox does not join Wi-Fi or
+connect to hardware by itself. The app never asks for or stores the WLAN password;
+use the password printed on the router label in Windows. See the
+[10814 WLAN setup guide](docs/WLAN_10814.md).
+
 The original browser-launcher edition is still available:
 
 Run `dist/H0-Control-Desk.exe`, choose Simulation, and click **Start controller**.
@@ -53,6 +62,14 @@ Build it on Windows using the [PyInstaller packaging tools](https://www.pyinstal
 python -m pip install -r requirements-build.txt
 ./scripts/build_windows.ps1
 ```
+
+For downloads intended for other computers, prefer the assets on the repository's
+GitHub Releases page over temporary workflow artifacts. A pushed tag matching `v*`
+builds and tests the app, then publishes `H0-Control-Desk-Native.exe` and
+`H0-Control-Desk-Native-Windows-x64.zip` as release assets, together with
+`SHA256SUMS.txt` for integrity checking. Ordinary pushes and manual workflow runs
+build test artifacts but do not publish a release. A version tag is release-once:
+the workflow fails instead of replacing assets if a release already exists for it.
 
 The selected-train panel includes Forward / Reverse. Direction changes require a stationary
 train under manual or stopped control; they never start the train. Z21 direction is sent in a
@@ -103,9 +120,10 @@ mapping can be supplied as `H0_Z21_FEEDBACK_MAP=1:1=B01,1:2=B02`. See
 
 ### Settings and explicit physical startup
 
-The Settings page saves appearance, Z21 IPv4 address/UDP port, browser refresh frequency, and
-route-planning intervals in the controller database. Saving an address never connects to hardware
-or changes the active endpoint. To use the saved address on the next physical startup:
+The Settings page saves appearance, Z21 IPv4 address/UDP port, WLAN-path preference, browser
+refresh frequency, and route-planning intervals in the controller database. Saving connection
+settings never connects to hardware or changes the active endpoint. The WLAN preference contains
+no SSID or password. To use the saved address on the next physical startup from source:
 
 ```powershell
 $env:H0_TRACK_SYSTEM = "z21"
@@ -117,7 +135,8 @@ python "Train Controller/Train_Controller.py"
 For simulation, use `H0_TRACK_SYSTEM=simulation` (or leave it unset) and leave `H0_Z21_HOST`
 unset. Changes to an active physical endpoint require a restart. The settings response shows
 the active endpoint, effective next endpoint, environment-override status, and whether a restart
-is needed; there is deliberately no browser-side switch that activates physical operation.
+is needed. In packaged editions, physical operation still requires the explicit
+**Connect to real Z21** action and confirmation after saving settings.
 
 Adaptive planning uses the busy interval while trains are moving or a schedule is active, and
 the idle interval otherwise (including paused simulation or track power off). With adaptive mode

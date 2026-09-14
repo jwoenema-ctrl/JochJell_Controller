@@ -111,6 +111,13 @@ def main():
             window.evaluate_js("document.querySelector('[data-workspace=\"settings\"]').click()")
             assert window.evaluate_js("typeof window.pywebview.api.switch_mode") == "function"
             assert not window.evaluate_js("document.querySelector('#settings-connect-z21').disabled")
+            assert not window.evaluate_js("document.querySelector('#setting-z21-wlan').checked")
+            assert window.evaluate_js("document.querySelector('#setting-z21-wlan-help').textContent.includes('does not join Wi-Fi')")
+            window.evaluate_js("document.querySelector('#setting-z21-wlan').click()")
+            assert window.evaluate_js("document.querySelector('#setting-z21-wlan').checked")
+            assert window.evaluate_js("document.querySelector('#settings-connect-z21').disabled")
+            window.evaluate_js("document.querySelector('#settings-discard').click()")
+            assert not window.evaluate_js("document.querySelector('#setting-z21-wlan').checked")
             previous_url = controller.url
             original_dialog = window.create_confirmation_dialog
             try:
@@ -130,7 +137,7 @@ def main():
                 time.sleep(.1)
             assert ready, "Settings did not reload after switching modes"
             assert all(float(train.get("speed", 0)) == 0 for train in controller.app.trains)
-            result = {'passed': True, 'embedded_window': True, 'renderer': 'edgechromium', 'settings': True, 'theme': True, 'bounded_3d': True, 'direction': True, 'layout_info': True, 'editable_block_id': True, 'settings_connection_bridge': True, 'physical_connect_cancelled': True, 'simulation_switch_preserves_stopped_layout': True, 'external_browser': False}
+            result = {'passed': True, 'embedded_window': True, 'renderer': 'edgechromium', 'settings': True, 'wlan_settings': True, 'theme': True, 'bounded_3d': True, 'direction': True, 'layout_info': True, 'editable_block_id': True, 'settings_connection_bridge': True, 'physical_connect_cancelled': True, 'simulation_switch_preserves_stopped_layout': True, 'external_browser': False}
         except Exception as error:
             result['error'] = str(error)
         finally:

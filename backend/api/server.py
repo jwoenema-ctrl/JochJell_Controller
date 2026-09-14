@@ -43,6 +43,7 @@ from backend.core.routing import RouteAlgorithm, find_route
 from backend.infrastructure.train_catalogue import TrainCatalogue, export_csv, export_json, import_csv, import_json
 from backend.infrastructure.train_database import DecoderFunctionMapping, MaintenanceRecord, RollingStockRecord, TrainModel
 from backend.infrastructure.settings import SQLiteSettingsRepository, validate_settings
+from backend.infrastructure.wlan import WindowsRouteAPI, preflight_z21_wlan
 from backend.infrastructure.scan_store import MAX_UPLOAD_BODY_BYTES, ScanStore
 from backend.runtime import ControllerRuntime
 from backend.services.dispatcher import ControlMode
@@ -116,6 +117,8 @@ class ControllerApplication:
     layout_name: str = "Sample H0 layout"
     z21_host: str | None = None
     z21_port: int = 21105
+    z21_transport_profile: str = "lan"
+    z21_transport_status: dict[str, Any] | None = None
     feedback_map: dict[tuple[int, int], str] = field(default_factory=dict)
     runtime: ControllerRuntime | None = field(default=None, repr=False)
     scan_directory: str | Path | None = None
@@ -162,6 +165,8 @@ class ControllerApplication:
         database_path: str = ":memory:",
         z21_host: str | None = None,
         z21_port: int = 21105,
+        z21_transport_profile: str = "lan",
+        z21_transport_status: dict[str, Any] | None = None,
         feedback_map: dict[tuple[int, int], str] | None = None,
     ) -> "ControllerApplication":
         return cls(
@@ -225,6 +230,8 @@ class ControllerApplication:
             database_path=database_path,
             z21_host=z21_host,
             z21_port=z21_port,
+            z21_transport_profile=z21_transport_profile,
+            z21_transport_status=deepcopy(z21_transport_status),
             feedback_map=dict(feedback_map or {}),
         )
 
@@ -264,7 +271,28 @@ class ControllerApplication:
         with self._lock:
             next_host = os.environ.get("H0_Z21_HOST") or self._settings["z21_host"]
             next_port = int(os.environ.get("H0_Z21_PORT") or self._settings["z21_port"])
-            restart_required = bool(self.z21_host and (self.z21_host != next_host or self.z21_port != next_port))
+            next_profile = "wlan" if self._settings["z21_wlan_enabled"] else "lan"
+            active_profile = self.z21_transport_profile if self.z21_host else "simulation"
+            restart_required = bool(self.z21_host and (
+                self.z21_host != next_host
+                or self.z21_port != next_port
+                or active_profile != next_profile
+            ))
+            transport_status = deepcopy(self.z21_transport_status) if self.z21_host else {
+                "profile": "simulation",
+                "state": "inactive",
+                "ready": True,
+                "host": None,
+                "detail": "Simulation does not open a physical network transport.",
+            }
+            if self.z21_host and transport_status is None:
+                transport_status = {
+                    "profile": active_profile,
+                    "state": "unknown",
+                    "ready": False,
+                    "host": self.z21_host,
+                    "detail": "No startup transport preflight status is available.",
+                }
             interval = self._routing_interval_ms()
             remaining = max(0, interval - int((time.monotonic() - self._routing_last_monotonic) * 1000)) if self._routing_last_monotonic is not None else 0
             return {
@@ -275,10 +303,13 @@ class ControllerApplication:
                     "active_z21_port": self.z21_port if self.z21_host else None,
                     "next_z21_host": next_host,
                     "next_z21_port": next_port,
+                    "transport_profile": active_profile,
+                    "next_transport_profile": next_profile,
+                    "transport_status": transport_status,
                     "z21_environment_override": bool(os.environ.get("H0_Z21_HOST") or os.environ.get("H0_Z21_PORT")),
                     "restart_required": restart_required,
                     "hardware_activation_required": not bool(self.z21_host),
-                    "connection_message": "Saved for the next explicit physical startup; simulation stays active." if not self.z21_host else "Restart physical control to apply the saved endpoint." if restart_required else "Physical endpoint is active. Environment overrides take precedence when set.",
+                    "connection_message": "Saved for the next explicit physical startup; simulation stays active." if not self.z21_host else "Restart physical control to apply the saved endpoint or transport profile." if restart_required else f"Physical {active_profile.upper()} profile is active. Environment endpoint overrides take precedence when set.",
                     "routing": {
                         "running": bool(self._routing_thread and self._routing_thread.is_alive()),
                         "activity": self._routing_activity(),
@@ -2344,11 +2375,42 @@ def startup_z21_endpoint(settings: dict[str, Any], environment: dict[str, str] |
     return None, port
 
 
+def startup_z21_transport(
+    settings: dict[str, Any],
+    environment: dict[str, str] | None = None,
+    *,
+    wlan_route_api: WindowsRouteAPI | None = None,
+    platform_name: str | None = None,
+) -> tuple[str | None, int, str, dict[str, Any]]:
+    """Resolve the selected transport and preflight WLAN before Z21 creation."""
+
+    validated = validate_settings(settings)
+    host, port = startup_z21_endpoint(validated, environment)
+    if host is None:
+        return None, port, "simulation", {
+            "profile": "simulation",
+            "state": "inactive",
+            "ready": True,
+            "host": None,
+            "detail": "Simulation does not open a physical network transport.",
+        }
+    if validated["z21_wlan_enabled"]:
+        status = preflight_z21_wlan(host, route_api=wlan_route_api, platform_name=platform_name)
+        return host, port, "wlan", status
+    return host, port, "lan", {
+        "profile": "lan",
+        "state": "not_required",
+        "ready": True,
+        "host": host,
+        "detail": "Wired LAN profile selected; WLAN route preflight is not required.",
+    }
+
+
 def run(host: str = "127.0.0.1", port: int = 8080) -> None:
     database_path = os.environ.get("H0_CONTROLLER_DB", "data/controller.sqlite3")
     repository = SQLiteSettingsRepository(database_path)
     try:
-        z21_host, z21_port = startup_z21_endpoint(repository.load())
+        z21_host, z21_port, transport_profile, transport_status = startup_z21_transport(repository.load())
     finally:
         repository.close()
     feedback_map: dict[tuple[int, int], str] = {}
@@ -2361,9 +2423,16 @@ def run(host: str = "127.0.0.1", port: int = 8080) -> None:
         except ValueError:
             continue
         feedback_map[(module, input_number)] = block_id
-    app = ControllerApplication.sample(database_path=database_path, z21_host=z21_host, z21_port=z21_port, feedback_map=feedback_map)
+    app = ControllerApplication.sample(
+        database_path=database_path,
+        z21_host=z21_host,
+        z21_port=z21_port,
+        z21_transport_profile=transport_profile,
+        z21_transport_status=transport_status,
+        feedback_map=feedback_map,
+    )
     server = make_server(host, port, app)
-    mode = f"Z21 LAN mode via {z21_host}:{z21_port}" if z21_host else "simulation mode"
+    mode = f"Z21 {transport_profile.upper()} mode via {z21_host}:{z21_port}" if z21_host else "simulation mode"
     print(f"H0 Z21 controller running at http://{host}:{port} ({mode})")
     try:
         server.serve_forever()

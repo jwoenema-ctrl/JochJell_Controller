@@ -12,8 +12,9 @@ from tkinter import messagebox, ttk
 import urllib.request
 import webbrowser
 
-from backend.api.server import ControllerApplication, make_server, startup_z21_endpoint
+from backend.api.server import ControllerApplication, make_server, startup_z21_transport
 from backend.infrastructure.settings import SQLiteSettingsRepository
+from backend.infrastructure.wlan import WindowsRouteAPI
 
 
 def data_directory() -> Path:
@@ -21,7 +22,15 @@ def data_directory() -> Path:
 
 
 class DesktopController:
-    def __init__(self, directory: Path, *, physical: bool = False, port: int = 8765):
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        physical: bool = False,
+        port: int = 8765,
+        wlan_route_api: WindowsRouteAPI | None = None,
+        platform_name: str | None = None,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
         self.instance_lock = (directory / 'controller.lock').open('a+b')
         if os.name == 'nt':
@@ -37,16 +46,35 @@ class DesktopController:
                 self.instance_lock.close()
                 raise RuntimeError('This app-data directory already has a running controller. Open its existing window instead.') from None
         try:
-            self._start(directory, physical=physical, port=port)
+            self._start(
+                directory,
+                physical=physical,
+                port=port,
+                wlan_route_api=wlan_route_api,
+                platform_name=platform_name,
+            )
         except Exception:
             self.instance_lock.close()
             raise
 
-    def _start(self, directory: Path, *, physical: bool, port: int):
+    def _start(
+        self,
+        directory: Path,
+        *,
+        physical: bool,
+        port: int,
+        wlan_route_api: WindowsRouteAPI | None,
+        platform_name: str | None,
+    ):
         database = directory / "controller.sqlite3"
         settings = SQLiteSettingsRepository(database)
         try:
-            host, z21_port = startup_z21_endpoint(settings.load(), {"H0_TRACK_SYSTEM": "z21" if physical else "simulation"})
+            host, z21_port, transport_profile, transport_status = startup_z21_transport(
+                settings.load(),
+                {"H0_TRACK_SYSTEM": "z21" if physical else "simulation"},
+                wlan_route_api=wlan_route_api,
+                platform_name=platform_name,
+            )
         finally:
             settings.close()
         feedback_map = {}
@@ -57,7 +85,14 @@ class DesktopController:
                 contact, block = entry.strip().split('=')
                 module, input_number = map(int, contact.split(':'))
                 feedback_map[(module, input_number)] = block.strip()
-        self.app = ControllerApplication.sample(database_path=str(database), z21_host=host, z21_port=z21_port, feedback_map=feedback_map)
+        self.app = ControllerApplication.sample(
+            database_path=str(database),
+            z21_host=host,
+            z21_port=z21_port,
+            z21_transport_profile=transport_profile,
+            z21_transport_status=transport_status,
+            feedback_map=feedback_map,
+        )
         try:
             self.server = make_server(port=port, application=self.app)
         except Exception:
@@ -98,9 +133,10 @@ def smoke_test(destination: Path):
                         raise AssertionError('Duplicate controller was allowed')
                 with urllib.request.urlopen(controller.url, timeout=5) as response:
                     html = response.read().decode()
-                    assert 'direction-forward' in html and 'settings-page' in html
+                    assert 'direction-forward' in html and 'settings-page' in html and 'setting-z21-wlan' in html
                 with urllib.request.urlopen(controller.url + '/minimal.css', timeout=5) as response:
-                    assert b'.direction-control' in response.read()
+                    css = response.read()
+                    assert b'.direction-control' in css and b'.settings-wlan-row' in css
                 with urllib.request.urlopen(controller.url + '/api/settings', timeout=5) as response:
                     settings = json.load(response)
                     assert settings['runtime']['connection_mode'] == 'simulation'

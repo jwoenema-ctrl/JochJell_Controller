@@ -292,6 +292,12 @@ body .empty-state { font-size: 13px; }
 .settings-control input:not([type="checkbox"]), .settings-control select { width: 100%; min-width: 0; min-height: 40px; border: 1px solid var(--line-bright); border-radius: 8px; padding: 8px 12px; background: var(--panel); color: var(--text); font-size: 14px; }
 .settings-control input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--text); margin-left: auto; }
 .settings-control input:disabled { color: var(--faint); opacity: .55; }
+.settings-wlan-row { align-items: start; margin: 10px 0 4px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-raised); }
+.settings-wlan-row .settings-control { align-self: start; padding-top: 2px; }
+.settings-transport-status { margin: 12px 0 4px; padding-left: 12px; border-left: 2px solid var(--line-bright); line-height: 1.55; }
+.settings-transport-status[data-profile="wlan"] { border-left-color: var(--blue-bright, #3975de); }
+.settings-transport-status[data-check="ok"] { border-left-color: var(--green); }
+.settings-transport-status[data-check="warning"] { border-left-color: var(--yellow); }
 .settings-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px; padding: 22px 0 36px; }
 .settings-actions .settings-status { flex: 1 1 200px; }
 .settings-status { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
@@ -375,6 +381,8 @@ body .empty-state { font-size: 13px; }
   .settings-header h2 { font-size: 30px; }
   .settings-section { padding: 24px 0; }
   .settings-row { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px 0; }
+  .settings-wlan-row { padding: 16px; }
+  .settings-wlan-row .settings-control { width: 100%; }
   .settings-control input[type="checkbox"] { margin-left: 0; }
   .settings-upload .settings-row > .button { justify-self: start; }
   .settings-actions { justify-content: flex-start; }

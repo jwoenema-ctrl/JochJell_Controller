@@ -63,6 +63,7 @@ DEFAULT_SETTINGS = {
     "theme": "system",
     "z21_host": "192.168.0.111",
     "z21_port": 21105,
+    "z21_wlan_enabled": False,
     "ui_refresh_ms": 5000,
     "routing": {"adaptive": True, "busy_interval_ms": 1000, "idle_interval_ms": 5000},
     "workspace_layout": DEFAULT_WORKSPACE_LAYOUT,
@@ -101,6 +102,8 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
     for key, low, high in (("z21_port", 1, 65535), ("ui_refresh_ms", 1000, 60000)):
         if type(result[key]) is not int or not low <= result[key] <= high:
             raise ValueError(f"{key} must be an integer between {low} and {high}")
+    if type(result["z21_wlan_enabled"]) is not bool:
+        raise ValueError("z21_wlan_enabled must be a boolean")
     if type(result["routing"]["adaptive"]) is not bool:
         raise ValueError("routing.adaptive must be a boolean")
     for key in ("busy_interval_ms", "idle_interval_ms"):
