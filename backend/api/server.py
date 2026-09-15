@@ -50,6 +50,8 @@ from backend.services.dispatcher import ControlMode
 from backend.services.connection_speed import ConnectionSpeedPolicy, next_connection
 from backend.services.block_editor import block_id as validate_block_id, next_block_id, rename_references
 from backend.services.scheduler import ScheduleStop as RuntimeScheduleStop
+from backend.services.coordinate_move import CoordinateMovementPlanner, MovementPlanValidationError
+from backend.services.train_presence import SavedTrainPresenceService
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -134,6 +136,7 @@ class ControllerApplication:
     _motion_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _scheduler_remainder_seconds: float = field(default=0.0, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _presence_state: dict[str, Any] = field(default_factory=lambda: {"results": [], "summary": {"total": 0, "detected": 0, "unknown": 0, "errors": 0}}, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compose the domain runtime once and mirror the initial UI fixture into it."""
@@ -818,11 +821,64 @@ class ControllerApplication:
                     }
                     for item in (details.rolling_stock if details is not None else ())
                 ],
+                "calibrations": [
+                    {
+                        "calibration_id": item.calibration_id,
+                        "speed_kmh": item.speed_kmh,
+                        "duration_ms": item.duration_ms,
+                        "measured_distance_mm": item.measured_distance_mm,
+                        "created_at": item.created_at,
+                        "notes": item.notes,
+                    }
+                    for item in (details.calibrations if details is not None else ())
+                ],
             }
         if train_id is not None:
             record = self.runtime.train_database.get(self._canonical_train_id(str(train_id)))
             return serialize(record) if record is not None else None
         return [serialize(record) for record in records]
+
+    def calibration_state(self) -> dict[str, Any]:
+        """Return the active calibration run and stored measurements."""
+
+        run = self.runtime.calibration.run if self.runtime is not None else None
+        history = self.runtime.calibration.history() if self.runtime is not None else ()
+        return {
+            "active": None if run is None else {
+                "run_id": run.run_id, "train_id": self._ui_train_id(run.train_id),
+                "speed_kmh": run.speed_kmh, "duration_ms": run.duration_ms,
+                "status": run.status, "started_at": run.started_at,
+                "stopped_at": run.stopped_at, "error": run.error,
+            },
+            "history": [
+                {
+                    "calibration_id": item.calibration_id,
+                    "train_id": self._ui_train_id(item.train_id),
+                    "speed_kmh": item.speed_kmh,
+                    "duration_ms": item.duration_ms,
+                    "measured_distance_mm": item.measured_distance_mm,
+                    "created_at": item.created_at,
+                    "notes": item.notes,
+                }
+                for item in history
+            ],
+        }
+
+    def train_presence_state(self) -> dict[str, Any]:
+        return deepcopy(self._presence_state)
+
+    def scan_train_presence(self) -> dict[str, Any]:
+        if self.runtime is None:
+            raise ValueError("runtime is not available")
+        reported = {motion.train_id for motion in self.runtime.track.get_snapshot().trains}
+        addresses = {int(train.get("address")): train["id"] for train in self.trains if str(train.get("address", "")).isdigit()}
+        detector = SavedTrainPresenceService(lambda address: {
+            "detected": addresses.get(int(address)) in reported,
+            "source": "reported track feedback",
+        })
+        self._presence_state = detector.scan(self.trains).as_dict()
+        self.events.append({"type": "train_presence_scan", "summary": self._presence_state["summary"]})
+        return deepcopy(self._presence_state)
 
     def train_catalogue(self, format_name: str = "json") -> dict[str, Any]:
         """Return a portable export of all persisted train model details."""
@@ -1081,6 +1137,8 @@ class ControllerApplication:
             "motion_clock": {"running": bool(self._motion_thread and self._motion_thread.is_alive()),
                              "interval_seconds": self.runtime.track.tick_seconds if self.simulation_mode else 1.0},
             "layout_info": self.layout_info(),
+            "calibration": self.calibration_state(),
+            "presence": self.train_presence_state(),
             "feedback": snapshot["feedback"],
             "layout": {
                 "name": self.layout_name,
@@ -1268,6 +1326,7 @@ class ControllerApplication:
                 "maxSpeed": max_speed,
                 "consist": train.get("consist", []),
                 "decoder_function_states": dict(train.get("decoder_function_states", {})),
+                "target_coordinate": deepcopy(train.get("target_coordinate")) if train.get("target_coordinate") else None,
                 **self._train_motion_state(train),
             })
         return result
@@ -1643,6 +1702,84 @@ class ControllerApplication:
                 train["route"] = list(route)
                 self.runtime.route_updater.set_route(train_id, route)
                 self._sync_ui_from_runtime()
+            elif kind in {"start_calibration", "calibrate_train"}:
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((item for item in self.trains if item["id"] == train_id), None)
+                if train is None:
+                    raise ValueError(f"Unknown train: {train_id}")
+                if self.runtime is None or not self.track_power:
+                    raise ValueError("switch track power on before starting calibration")
+                self.runtime.calibration.set_max_speed(float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
+                run = self.runtime.calibration.start(
+                    train_id,
+                    speed_kmh=float(payload.get("speed_kmh", 10)),
+                    duration_ms=int(payload.get("duration_ms", 100)),
+                )
+                train["mode"] = ControlMode.MANUAL.value
+                train["speed"] = 0
+                self.events.append({"type": "calibration_started", "run_id": run.run_id, "train_id": train_id})
+            elif kind in {"scan_train_presence", "ping_train_addresses", "detect_trains"}:
+                self.scan_train_presence()
+            elif kind in {"cancel_calibration", "stop_calibration"}:
+                if self.runtime is None:
+                    raise ValueError("runtime is not available")
+                run = self.runtime.calibration.cancel()
+                if run is not None:
+                    self.events.append({"type": "calibration_cancelled", "run_id": run.run_id, "train_id": run.train_id})
+            elif kind in {"record_calibration", "record_calibration_distance"}:
+                if self.runtime is None:
+                    raise ValueError("runtime is not available")
+                record = self.runtime.calibration.record_distance(
+                    float(payload.get("distance_mm", payload.get("measured_distance_mm"))),
+                    notes=str(payload.get("notes", "")),
+                )
+                self.events.append({"type": "calibration_recorded", "calibration_id": record.calibration_id, "train_id": record.train_id})
+            elif kind in {"move_train_to_coordinate", "move_to_coordinate"}:
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((item for item in self.trains if item["id"] == train_id), None)
+                if train is None:
+                    raise ValueError(f"Unknown train: {train_id}")
+                if self.runtime is None:
+                    raise ValueError("controller runtime unavailable")
+                try:
+                    x, y = float(payload.get("x")), float(payload.get("y"))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("x and y coordinates are required") from exc
+                control = self.runtime.dispatcher.register_train(train_id)
+                if control.mode is ControlMode.AUTOMATIC:
+                    raise ValueError("switch this train to manual control before dragging it")
+                motion = next((item for item in self.runtime.track.get_snapshot().trains if item.train_id == train_id), None)
+                if float(train.get("speed", 0) or 0) > 0 or control.desired_speed > 0 or (motion and (motion.speed > 0 or motion.target_speed > 0)):
+                    raise ValueError("stop the train before dragging it to a coordinate")
+                current = str((motion.block_id if motion else train.get("block_id", "")) or "").strip().upper()
+                direction = "forward" if self.runtime.track.get_train_direction(train_id) else "reverse"
+                calibration = self.runtime.calibration.history(train_id)
+                if not calibration:
+                    raise ValueError("record a calibration measurement for this train before coordinate movement")
+                try:
+                    planner_blocks = [{**block, "id": str(block.get("id", "")).strip().upper()} for block in self.blocks]
+                    planner_edges = [{**edge, "from": str(edge.get("from", "")).strip().upper(), "to": str(edge.get("to", "")).strip().upper()} for edge in self._topology_edges()]
+                    plan = CoordinateMovementPlanner(planner_blocks, planner_edges, calibration).plan(
+                        train_id, x, y, speed_kmh=10, direction=direction,
+                        occupied_blocks=self.runtime.track.get_snapshot().occupied_blocks,
+                    )
+                except MovementPlanValidationError as exc:
+                    raise ValueError(str(exc)) from exc
+                if current and current != plan.source_block_id:
+                    raise ValueError("drag target must be ahead of the train in its current direction")
+                target = {"x": round(plan.x, 2), "y": round(plan.y, 2),
+                          "from_node": plan.source_block_id.lower(), "to_node": plan.target_block_id.lower(),
+                          "progress": round(plan.progress, 6), "distance_mm": round(plan.distance_mm, 2),
+                          "estimated_duration_ms": plan.estimated_duration_ms}
+                train["target_coordinate"] = target
+                route = (plan.source_block_id, plan.target_block_id)
+                train["route"] = [item.lower() for item in route]
+                self.runtime.route_updater.set_route(train_id, route)
+                if self.simulation_mode and hasattr(self.runtime.track, "set_train_route"):
+                    result = self.runtime.track.set_train_route(train_id, route)
+                    if hasattr(result, "accepted") and not result.accepted:
+                        raise ValueError(result.detail or "coordinate route was rejected")
+                self.events.append({"type": "train_coordinate_targeted", "train_id": train_id, "coordinate": target})
             elif kind == "set_direction":
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 train = next((item for item in self.trains if item["id"] == train_id), None)
@@ -2310,6 +2447,10 @@ class ControllerHandler(BaseHTTPRequestHandler):
             return self._send_json({"trains": self.application.state()["trains"]})
         if parsed.path == "/api/train-database":
             return self._send_json({"trains": self.application.train_database()})
+        if parsed.path == "/api/calibration":
+            return self._send_json(self.application.calibration_state())
+        if parsed.path == "/api/presence":
+            return self._send_json(self.application.train_presence_state())
         if parsed.path == "/api/train-catalogue":
             query = parse_qs(parsed.query)
             format_name = query.get("format", ["json"])[0]

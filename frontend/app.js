@@ -102,7 +102,8 @@
     layoutEditing: false,
     layoutDrag: null,
     nextConsistItemNumber: 1,
-    layoutAssetEditing: null
+    layoutAssetEditing: null,
+    pinboardCursor: null
   };
 
   // A dial draft is separate from measured speed: requesting zero is not proof
@@ -310,6 +311,8 @@
     if (value.simulation) app.state.simulation = { ...app.state.simulation, ...value.simulation };
     if (value.connection) app.state.connection = { ...app.state.connection, ...value.connection };
     if (value.mode) app.state.mode = value.mode;
+    if (value.calibration) app.state.calibration = value.calibration;
+    if (value.presence) app.state.presence = value.presence;
   }
 
   function mergeTrainDatabaseRecords(records) {
@@ -822,10 +825,47 @@
     renderEditor();
     renderSchedules();
     renderAssembler();
+    renderCalibration();
     renderStats();
     renderConnectionEditor();
     renderLayoutAssetInspector();
     updateWorkspaceVisibility();
+  }
+
+  function renderCalibration() {
+    const select = $('#calibration-train-select');
+    if (!select) return;
+    const trains = app.state.trains || [];
+    select.innerHTML = trains.map((train) => '<option value="' + escapeHtml(train.id) + '">' + escapeHtml(train.name || ('Train ' + (train.number || train.id))) + ' · #' + escapeHtml(train.number || '—') + '</option>').join('');
+    if (trains.some((train) => train.id === app.selectedTrainId)) select.value = app.selectedTrainId;
+    const state = app.state.calibration || {};
+    const active = state.active;
+    const runStatus = active ? String(active.status || 'running') : 'ready';
+    $('#calibration-state').textContent = active ? runStatus.toUpperCase() : 'Ready';
+    $('#calibration-status').textContent = active
+      ? (active.error ? 'Calibration failed: ' + active.error : active.status === 'recorded' ? 'Measurement stored.' : 'Run ' + active.run_id + ' · ' + active.status + '.')
+      : 'No calibration run yet.';
+    $('#start-calibration').disabled = Boolean(active && active.status === 'running') || !trains.length || app.state.track_power === false;
+    $('#cancel-calibration').disabled = !(active && active.status === 'running');
+    $('#record-calibration').disabled = !(active && active.status === 'completed');
+    const history = Array.isArray(state.history) ? state.history : [];
+    $('#calibration-history').innerHTML = history.length
+      ? '<small>Recent measurements</small>' + history.slice(0, 4).map((item) => '<div><span>' + escapeHtml(item.train_id) + '</span><strong>' + escapeHtml(String(item.measured_distance_mm)) + ' mm</strong><small>' + escapeHtml(String(item.speed_kmh)) + ' km/h · ' + escapeHtml(String(item.duration_ms)) + ' ms</small></div>').join('')
+      : '<small>No stored measurements for this controller yet.</small>';
+  }
+
+  async function startCalibration() {
+    const trainId = $('#calibration-train-select').value;
+    if (!trainId) return;
+    await sendCommand({ type: 'start_calibration', train_id: trainId, speed_kmh: 10, duration_ms: 100 });
+  }
+
+  async function recordCalibration() {
+    const input = $('#calibration-distance');
+    if (!input.value || !input.checkValidity()) { input.reportValidity(); return; }
+    await sendCommand({ type: 'record_calibration', distance_mm: Number(input.value), notes: $('#calibration-notes').value.trim() });
+    input.value = '';
+    $('#calibration-notes').value = '';
   }
 
   function renderConnection() {
@@ -932,6 +972,12 @@
 
   function renderGraph() {
     const layout = app.state.layout;
+    if (app.layoutView === 'pinboard') {
+      renderPinboard();
+      return;
+    }
+    const stageMode = $('#map-stage-mode');
+    if (stageMode) stageMode.textContent = 'LIVE BLOCK GRAPH';
     $('#layout-panel').classList.toggle('is-editing', app.layoutEditing);
     $('#toggle-layout-edit').textContent = app.layoutEditing ? 'Editor' : 'Edit layout';
     const blocks = layout.blocks || [];
@@ -1000,6 +1046,108 @@
     $$('[data-turnout-id]', $('#layout-svg')).forEach((node) => node.addEventListener('click', () => toggleTurnout(node.dataset.turnoutId)));
     $$('[data-signal-id]', $('#layout-svg')).forEach((node) => node.addEventListener('click', () => toggleSignal(node.dataset.signalId)));
     $$('[data-turntable-id]', $('#layout-svg')).forEach((node) => node.addEventListener('click', () => alignTurntable(node.dataset.turntableId)));
+  }
+
+  function pinboardPointFromEvent(event) {
+    const svg = $('#layout-svg');
+    const rect = svg.getBoundingClientRect();
+    const viewBox = svg.viewBox.baseVal;
+    return {
+      x: viewBox.x + ((event.clientX - rect.left) / Math.max(1, rect.width)) * viewBox.width,
+      y: viewBox.y + ((event.clientY - rect.top) / Math.max(1, rect.height)) * viewBox.height,
+    };
+  }
+
+  function formatPinboardCoordinate(point) {
+    return 'X ' + Number(point.x).toFixed(1) + ' · Y ' + Number(point.y).toFixed(1);
+  }
+
+  function pinboardTrainPoint(train, blockMap) {
+    const motion = train.motion || {};
+    const from = blockMap[String(motion.from_block_id || motion.block_id || train.position || '').toLowerCase()];
+    if (!from) return null;
+    const to = blockMap[String(motion.to_block_id || '').toLowerCase()];
+    const start = blockCenter(from);
+    const end = to ? blockCenter(to) : start;
+    const progress = to && motion.source === 'simulation' && Number.isFinite(Number(motion.position))
+      ? Math.max(0, Math.min(0.98, Number(motion.position))) : 0;
+    return { x: start.x + (end.x - start.x) * progress, y: start.y + (end.y - start.y) * progress, dx: end.x - start.x, dy: end.y - start.y };
+  }
+
+  function renderPinboard() {
+    const layout = app.state.layout;
+    const blocks = layout.blocks || [];
+    const blockMap = Object.fromEntries(blocks.flatMap((block) => [[block.id, block], [String(block.id || '').toLowerCase(), block]]));
+    const edges = normalizedEdges(layout, blocks);
+    const edgeMarkup = edges.map((edge) => {
+      const path = edgePath(blockMap[edge.from], blockMap[edge.to]);
+      return '<path class="pinboard-rail" d="' + path + '"></path>';
+    }).join('');
+    const nodeMarkup = blocks.map((block) => {
+      const point = blockCenter(block);
+      const selected = block.id === app.selectedBlockId ? ' is-selected' : '';
+      return '<g class="pinboard-node' + selected + '" data-block-id="' + escapeHtml(block.id) + '" tabindex="0" role="button" aria-label="Track node ' + escapeHtml(block.name || block.id) + '"><circle cx="' + point.x + '" cy="' + point.y + '" r="9"></circle><text x="' + (point.x + 14) + '" y="' + (point.y + 4) + '">' + escapeHtml(block.name || block.id) + '</text><title>' + escapeHtml(block.name || block.id) + ' · X ' + point.x.toFixed(1) + ' · Y ' + point.y.toFixed(1) + '</title></g>';
+    }).join('');
+    const trainMarkup = app.state.trains.map((train) => {
+      const point = pinboardTrainPoint(train, blockMap);
+      if (!point) return '';
+      const angle = Math.atan2(point.dy, point.dx) * 180 / Math.PI;
+      const consist = Array.isArray(train.consist) && train.consist.length ? train.consist : [{ type: 'locomotive', name: train.name, length_mm: train.length_mm || 220 }];
+      let offset = 0;
+      const vehicles = consist.map((item, index) => {
+        const length = Math.max(16, Math.min(90, Number(item.length_mm || 220) / 8));
+        const value = '<rect class="pinboard-vehicle ' + (index === 0 ? 'is-locomotive' : 'is-rolling-stock') + '" x="' + (-offset - length) + '" y="-7" width="' + length + '" height="14" rx="2"><title>' + escapeHtml(item.name || item.type || 'Rolling stock') + '</title></rect>';
+        offset += length + 3;
+        return value;
+      }).join('');
+      const label = escapeHtml(train.name || train.id);
+      return '<g class="pinboard-train' + (train.id === app.selectedTrainId ? ' is-selected' : '') + '" data-pinboard-train-id="' + escapeHtml(train.id) + '" transform="translate(' + point.x + ' ' + point.y + ') rotate(' + angle + ')" tabindex="0" role="button" aria-label="Train ' + label + '">' + vehicles + '<path class="pinboard-direction-arrow" d="M 7 -5 L 17 0 L 7 5 Z"></path><text class="pinboard-train-label" transform="rotate(' + (-angle) + ')" x="10" y="-13">' + label + '</text></g>';
+    }).join('');
+    $('#layout-svg').setAttribute('viewBox', '0 0 980 650');
+    $('#layout-svg').innerHTML = '<g class="pinboard-layer">' + edgeMarkup + nodeMarkup + trainMarkup + '</g>';
+    const stageMode = $('#map-stage-mode');
+    if (stageMode) stageMode.textContent = '2D PINBOARD';
+    $('#graph-motion-note').textContent = 'Pinboard view · drag a train marker to issue a coordinate target. Hover or move the pointer to read track coordinates.';
+    const stage = $('#map-stage');
+    stage.onpointermove = (event) => {
+      const point = pinboardPointFromEvent(event);
+      app.pinboardCursor = point;
+      const display = $('#pinboard-coordinate');
+      if (display) display.textContent = formatPinboardCoordinate(point);
+    };
+    stage.onpointerleave = () => {
+      const display = $('#pinboard-coordinate');
+      if (display) display.textContent = 'Move over the board to read coordinates';
+    };
+    $$('[data-block-id]', $('#layout-svg')).forEach((node) => {
+      node.addEventListener('click', () => selectBlock(node.dataset.blockId));
+      node.addEventListener('pointerdown', (event) => beginBlockDrag(event, node.dataset.blockId));
+    });
+    $$('[data-pinboard-train-id]', $('#layout-svg')).forEach((node) => {
+      node.addEventListener('click', () => selectTrain(node.dataset.pinboardTrainId));
+      node.addEventListener('pointerdown', (event) => beginPinboardTrainDrag(event, node.dataset.pinboardTrainId));
+    });
+  }
+
+  function beginPinboardTrainDrag(event, trainId) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const move = (current) => {
+      const next = pinboardPointFromEvent(current);
+      app.pinboardCursor = next;
+      const display = $('#pinboard-coordinate');
+      if (display) display.textContent = formatPinboardCoordinate(next);
+    };
+    const finish = async (current) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      const target = pinboardPointFromEvent(current);
+      const response = await sendCommand({ type: 'move_train_to_coordinate', train_id: trainId, x: target.x, y: target.y });
+      if (response) showToast('Coordinate target sent for ' + trainId, 'success');
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish, { once: true });
+    move(event);
   }
 
   function updateMotionMarkers(now) {
@@ -1172,6 +1320,11 @@
     const trains = app.state.trains.filter((train) => !query || [train.name, train.number, train.position, train.status].join(' ').toLowerCase().includes(query));
     $('#train-list').innerHTML = trains.length ? trains.map((train) => `<button class="train-row ${train.id === app.selectedTrainId ? 'is-selected' : ''}" data-train-id="${escapeHtml(train.id)}"><span class="train-cell-main"><strong>${escapeHtml(train.name || `Train ${train.number}`)}</strong><small>${escapeHtml(train.class || 'Rolling stock')} · #${escapeHtml(train.number || '—')}</small></span><span class="train-position">${escapeHtml(train.position || '—')}</span><span class="train-status ${train.status === 'Delayed' ? 'warning' : ''}"><i class="signal-dot ${train.status === 'Delayed' ? 'yellow' : 'green'}"></i>${escapeHtml(train.status || 'Unknown')}</span><span class="train-speed">${Math.round(Number(train.speed) || 0)}<small> km/h</small></span></button>`).join('') : `<div class="empty-state">No trains match “${escapeHtml(app.filter)}”.</div>`;
     $$('.train-row', $('#train-list')).forEach((row) => row.addEventListener('click', () => selectTrain(row.dataset.trainId)));
+    const presence = app.state.presence || {};
+    const summary = presence.summary || {};
+    $('#train-presence-status').textContent = summary.total
+      ? summary.detected + ' detected · ' + summary.unknown + ' unknown · ' + summary.errors + ' errors. Presence is based on available track feedback.'
+      : 'No train presence scan run yet.';
   }
 
   function trainDataCollections(train) {
@@ -1812,12 +1965,13 @@
     $('#scan-panel').classList.toggle('is-hidden', page !== 'scans');
     $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     $('#train-editor-panel').classList.toggle('is-hidden', page !== 'trains');
-    $('.bottom-grid').classList.toggle('is-hidden', !['trains', 'timetable'].includes(page));
-    $('#timetable-panel').classList.toggle('is-hidden', page !== 'timetable');
+    $('.bottom-grid').classList.toggle('is-hidden', !['dispatch', 'layout', 'trains', 'timetable'].includes(page));
+    $('#timetable-panel').classList.toggle('is-hidden', !['layout', 'timetable'].includes(page));
+    $('#calibration-panel').classList.toggle('is-hidden', page !== 'trains');
     $('#assembler-panel').classList.toggle('is-hidden', page !== 'trains');
     $('#fit-layout').classList.toggle('is-hidden', !trackPage);
     $('.search-box').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
-    const titles = { dispatch: 'Dispatch', layout: 'Layout editor', trains: 'Your trains', timetable: 'Timetable', scans: '3D workspace' };
+    const titles = { dispatch: 'Home', layout: 'Automation', trains: 'Your trains', timetable: 'Timetable', scans: '3D workspace' };
     $('#workspace-title').textContent = titles[page] || 'Settings';
     $('#workspace-context').textContent = `${app.state.layout.blocks.length} blocks · ${app.state.trains.length} trains`;
     $$('.mode-tab').forEach((button) => {
@@ -1831,7 +1985,7 @@
 
   function navigateWorkspace(page) {
     app.workspace = page;
-    if (page === 'layout') { app.layoutView = 'editor'; app.layoutEditing = true; }
+    if (page === 'layout') { app.layoutView = 'graph'; app.layoutEditing = false; }
     else { app.layoutEditing = false; if (page === 'dispatch' && app.layoutView === 'editor') app.layoutView = 'graph'; }
     renderGraph();
     updateWorkspaceVisibility();
@@ -2295,6 +2449,15 @@
     $('#speed-slider').addEventListener('change', flushSpeedDraft);
     $('#speed-slider').addEventListener('pointerup', flushSpeedDraft);
     $('#speed-slider').addEventListener('pointercancel', cancelSpeedDraft);
+    $('#calibration-train-select').addEventListener('change', (event) => { app.selectedTrainId = event.target.value; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); renderCalibration(); });
+    $('#start-calibration').addEventListener('click', startCalibration);
+    $('#cancel-calibration').addEventListener('click', () => sendCommand({ type: 'cancel_calibration' }));
+    $('#record-calibration').addEventListener('click', recordCalibration);
+    document.addEventListener('keydown', (event) => {
+      if (!event.ctrlKey || event.key.toLowerCase() !== 'c' || !app.pinboardCursor || app.layoutView !== 'pinboard') return;
+      const text = formatPinboardCoordinate(app.pinboardCursor);
+      navigator.clipboard?.writeText(text).then(() => showToast('Coordinate copied: ' + text, 'success')).catch(() => showToast(text, 'warning'));
+    });
     window.addEventListener('pagehide', cancelSpeedDraft);
     $('#stop-train').addEventListener('click', () => setSpeed(0));
     $('#direction-forward').addEventListener('click', () => setDirection('forward'));
@@ -2305,6 +2468,13 @@
     $('#simulation-rate-select').addEventListener('change', (event) => { app.simRate = Number(event.target.value) || 1; renderSidebar(); showToast(`Fast-forward multiplier set to ${app.simRate}×; live clock remains real time.`, 'success'); });
     $('#refresh-button').addEventListener('click', () => { showToast('Refreshing controller state…', 'success'); bootstrap(); });
     $('#train-search').addEventListener('input', (event) => { app.filter = event.target.value; renderTrainList(); });
+    $('#scan-train-presence').addEventListener('click', async () => {
+      const button = $('#scan-train-presence');
+      button.disabled = true;
+      button.textContent = 'Scanning…';
+      try { await sendCommand({ type: 'scan_train_presence' }); }
+      finally { button.disabled = false; button.textContent = '⌁ Ping saved DCC IDs'; }
+    });
     $('#fit-layout').addEventListener('click', () => { app.zoom = 1; $('#layout-svg').style.transform = 'scale(1)'; $('#layout-zoom-label').textContent = '100%'; fitGraphViewport(); showToast('Layout fitted to workspace', 'success'); });
     $('#layout-zoom-in').addEventListener('click', () => changeZoom(.1));
     $('#layout-zoom-out').addEventListener('click', () => changeZoom(-.1));
@@ -2353,6 +2523,7 @@
     const style = document.createElement('style');
     style.textContent = '.is-collapsed .editor-tabs, .is-collapsed .editor-content { display: none; } .is-collapsed { min-height: 0 !important; } .empty-state { padding: 24px 18px; color: var(--faint); font-size: 10px; } #sync-ribbon[data-tone="warning"] .ribbon-icon { color: var(--yellow); } #sync-ribbon[data-tone="success"] .ribbon-icon { color: var(--green); } .systematic-legend { display: flex; justify-content: space-between; gap: 12px; padding: 0 18px 7px; color: var(--faint); font-size: 9px; } .systematic-legend b { color: var(--cyan); font-weight: 600; } .systematic-track { overflow-x: auto; } .systematic-block { flex: 1 1 0; min-width: 52px; padding: 0 5px; white-space: nowrap; } .systematic-block.is-selected { border-color: var(--blue-bright); box-shadow: 0 0 0 1px rgba(92,157,255,.25); color: var(--text); } .systematic-link { position: relative; z-index: 2; flex: 0 0 17px; color: var(--cyan); font-size: 12px; line-height: 1; text-align: center; } .systematic-link.is-gap { color: var(--faint); opacity: .65; } .systematic-status strong.is-occupied { color: var(--orange); } .systematic-status strong.is-route { color: var(--violet); } .rolling-stock-label { display: block; margin: 8px 18px 0; color: var(--faint); font-size: 9px; } .rolling-stock-select { width: calc(100% - 36px); min-height: 28px; margin: 4px 18px 0; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font-size: 10px; } #consist-list .consist-item { grid-template-columns: 25px minmax(0, 1fr) auto auto; } .consist-position { color: var(--faint); font-size: 9px; white-space: nowrap; } .consist-actions { display: inline-flex; gap: 3px; } .consist-actions .icon-button { width: 22px; height: 22px; font-size: 13px; } .consist-actions .icon-button:disabled { cursor: default; opacity: .3; }';
     style.textContent += ' .function-control-panel { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); } .function-control-panel .record-section-heading { padding: 0 0 8px; } .function-toggle-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; } .function-toggle { min-height: 48px; padding: 6px; border: 1px solid var(--line); border-radius: 7px; background: #0d192a; color: var(--text); text-align: left; cursor: pointer; } .function-toggle:hover { border-color: var(--blue-bright); } .function-toggle.is-on { border-color: var(--cyan); background: rgba(0, 198, 217, .13); box-shadow: inset 0 0 0 1px rgba(0, 198, 217, .16); } .function-toggle:disabled { opacity: .35; cursor: not-allowed; } .function-toggle strong, .function-toggle span, .function-toggle small { display: block; } .function-toggle strong { color: var(--cyan); font-size: 10px; } .function-toggle span { overflow: hidden; margin-top: 2px; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; } .function-toggle small { margin-top: 4px; color: var(--faint); font-size: 8px; letter-spacing: .08em; } .function-toggle.is-on small { color: var(--cyan); } .function-control-panel.is-compact { margin: 12px 18px 0; } .function-control-panel.is-compact .record-section-heading { display: block; } .function-control-panel.is-compact .settings-help { display: block; margin-top: 4px; }';
+    style.textContent += ' .pinboard-layer { font-family: inherit; } .pinboard-rail { fill: none; stroke: rgba(115, 148, 184, .62); stroke-width: 8; stroke-linecap: round; } .pinboard-rail:hover { stroke: var(--cyan); } .pinboard-node { cursor: pointer; } .pinboard-node circle { fill: #10233a; stroke: var(--blue-bright); stroke-width: 2; } .pinboard-node text { fill: var(--text); font-size: 11px; font-weight: 600; } .pinboard-node.is-selected circle { fill: var(--cyan); stroke: #fff; } .pinboard-node.is-selected text { fill: var(--cyan); } .pinboard-train { cursor: grab; filter: drop-shadow(0 3px 4px rgba(0,0,0,.32)); } .pinboard-train:active { cursor: grabbing; } .pinboard-vehicle { stroke: #08111e; stroke-width: 1.5; fill: var(--orange); } .pinboard-vehicle.is-locomotive { fill: var(--cyan); } .pinboard-train.is-selected .pinboard-vehicle { stroke: #fff; stroke-width: 2; } .pinboard-direction-arrow { fill: var(--green); stroke: #07111e; stroke-width: 1; } .pinboard-train-label { fill: var(--text); font-size: 10px; font-weight: 700; paint-order: stroke; stroke: #09111f; stroke-width: 3; stroke-linejoin: round; } .calibration-form, .calibration-record { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 18px; } .calibration-record { grid-template-columns: 1fr 1.5fr auto; margin-top: 10px; align-items: end; } .calibration-form label, .calibration-record label { display: grid; gap: 4px; color: var(--faint); font-size: 9px; } .calibration-form input, .calibration-form select, .calibration-record input { min-width: 0; min-height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font: inherit; } .calibration-panel > .settings-help, .calibration-panel > .settings-status { margin-left: 18px; margin-right: 18px; } .calibration-actions { padding: 0 18px; margin-top: 10px; } .calibration-history { margin: 12px 18px 0; border-top: 1px solid var(--line); padding-top: 8px; } .calibration-history > small { color: var(--faint); } .calibration-history > div { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding-top: 5px; color: var(--faint); font-size: 9px; } .calibration-history strong { color: var(--cyan); }';
     document.head.appendChild(style);
   }
 

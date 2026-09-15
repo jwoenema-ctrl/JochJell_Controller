@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import tempfile
+import time
 import unittest
 import urllib.request
 
@@ -26,6 +27,23 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(next(item for item in after["layout"]["blocks"] if item["id"] == "b02")["status"], "route")
             app.tick(50)
             self.assertEqual(next(item for item in app.state()["trains"] if item["id"] == "t1")["position"], "B02")
+        finally:
+            app.close()
+
+    def test_calibrated_pinboard_target_is_validated_and_persisted(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "stop_train", "train_id": "train-3"})
+            app.command({"type": "start_calibration", "train_id": "train-3", "speed_kmh": 10, "duration_ms": 100})
+            time.sleep(0.14)
+            self.assertEqual(app.state()["calibration"]["active"]["status"], "completed")
+            app.command({"type": "record_calibration", "distance_mm": 50})
+            app.command({"type": "set_direction", "train_id": "train-3", "direction": "reverse"})
+            state = app.command({"type": "move_train_to_coordinate", "train_id": "train-3", "x": 515, "y": 150})
+            target = next(item for item in state["trains"] if item["id"] == "t2")["target_coordinate"]
+            self.assertEqual((target["from_node"], target["to_node"]), ("b03", "b02"))
+            self.assertGreater(target["estimated_duration_ms"], 0)
         finally:
             app.close()
 
@@ -303,6 +321,19 @@ class ApiTests(unittest.TestCase):
             record = app.train_database("train-new")
             self.assertEqual(record["rolling_stock"][0]["vehicle_id"], "coach-1")
             self.assertEqual(record["rolling_stock"][0]["length_mm"], 264.0)
+        finally:
+            app.close()
+
+    def test_calibration_runs_bounded_stop_and_records_measurement(self) -> None:
+        app = ControllerApplication.sample()
+        try:
+            result = app.command({"type": "start_calibration", "train_id": "t2"})
+            self.assertEqual(result["calibration"]["active"]["status"], "running")
+            time.sleep(0.16)
+            self.assertEqual(app.calibration_state()["active"]["status"], "completed")
+            result = app.command({"type": "record_calibration", "distance_mm": 37.5, "notes": "Test bench"})
+            self.assertEqual(result["calibration"]["active"]["status"], "recorded")
+            self.assertEqual(app.calibration_state()["history"][0]["measured_distance_mm"], 37.5)
         finally:
             app.close()
 

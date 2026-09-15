@@ -16,6 +16,14 @@ Modular Python controller and browser dashboard for an H0 model railway using th
   Graph markers interpolate simulation positions; physical positions are not
   invented when feedback cannot locate a train within a block.
 - The supplied [transparent logo](docs/LOGO.md) is used by the interface and executables.
+- The Trains workspace includes a bounded 10 km/h / 100 ms calibration workflow.
+  Measurements are stored per locomotive and are required before coordinate-target
+  planning from the 2D pinboard.
+- The Automation workspace includes the node graph, 2D pinboard and timetable.
+  Pinboard drops validate direction, topology, occupancy and calibration before
+  storing a target; they do not implicitly issue a real-Z21 movement command.
+- **Ping saved DCC IDs** scans all saved locomotives and reports detected, unknown
+  and error results using available track feedback.
 
 ## Run locally
 

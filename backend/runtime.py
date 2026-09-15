@@ -16,6 +16,7 @@ from .infrastructure.real_track import Z21TrackSystem
 from .infrastructure.z21 import Z21LanTransport
 from .services.avoidance import AvoidanceDetector
 from .services.connection import ConnectionChecker
+from .services.calibration import TrainCalibrationService
 from .services.dispatcher import ControlMode, DispatchCycle, Dispatcher
 from .services.interlocking import MovementAuthorityService
 from .services.route_updater import ConstantRouteUpdater
@@ -50,6 +51,7 @@ class ControllerRuntime:
     connection: ConnectionChecker
     train_database: SQLiteTrainDatabase
     layout_repository: SQLiteLayoutRepository
+    calibration: TrainCalibrationService
 
     @classmethod
     def create(cls, *, database_path: str = ":memory:") -> "ControllerRuntime":
@@ -87,6 +89,7 @@ class ControllerRuntime:
         avoidance = AvoidanceDetector()
         interlocking = MovementAuthorityService()
         dispatcher = Dispatcher(track, avoidance_detector=avoidance, route_updater=route_updater, interlocking=interlocking)
+        database = SQLiteTrainDatabase(database_path)
         return cls(
             track=track,
             layout=layout,
@@ -99,8 +102,9 @@ class ControllerRuntime:
             interlocking=interlocking,
             mode_switcher=AutomaticSystemSwitcher(dispatcher),
             connection=connection,
-            train_database=SQLiteTrainDatabase(database_path),
+            train_database=database,
             layout_repository=SQLiteLayoutRepository(database_path),
+            calibration=TrainCalibrationService(dispatcher, track, database),
         )
 
     def add_train(
@@ -178,6 +182,7 @@ class ControllerRuntime:
         return planned_routes
 
     def close(self) -> None:
+        self.calibration.close()
         self.train_database.close()
         self.layout_repository.close()
         if isinstance(self.track, Z21TrackSystem):

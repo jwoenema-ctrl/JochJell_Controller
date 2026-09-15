@@ -9,6 +9,7 @@ from pathlib import Path
 
 from backend.infrastructure.train_database import (
     DecoderFunctionMapping,
+    CalibrationRecord,
     MaintenanceRecord,
     RollingStockRecord,
     SQLiteTrainDatabase,
@@ -72,6 +73,16 @@ class ExtendedTrainDatabaseTests(unittest.TestCase):
             self.assertEqual(database.list_maintenance_records("T1"), ())
             self.assertEqual(database.list_rolling_stock("T1"), ())
             self.assertIsNone(database.get_full_train("T1"))
+
+    def test_calibration_records_are_ordered_and_cascaded(self) -> None:
+        with SQLiteTrainDatabase() as database:
+            database.upsert(TrainModel("T1", "Calibrated locomotive"))
+            record = database.add_calibration("T1", speed_kmh=10, duration_ms=100, measured_distance_mm=42.5, created_at="2026-09-15T12:00:00+00:00")
+            self.assertIsInstance(record, CalibrationRecord)
+            self.assertEqual(database.list_calibrations("T1")[0].measured_distance_mm, 42.5)
+            self.assertEqual(database.get_full_train("T1").calibrations[0], record)
+            database.delete("T1")
+            self.assertEqual(database.list_calibrations("T1"), ())
 
     def test_initialisation_migrates_an_older_trains_table(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

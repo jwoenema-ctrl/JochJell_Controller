@@ -22,11 +22,9 @@
       </div>
 
       <nav class="mode-nav" aria-label="Primary workspace">
-        <button class="mode-tab is-active" data-workspace="dispatch">Dispatch</button>
-        <button class="mode-tab" data-workspace="layout">Layout editor</button>
+        <button class="mode-tab is-active" data-workspace="dispatch">Home</button>
         <button class="mode-tab" data-workspace="trains">Trains</button>
-        <button class="mode-tab" data-workspace="timetable">Timetable</button>
-        <button class="mode-tab" data-workspace="scans">3D scans</button>
+        <button class="mode-tab" data-workspace="layout">Automation</button>
         <button class="mode-tab" data-workspace="settings">Settings</button>
       </nav>
 
@@ -171,6 +169,7 @@
           <div class="map-toolbar">
             <div class="toolbar-tabs">
               <button class="toolbar-tab is-active" data-layout-view="graph">Node graph</button>
+              <button class="toolbar-tab" data-layout-view="pinboard">2D pinboard</button>
               <button class="toolbar-tab" data-layout-view="systematic">Systematic track</button>
               <button class="toolbar-tab" data-layout-view="signals">Signals & turnouts</button>
               <button class="toolbar-tab" id="toggle-layout-edit" data-layout-view="editor">Edit layout</button>
@@ -199,7 +198,7 @@
           </div>
           <div class="map-stage" id="map-stage">
             <svg id="layout-svg" class="layout-svg" viewBox="0 0 980 350" role="img" aria-label="Track block node graph"></svg>
-            <div class="map-stage-label top-left"><span class="pulse-dot"></span> LIVE BLOCK GRAPH</div>
+            <div class="map-stage-label top-left"><span class="pulse-dot"></span> <span id="map-stage-mode">LIVE BLOCK GRAPH</span> · <span id="pinboard-coordinate">Move over the board to read coordinates</span></div>
             <div class="map-stage-label bottom-right">Click to inspect · Double-click to edit</div>
           </div>
           <p class="graph-motion-note" id="graph-motion-note">Train markers show controller-reported blocks. Exact positions are unavailable.</p>
@@ -233,10 +232,11 @@
           <section class="panel train-panel" id="train-panel">
             <div class="panel-heading">
               <div><p class="eyebrow">FLEET & POSITIONS</p><h2>Train overview</h2></div>
-              <button class="text-button" id="add-train">＋ Add train</button>
+              <div class="panel-heading-actions"><button class="text-button" id="scan-train-presence">⌁ Ping saved DCC IDs</button><button class="text-button" id="add-train">＋ Add train</button></div>
             </div>
             <div class="train-table-head"><span>TRAIN</span><span>POSITION</span><span>STATUS</span><span>SPEED</span></div>
             <div class="train-list" id="train-list"></div>
+            <p class="settings-status train-presence-status" id="train-presence-status" role="status">No train presence scan run yet.</p>
           </section>
 
           <section class="panel train-editor-panel" id="train-editor-panel">
@@ -254,6 +254,26 @@
         </div>
 
         <div class="bottom-grid">
+          <section class="panel calibration-panel" id="calibration-panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">MOTION CALIBRATION</p><h2>Calibrate selected train</h2></div>
+              <span class="tiny-status" id="calibration-state">Ready</span>
+            </div>
+            <div class="calibration-form">
+              <label>Train<select id="calibration-train-select" aria-label="Train to calibrate"></select></label>
+              <label>Test speed<input id="calibration-speed" type="number" value="10" min="0.1" max="140" step="0.1" readonly></label>
+              <label>Duration<input id="calibration-duration" type="number" value="100" min="1" max="1000" step="1" readonly></label>
+            </div>
+            <p class="settings-help">The controller moves the train briefly, then sends a stop command. Measure the travelled distance before recording it.</p>
+            <div class="button-row calibration-actions"><button type="button" class="button button-primary" id="start-calibration">Run 100 ms test</button><button type="button" class="button button-soft" id="cancel-calibration">Stop test</button></div>
+            <div class="calibration-record">
+              <label>Measured distance (mm)<input id="calibration-distance" type="number" min="0" step="0.1" placeholder="e.g. 37.5"></label>
+              <label>Notes<input id="calibration-notes" type="text" maxlength="160" placeholder="Track, decoder, load…"></label>
+              <button type="button" class="button button-soft" id="record-calibration">Store measurement</button>
+            </div>
+            <p class="settings-status" id="calibration-status" role="status">No calibration run yet.</p>
+            <div class="calibration-history" id="calibration-history"></div>
+          </section>
           <section class="panel timetable-panel" id="timetable-panel">
             <div class="panel-heading">
               <div><p class="eyebrow">OPERATING PLAN</p><h2>Timetable & scheduler</h2></div>

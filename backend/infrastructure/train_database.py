@@ -82,6 +82,19 @@ class RollingStockRecord:
 
 
 @dataclass(frozen=True)
+class CalibrationRecord:
+    """One measured short movement used to predict real train travel."""
+
+    calibration_id: int | None
+    train_id: str
+    speed_kmh: float
+    duration_ms: int
+    measured_distance_mm: float
+    created_at: str
+    notes: str = ""
+
+
+@dataclass(frozen=True)
 class TrainDetails:
     """A train model together with its full persisted metadata."""
 
@@ -89,6 +102,7 @@ class TrainDetails:
     decoder_functions: tuple[DecoderFunctionMapping, ...] = ()
     maintenance_records: tuple[MaintenanceRecord, ...] = ()
     rolling_stock: tuple[RollingStockRecord, ...] = ()
+    calibrations: tuple[CalibrationRecord, ...] = ()
 
 
 DecoderFunction = DecoderFunctionMapping
@@ -218,6 +232,20 @@ class SQLiteTrainDatabase:
                  "name": "TEXT NOT NULL DEFAULT ''", "manufacturer": "TEXT NOT NULL DEFAULT ''",
                  "model": "TEXT NOT NULL DEFAULT ''", "length_mm": "REAL", "mass_g": "REAL",
                  "metadata_json": "TEXT NOT NULL DEFAULT '{}'"},
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS train_calibrations (
+                    calibration_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    train_id TEXT NOT NULL,
+                    speed_kmh REAL NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    measured_distance_mm REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    notes TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY (train_id) REFERENCES trains(train_id) ON DELETE CASCADE
+                )
+                """
             )
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_maintenance_train_date "
@@ -442,6 +470,50 @@ class SQLiteTrainDatabase:
             )
         return cursor.rowcount > 0
 
+    def add_calibration(
+        self,
+        train_id: str,
+        *,
+        speed_kmh: float,
+        duration_ms: int,
+        measured_distance_mm: float,
+        notes: str = "",
+        created_at: str,
+    ) -> CalibrationRecord:
+        """Persist one measured movement and return its assigned ID."""
+
+        if not train_id.strip():
+            raise ValueError("train_id is required")
+        if speed_kmh <= 0 or duration_ms <= 0 or measured_distance_mm < 0:
+            raise ValueError("calibration values must be positive except measured distance")
+        with self._lock, self._connection:
+            self._require_train(train_id)
+            cursor = self._connection.execute(
+                """
+                INSERT INTO train_calibrations
+                    (train_id, speed_kmh, duration_ms, measured_distance_mm, created_at, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (train_id, float(speed_kmh), int(duration_ms), float(measured_distance_mm), str(created_at), str(notes)),
+            )
+            calibration_id = int(cursor.lastrowid)
+        return CalibrationRecord(calibration_id, train_id, float(speed_kmh), int(duration_ms), float(measured_distance_mm), str(created_at), str(notes))
+
+    def list_calibrations(self, train_id: str | None = None) -> tuple[CalibrationRecord, ...]:
+        with self._lock:
+            if train_id is None:
+                rows = self._connection.execute(
+                    "SELECT * FROM train_calibrations ORDER BY created_at DESC, calibration_id DESC"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT * FROM train_calibrations WHERE train_id = ? ORDER BY created_at DESC, calibration_id DESC",
+                    (train_id,),
+                ).fetchall()
+        return tuple(self._calibration_from_row(row) for row in rows)
+
+    get_calibrations = list_calibrations
+
     delete_rolling_stock_record = delete_rolling_stock
     remove_rolling_stock = delete_rolling_stock
 
@@ -454,6 +526,7 @@ class SQLiteTrainDatabase:
             decoder_functions=self.list_decoder_functions(train_id),
             maintenance_records=self.list_maintenance_records(train_id),
             rolling_stock=self.list_rolling_stock(train_id),
+            calibrations=self.list_calibrations(train_id),
         )
 
     get_full_train = get_details
@@ -504,6 +577,15 @@ class SQLiteTrainDatabase:
             vehicle_type=row["vehicle_type"], name=row["name"], manufacturer=row["manufacturer"],
             model=row["model"], length_mm=row["length_mm"], mass_g=row["mass_g"],
             metadata=cls._json_object(row["metadata_json"]),
+        )
+
+    @classmethod
+    def _calibration_from_row(cls, row: sqlite3.Row) -> CalibrationRecord:
+        return CalibrationRecord(
+            calibration_id=row["calibration_id"], train_id=row["train_id"],
+            speed_kmh=row["speed_kmh"], duration_ms=row["duration_ms"],
+            measured_distance_mm=row["measured_distance_mm"],
+            created_at=row["created_at"], notes=row["notes"],
         )
 
     @classmethod
