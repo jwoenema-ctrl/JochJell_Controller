@@ -202,6 +202,23 @@ async function shot(page, name) {
     const waypoint = state.layout.waypoints.find(item => item.id === 'WP02');
     return waypoint && Number(waypoint.y) > 0;
   });
+  const waypointBefore = await page.evaluate(async () => {
+    const state = await fetch('/api/state').then(response => response.json());
+    const waypoint = state.layout.waypoints.find(item => item.id === 'WP02');
+    return { x: Number(waypoint.x), y: Number(waypoint.y) };
+  });
+  const splineHandle = page.locator('#layout-svg [data-waypoint-id="WP02"]');
+  const splineBox = await splineHandle.boundingBox();
+  assert.ok(splineBox, 'Placed spline handle should be visible');
+  await page.mouse.move(splineBox.x + splineBox.width / 2, splineBox.y + splineBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(splineBox.x + splineBox.width / 2 + 26, splineBox.y + splineBox.height / 2 + 18, { steps: 2 });
+  await page.mouse.up();
+  await page.waitForFunction(async (before) => {
+    const state = await fetch('/api/state').then(response => response.json());
+    const waypoint = state.layout.waypoints.find(item => item.id === 'WP02');
+    return waypoint && (Number(waypoint.x) !== before.x || Number(waypoint.y) !== before.y);
+  }, waypointBefore);
   await page.getByRole('button', { name: 'Node graph', exact: true }).click();
   await page.locator('#layout-power-toggle').click();
   await page.waitForFunction(() => document.querySelector('#layout-power-toggle').textContent === 'Power on');

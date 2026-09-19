@@ -99,6 +99,7 @@
     scanObjectUrls: {},
     layoutEditing: false,
     layoutDrag: null,
+    waypointDrag: null,
     pendingBlockPlacementId: null,
     pendingWaypointPlacementId: null,
     nextConsistItemNumber: 1,
@@ -1401,6 +1402,42 @@
       node.addEventListener('click', () => selectTrain(node.dataset.pinboardTrainId));
       node.addEventListener('pointerdown', (event) => beginPinboardTrainDrag(event, node.dataset.pinboardTrainId));
     });
+    $$('[data-waypoint-id]', $('#layout-svg')).forEach((node) => {
+      node.addEventListener('pointerdown', (event) => beginWaypointDrag(event, node.dataset.waypointId));
+    });
+  }
+
+  function beginWaypointDrag(event, waypointId) {
+    if (!app.layoutEditing || event.button !== 0) return;
+    const waypoint = (app.state.layout.waypoints || []).find((item) => item.id === waypointId);
+    if (!waypoint) return;
+    const point = svgPoint(event);
+    app.waypointDrag = {
+      waypointId,
+      start: point,
+      original: { x: Number(waypoint.x) || 0, y: Number(waypoint.y) || 0 }
+    };
+    event.preventDefault();
+  }
+
+  function moveWaypointDrag(event) {
+    if (!app.waypointDrag) return;
+    const waypoint = (app.state.layout.waypoints || []).find((item) => item.id === app.waypointDrag.waypointId);
+    if (!waypoint) return;
+    const point = svgPoint(event);
+    waypoint.x = Math.max(0, Math.round(app.waypointDrag.original.x + point.x - app.waypointDrag.start.x));
+    waypoint.y = Math.max(0, Math.round(app.waypointDrag.original.y + point.y - app.waypointDrag.start.y));
+    renderGraph();
+  }
+
+  function endWaypointDrag() {
+    if (!app.waypointDrag) return;
+    const waypoint = (app.state.layout.waypoints || []).find((item) => item.id === app.waypointDrag.waypointId);
+    if (waypoint) {
+      sendCommand({ type: 'update_waypoint', waypoint_id: waypoint.id, waypoint: { x: waypoint.x, y: waypoint.y } });
+      showToast(`${waypoint.id} moved to X ${waypoint.x} · Y ${waypoint.y}.`, 'success');
+    }
+    app.waypointDrag = null;
   }
 
   function beginPinboardTrainDrag(event, trainId) {
@@ -2915,6 +2952,9 @@
     $('#layout-svg').addEventListener('pointermove', moveBlockDrag);
     $('#layout-svg').addEventListener('pointerup', endBlockDrag);
     $('#layout-svg').addEventListener('pointerleave', endBlockDrag);
+    $('#layout-svg').addEventListener('pointermove', moveWaypointDrag);
+    $('#layout-svg').addEventListener('pointerup', endWaypointDrag);
+    $('#layout-svg').addEventListener('pointerleave', endWaypointDrag);
     $$('.control-mode').forEach((button) => button.addEventListener('click', () => {
       app.controlMode = button.dataset.controlMode;
       app.state.mode = app.controlMode;
