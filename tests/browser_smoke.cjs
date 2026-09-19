@@ -63,6 +63,7 @@ async function shot(page, name) {
   assert.match(await page.locator('.train-row').first().textContent(), /→|#/, 'Locomotive rows show service data');
   await page.getByRole('link', { name: 'Overview', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#train-panel .panel-heading h2').textContent === 'Train overview');
+  assert.match(await page.locator('.train-row').filter({ hasText: 'ICE 3' }).textContent(), /Central station/, 'Train overview must show the next scheduled destination');
   await page.getByRole('link', { name: 'Programming', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#programming-panel').classList.contains('is-hidden') === false);
   await page.locator('#programming-new-address').fill('7');

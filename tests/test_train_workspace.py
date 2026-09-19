@@ -59,6 +59,11 @@ class TrainWorkspaceContractTests(unittest.TestCase):
                 "confirm": True,
             })
 
+    def test_train_overview_projects_next_destination_from_assigned_schedule(self) -> None:
+        trains = {item["id"]: item for item in self.app.state()["trains"]}
+        self.assertEqual(trains["t1"]["next_destination"], "Central station")
+        self.assertEqual(trains["t2"]["next_destination"], "Central station")
+
 
 if __name__ == "__main__":
     unittest.main()

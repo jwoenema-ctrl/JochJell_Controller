@@ -1713,6 +1713,48 @@ class ControllerApplication:
     def _canonical_train_id(self, ui_id: str) -> str:
         return {"t1": "train-101", "t2": "train-3"}.get(ui_id, ui_id)
 
+    def _next_schedule_destination(self, train: dict[str, Any]) -> str | None:
+        """Resolve the next human-readable timetable destination for a train."""
+
+        train_id = str(train.get("id", ""))
+        address = str(train.get("address", train.get("number", "")))
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        terminal_states = {"completed", "arrived", "cancelled", "canceled"}
+        for schedule in self.schedules:
+            schedule_train = schedule.get("train_id")
+            if schedule_train not in (None, ""):
+                if self._canonical_train_id(str(schedule_train)) != train_id:
+                    continue
+            elif str(schedule.get("number", "")) != address:
+                continue
+            if str(schedule.get("state", "")).strip().lower() in terminal_states:
+                continue
+            candidates.append((str(schedule.get("time", "99:99")), schedule))
+        if not candidates:
+            return None
+        _, schedule = sorted(candidates, key=lambda item: item[0])[0]
+        destination = str(schedule.get("destination", "")).strip()
+        if destination:
+            return destination
+        route = str(schedule.get("route", "")).strip()
+        if "→" in route:
+            destination = route.rsplit("→", 1)[-1].strip()
+            if destination:
+                return destination
+        stops = schedule.get("stops")
+        if isinstance(stops, list) and stops:
+            stop = stops[-1] if isinstance(stops[-1], dict) else {}
+            station_id = stop.get("station_id", stop.get("stationId"))
+        else:
+            station_id = schedule.get("station_id", schedule.get("stationId"))
+        if station_id not in (None, ""):
+            station = next((item for item in self.stations if str(item.get("id")) == str(station_id)), None)
+            return str((station or {}).get("name") or station_id)
+        coordinate = schedule.get("destination_coordinate")
+        if isinstance(coordinate, dict) and coordinate.get("x") is not None and coordinate.get("y") is not None:
+            return f"Coordinate {coordinate['x']}, {coordinate['y']}"
+        return None
+
     def _ui_trains(self) -> list[dict[str, Any]]:
         result = []
         for train in self.trains:
@@ -1740,6 +1782,7 @@ class ControllerApplication:
                 "destination_block_id": train.get("destination_block_id"),
                 "origin": train.get("origin", "Layout"),
                 "destination": train.get("destination", "Layout"),
+                "next_destination": self._next_schedule_destination(train),
                 "direction": "Forward" if (self.runtime.track.get_train_direction(str(train["id"])) if self.runtime else train.get("direction", "forward") == "forward") else "Reverse",
                 "decoder": f"Z21-{train.get('address', '')}",
                 "manufacturer": train.get("manufacturer", ""),
