@@ -14,6 +14,17 @@ BLOCKS = [
 ]
 EDGES = [{"from": "A", "to": "B", "length_mm": 1000}]
 CALIBRATION = [{"speed_kmh": 10, "duration_ms": 100, "measured_distance_mm": 50}]
+MULTI_BLOCKS = [
+    {"id": "B1", "x": 0, "y": 0},
+    {"id": "B2", "x": 100, "y": 0},
+    {"id": "B3", "x": 200, "y": 0},
+    {"id": "B4", "x": 300, "y": 0},
+]
+MULTI_EDGES = [
+    {"from": "B1", "to": "B2", "length_mm": 100},
+    {"from": "B2", "to": "B3", "length_mm": 100},
+    {"from": "B3", "to": "B4", "length_mm": 100},
+]
 
 
 class CoordinateMovementTests(unittest.TestCase):
@@ -33,6 +44,36 @@ class CoordinateMovementTests(unittest.TestCase):
         plan = self.planner().plan("train-7", 60, 10, direction="reverse")
         self.assertEqual((plan.source_block_id, plan.target_block_id), ("B", "A"))
         self.assertAlmostEqual(plan.distance_mm, 500)
+
+    def test_forward_multi_block_plan_sums_clear_route_and_final_progress(self):
+        plan = CoordinateMovementPlanner(MULTI_BLOCKS, MULTI_EDGES, CALIBRATION).plan(
+            "train-7", 250, 0, current_block_id="B1"
+        )
+        self.assertEqual(plan.route_node_ids, ("B1", "B2", "B3", "B4"))
+        self.assertEqual((plan.source_block_id, plan.target_block_id), ("B3", "B4"))
+        self.assertAlmostEqual(plan.progress, 0.5)
+        self.assertAlmostEqual(plan.distance_mm, 250)
+        self.assertEqual(plan.estimated_duration_ms, 500)
+
+    def test_reverse_multi_block_plan_uses_reverse_segment_progress(self):
+        plan = CoordinateMovementPlanner(MULTI_BLOCKS, MULTI_EDGES, CALIBRATION).plan(
+            "train-7", 150, 0, direction="reverse", current_block_id="B4"
+        )
+        self.assertEqual(plan.route_node_ids, ("B4", "B3", "B2"))
+        self.assertEqual((plan.source_block_id, plan.target_block_id), ("B3", "B2"))
+        self.assertAlmostEqual(plan.distance_mm, 150)
+        self.assertEqual(plan.estimated_duration_ms, 300)
+
+    def test_multi_block_route_rejects_unreachable_off_track_and_occupied_intermediate(self):
+        planner = CoordinateMovementPlanner(MULTI_BLOCKS, MULTI_EDGES, CALIBRATION, coordinate_tolerance=5)
+        with self.assertRaisesRegex(MovementPlanValidationError, "no clear route"):
+            CoordinateMovementPlanner(
+                MULTI_BLOCKS, [MULTI_EDGES[0], MULTI_EDGES[2]], CALIBRATION
+            ).plan("train-7", 250, 0, current_block_id="B1")
+        with self.assertRaisesRegex(MovementPlanValidationError, "not on"):
+            planner.plan("train-7", 250, 50, current_block_id="B1")
+        with self.assertRaisesRegex(MovementPlanValidationError, "route block B2 is occupied"):
+            planner.plan("train-7", 250, 0, current_block_id="B1", occupied_blocks={"B2": "train-2"})
 
     def test_waypoint_control_points_project_coordinates_on_curved_segment(self):
         planner = CoordinateMovementPlanner(

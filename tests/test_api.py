@@ -607,6 +607,29 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_calibrated_pinboard_target_reserves_a_clear_multi_block_route(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            # Free B01 so train-3 can safely travel from B03 through B02 to a
+            # coordinate on the B01--B02 segment.
+            app.runtime.track.remove_train("train-101")
+            app.trains = [train for train in app.trains if train["id"] != "train-101"]
+            app.runtime.train_database.add_calibration(
+                "train-3", speed_kmh=10, duration_ms=100, measured_distance_mm=50,
+                created_at="2026-01-01T00:00:00Z",
+            )
+            app.command({"type": "stop_train", "train_id": "train-3"})
+            app.command({"type": "set_direction", "train_id": "train-3", "direction": "reverse"})
+            state = app.command({"type": "move_train_to_coordinate", "train_id": "train-3", "x": 265, "y": 150})
+            train = next(item for item in state["trains"] if item["id"] == "t2")
+            target = train["target_coordinate"]
+            self.assertEqual(target["route_node_ids"], ["b03", "b02", "b01"])
+            self.assertEqual(train["route"], ["b03", "b02", "b01"])
+            self.assertGreater(target["estimated_duration_ms"], 0)
+        finally:
+            app.close()
+
     def test_presence_keeps_station_known_fallback_out_of_physical_detected_count(self) -> None:
         app = ControllerApplication.sample()
         try:

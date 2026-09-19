@@ -1519,7 +1519,13 @@
       const target = pinboardPointFromEvent(current);
       const response = await sendCommand({ type: 'move_train_to_coordinate', train_id: trainId, x: target.x, y: target.y });
       if (response) {
-        showToast('Coordinate target planned for ' + trainId, 'success');
+        const train = (response.trains || []).find((item) => item.id === trainId);
+        const coordinate = train && train.target_coordinate;
+        const blocks = coordinate && Array.isArray(coordinate.route_node_ids) ? coordinate.route_node_ids : [];
+        const durationMs = Number(coordinate && coordinate.estimated_duration_ms);
+        const duration = Number.isFinite(durationMs) && durationMs > 0 ? ` · ~${Math.ceil(durationMs / 1000)} s` : '';
+        const route = blocks.length ? `: ${blocks.map((block) => String(block).toUpperCase()).join(' → ')}` : '';
+        showToast('Coordinate target planned for ' + trainId + route + duration, 'success');
         if (window.confirm('Execute this calibrated movement now? The train will move briefly and then stop.')) {
           await sendCommand({ type: 'execute_coordinate_move', train_id: trainId, confirm: true });
         }

@@ -2428,21 +2428,33 @@ class ControllerApplication:
                 try:
                     planner_blocks = [{**block, "id": str(block.get("id", "")).strip().upper()} for block in self.blocks]
                     planner_edges = [{**edge, "from": str(edge.get("from", "")).strip().upper(), "to": str(edge.get("to", "")).strip().upper()} for edge in self._topology_edges()]
-                    plan = CoordinateMovementPlanner(planner_blocks, planner_edges, calibration).plan(
+                    planner = CoordinateMovementPlanner(planner_blocks, planner_edges, calibration)
+                    destination = planner.plan(
                         train_id, x, y, speed_kmh=10, direction=direction,
                         occupied_blocks=self.runtime.track.get_snapshot().occupied_blocks,
                     )
+                    if current:
+                        route_prefix, _ = self._route_path(current, destination.source_block_id)
+                        configured_blocks = {str(block["id"]).upper() for block in planner_blocks}
+                        if any(node_id not in configured_blocks for node_id in route_prefix):
+                            raise ValueError("coordinate movement supports clear block-to-block routes only")
+                    else:
+                        route_prefix = [destination.source_block_id]
+                    plan = planner.plan(
+                        train_id, x, y, speed_kmh=10, direction=direction,
+                        occupied_blocks=self.runtime.track.get_snapshot().occupied_blocks,
+                        current_block_id=current or None, route_node_ids=route_prefix,
+                    )
                 except MovementPlanValidationError as exc:
                     raise ValueError(str(exc)) from exc
-                if current and current != plan.source_block_id:
-                    raise ValueError("drag target must be ahead of the train in its current direction")
                 target = {"x": round(plan.x, 2), "y": round(plan.y, 2),
                           "from_node": plan.source_block_id.lower(), "to_node": plan.target_block_id.lower(),
                           "progress": round(plan.progress, 6), "distance_mm": round(plan.distance_mm, 2),
                           "estimated_duration_ms": plan.estimated_duration_ms, "direction": plan.direction,
-                          "speed_kmh": plan.speed_kmh}
+                          "speed_kmh": plan.speed_kmh,
+                          "route_node_ids": [item.lower() for item in plan.route_node_ids]}
                 train["target_coordinate"] = target
-                route = (plan.source_block_id, plan.target_block_id)
+                route = plan.route_node_ids
                 train["route"] = [item.lower() for item in route]
                 self.runtime.route_updater.set_route(train_id, route)
                 if self.simulation_mode and hasattr(self.runtime.track, "set_train_route"):
@@ -2472,6 +2484,7 @@ class ControllerApplication:
                         speed_kmh=float(target.get("speed_kmh", 10)), estimated_duration_ms=int(target.get("estimated_duration_ms", 1)),
                         segment_length_mm=max(1.0, float(target["distance_mm"])), calibration_speed_kmh=float(calibration[0].speed_kmh),
                         calibration_duration_ms=int(calibration[0].duration_ms), direction=str(target.get("direction", train.get("direction", "forward"))),
+                        route_node_ids=tuple(str(item).upper() for item in target.get("route_node_ids", ()) if str(item).strip()),
                     )
                     execution = CoordinateMovementExecutionPlanner(max_duration_ms=120000).build(movement_plan, calibration)
                 except (KeyError, TypeError, ValueError, MovementPlanValidationError) as exc:

@@ -1,4 +1,4 @@
-"""Plan safe movement from a pinboard coordinate to a neighbouring block.
+"""Plan safe movement from a pinboard coordinate across clear track blocks.
 
 This module is intentionally independent from the controller runtime.  Callers
 inject the layout topology and calibration records, then decide whether and
@@ -33,7 +33,7 @@ class MovementExecutionError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class CoordinateMovementPlan:
-    """A bounded movement from a point on one segment to its destination block."""
+    """A bounded movement from a current block to a point on a track segment."""
 
     train_id: str
     x: float
@@ -48,6 +48,7 @@ class CoordinateMovementPlan:
     calibration_speed_kmh: float
     calibration_duration_ms: int
     direction: str = "forward"
+    route_node_ids: tuple[str, ...] = ()
 
     @property
     def source_block(self) -> str:
@@ -526,12 +527,22 @@ class CoordinateMovementPlanner:
         speed_kmh: float | None = None,
         direction: str = "forward",
         occupied_blocks: Mapping[str, Any] | Iterable[str] | None = None,
+        current_block_id: str | None = None,
+        route_node_ids: Iterable[str] | None = None,
     ) -> CoordinateMovementPlan:
-        """Build a plan to the end block of the segment under ``direction``.
+        """Build a plan to a coordinate under ``direction``.
 
         ``forward`` follows each edge's ``from`` → ``to`` orientation.  The
         reverse direction swaps source/target and the remaining distance.  An
-        occupied target is rejected when its occupant is another train.
+        occupied destination or intermediate route block is rejected when its
+        occupant is another train.
+
+        Supplying ``current_block_id`` enables a bounded multi-block movement.
+        ``route_node_ids`` may contain a caller-calculated A*/BFS route from
+        that current block to the source end of the destination segment.  When
+        omitted, this planner uses a deterministic breadth-first path over its
+        injected block edges.  No turnout or non-block node is inferred here;
+        callers retain control of live topology and interlocking decisions.
         """
 
         train_id = _required_text(train_id, "train_id")
@@ -555,9 +566,21 @@ class CoordinateMovementPlanner:
             remaining_progress = progress
         if source not in self._block_by_id or target not in self._block_by_id:
             raise MovementPlanValidationError("track segment references an unknown block", field="topology")
-        self._validate_occupancy(target, train_id, occupied_blocks)
 
-        distance_mm = segment_length_mm * remaining_progress
+        route_prefix = self._route_to_segment_source(current_block_id, source, route_node_ids)
+        full_route = (*route_prefix, target)
+        if len(set(full_route)) != len(full_route):
+            raise MovementPlanValidationError(
+                "destination coordinate would require revisiting a block", field="route"
+            )
+        for block_id in full_route[1:]:
+            self._validate_occupancy(block_id, train_id, occupied_blocks, label="route block")
+
+        intermediate_distance_mm = sum(
+            self._edge_length_between(left_id, right_id)
+            for left_id, right_id in zip(route_prefix, route_prefix[1:])
+        )
+        distance_mm = intermediate_distance_mm + segment_length_mm * remaining_progress
         speed_per_ms = float(_value(calibration, "measured_distance_mm", "distance_mm")) / float(
             _value(calibration, "duration_ms", "duration")
         )
@@ -576,6 +599,7 @@ class CoordinateMovementPlanner:
             calibration_speed_kmh=float(_value(calibration, "speed_kmh", "speed")),
             calibration_duration_ms=int(_value(calibration, "duration_ms", "duration")),
             direction=direction,
+            route_node_ids=full_route,
         )
 
     def execution_plan(
@@ -628,6 +652,107 @@ class CoordinateMovementPlanner:
             raise MovementPlanValidationError("coordinate is not on a configured track segment", field="coordinate")
         return best[1], best[2], best[3]
 
+    def _route_to_segment_source(
+        self,
+        current_block_id: str | None,
+        segment_source_id: str,
+        route_node_ids: Iterable[str] | None,
+    ) -> tuple[str, ...]:
+        """Return a validated block-only path ending at a segment source."""
+
+        if current_block_id is None or not str(current_block_id).strip():
+            if route_node_ids is not None:
+                raise MovementPlanValidationError(
+                    "current_block_id is required when route_node_ids are supplied", field="route"
+                )
+            return (segment_source_id,)
+        current = _required_text(current_block_id, "current_block_id")
+        if current not in self._block_by_id:
+            raise MovementPlanValidationError("current block is not configured", field="route")
+
+        if route_node_ids is None:
+            return self._breadth_first_route(current, segment_source_id)
+        if isinstance(route_node_ids, (str, bytes)):
+            raise MovementPlanValidationError("route_node_ids must be an iterable of block IDs", field="route")
+        try:
+            route = tuple(_required_text(node_id, "route_node_ids") for node_id in route_node_ids)
+        except TypeError as exc:
+            raise MovementPlanValidationError("route_node_ids must be an iterable of block IDs", field="route") from exc
+        if not route or route[0] != current or route[-1] != segment_source_id:
+            raise MovementPlanValidationError(
+                "route_node_ids must start at the current block and end at the destination segment source",
+                field="route",
+            )
+        if len(set(route)) != len(route):
+            raise MovementPlanValidationError("route_node_ids must not repeat blocks", field="route")
+        for left_id, right_id in zip(route, route[1:]):
+            self._edge_length_between(left_id, right_id)
+        return route
+
+    def _breadth_first_route(self, current: str, target: str) -> tuple[str, ...]:
+        if current == target:
+            return (current,)
+        adjacent: dict[str, set[str]] = {block_id: set() for block_id in self._block_by_id}
+        for edge in self._edges:
+            try:
+                left = _required_text(_value(edge, "from", "from_block_id"), "edge.from")
+                right = _required_text(_value(edge, "to", "to_block_id"), "edge.to")
+            except (KeyError, MovementPlanValidationError):
+                continue
+            if left in adjacent and right in adjacent and left != right:
+                adjacent[left].add(right)
+                adjacent[right].add(left)
+        queue = [current]
+        parents: dict[str, str | None] = {current: None}
+        for node_id in queue:
+            if node_id == target:
+                break
+            for neighbour in sorted(adjacent[node_id]):
+                if neighbour not in parents:
+                    parents[neighbour] = node_id
+                    queue.append(neighbour)
+        if target not in parents:
+            raise MovementPlanValidationError(
+                f"no clear route from {current} to {target}", field="route"
+            )
+        route: list[str] = []
+        node_id: str | None = target
+        while node_id is not None:
+            route.append(node_id)
+            node_id = parents[node_id]
+        route.reverse()
+        return tuple(route)
+
+    def _edge_length_between(self, left_id: str, right_id: str) -> float:
+        if left_id not in self._block_by_id or right_id not in self._block_by_id:
+            raise MovementPlanValidationError("route references an unknown block", field="route")
+        for edge in self._edges:
+            try:
+                edge_left = _required_text(_value(edge, "from", "from_block_id"), "edge.from")
+                edge_right = _required_text(_value(edge, "to", "to_block_id"), "edge.to")
+            except (KeyError, MovementPlanValidationError):
+                continue
+            if {edge_left, edge_right} != {left_id, right_id}:
+                continue
+            control_points = _edge_control_points(edge)
+            if edge_left != left_id:
+                control_points = tuple(reversed(control_points))
+            points = (_center(self._block_by_id[left_id]), *control_points, _center(self._block_by_id[right_id]))
+            layout_distance = sum(
+                math.hypot(points[index + 1][0] - points[index][0], points[index + 1][1] - points[index][1])
+                for index in range(len(points) - 1)
+            )
+            return _segment_length(
+                edge,
+                self._block_by_id[edge_left],
+                self._block_by_id[edge_right],
+                layout_distance,
+                self._layout_scale_mm,
+            )
+        raise MovementPlanValidationError(
+            f"route blocks {left_id} and {right_id} are not connected", field="route"
+        )
+
     def _select_speed(self, speed_kmh: float | None) -> float:
         if speed_kmh is not None:
             return _positive_finite(speed_kmh, "speed_kmh")
@@ -656,7 +781,13 @@ class CoordinateMovementPlanner:
         return record
 
     @staticmethod
-    def _validate_occupancy(target: str, train_id: str, occupied_blocks: Mapping[str, Any] | Iterable[str] | None) -> None:
+    def _validate_occupancy(
+        target: str,
+        train_id: str,
+        occupied_blocks: Mapping[str, Any] | Iterable[str] | None,
+        *,
+        label: str = "target block",
+    ) -> None:
         if occupied_blocks is None:
             return
         if isinstance(occupied_blocks, Mapping):
@@ -670,7 +801,7 @@ class CoordinateMovementPlanner:
         else:
             occupied = {str(item) for item in occupied_blocks}
         if occupied - {train_id}:
-            raise MovementPlanValidationError(f"target block {target} is occupied", field="occupancy")
+            raise MovementPlanValidationError(f"{label} {target} is occupied", field="occupancy")
 
 
 def _records(value: Iterable[Mapping[str, Any] | object] | Mapping[str, Any] | object) -> tuple[object, ...]:
@@ -840,6 +971,8 @@ def plan_coordinate_movement(
     speed_kmh: float | None = None,
     direction: str = "forward",
     occupied_blocks: Mapping[str, Any] | Iterable[str] | None = None,
+    current_block_id: str | None = None,
+    route_node_ids: Iterable[str] | None = None,
     layout_scale_mm: float = 1.0,
     coordinate_tolerance: float = 32.0,
     max_speed_delta_kmh: float | None = None,
@@ -860,6 +993,8 @@ def plan_coordinate_movement(
         speed_kmh=speed_kmh,
         direction=direction,
         occupied_blocks=occupied_blocks,
+        current_block_id=current_block_id,
+        route_node_ids=route_node_ids,
     )
 
 
