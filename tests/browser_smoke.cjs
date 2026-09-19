@@ -220,6 +220,10 @@ async function shot(page, name) {
     return waypoint && (Number(waypoint.x) !== before.x || Number(waypoint.y) !== before.y);
   }, waypointBefore);
   assert.ok(await page.locator('#layout-svg .pinboard-rail').evaluateAll(paths => paths.some(path => String(path.getAttribute('d') || '').includes('C'))), 'Spline control point should render a curved rail');
+  const pinboardTrain = page.locator('#layout-svg .pinboard-train').first();
+  assert.ok(await pinboardTrain.count(), 'Pinboard should render an active train marker');
+  await pinboardTrain.hover();
+  assert.equal(await pinboardTrain.locator('.pinboard-vehicle').first().evaluate(node => getComputedStyle(node).strokeWidth), '2.5px', 'Hovering a train should highlight its vehicles');
   await page.getByRole('button', { name: 'Node graph', exact: true }).click();
   await page.locator('#layout-power-toggle').click();
   await page.waitForFunction(() => document.querySelector('#layout-power-toggle').textContent === 'Power on');
