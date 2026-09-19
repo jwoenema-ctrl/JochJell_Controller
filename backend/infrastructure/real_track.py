@@ -125,6 +125,14 @@ class Z21TrackSystem:
     def connection_status(self) -> ConnectionStatus:
         return self.transport.connection_status()
 
+    def probe_train_address(self, address: int) -> CommandResult:
+        """Poll RailCom for one DCC address without treating no reply as link loss."""
+
+        result, detected = self.transport.probe_railcom(address)
+        if detected:
+            return result
+        return CommandResult(False, "probe_train_address", result.detail or "no decoder response")
+
     def read_power_telemetry(self) -> dict:
         result, datasets = self.transport.request_datasets(
             encode_dataset(0x0085), expected_header=0x0084, command="system_state")
@@ -245,6 +253,32 @@ class Z21TrackSystem:
         """Return the last function states acknowledged by the adapter."""
 
         return dict(self._train_functions.get(train_id, {}))
+
+    def read_cv(self, train_id: str, cv: int, *, target: str = "programming_track") -> tuple[CommandResult, int | None]:
+        """Read a decoder CV using direct service mode or RailCom POM."""
+
+        target = str(target).strip().lower()
+        if target not in {"main", "programming_track"}:
+            return CommandResult(False, "read_cv", "target must be main or programming_track"), None
+        address = self._train_addresses.get(train_id)
+        if target == "main" and address is None:
+            return CommandResult(False, "read_cv_pom", f"no DCC address registered for {train_id}"), None
+        if target == "main":
+            return self.transport.read_cv_pom(address, cv)
+        return self.transport.read_cv(cv)
+
+    def write_cv(self, train_id: str, cv: int, value: int, *, target: str = "programming_track") -> CommandResult:
+        """Write a decoder CV using direct service mode or POM."""
+
+        target = str(target).strip().lower()
+        if target not in {"main", "programming_track"}:
+            return CommandResult(False, "write_cv", "target must be main or programming_track")
+        address = self._train_addresses.get(train_id)
+        if target == "main":
+            if address is None:
+                return CommandResult(False, "write_cv_pom", f"no DCC address registered for {train_id}")
+            return self.transport.write_cv_pom(address, cv, value)
+        return self.transport.write_cv(cv, value)
 
     def set_power(self, enabled: bool) -> CommandResult:
         """Switch Z21 track voltage using the LAN X-BUS command."""

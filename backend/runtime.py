@@ -17,6 +17,8 @@ from .infrastructure.z21 import Z21LanTransport
 from .services.avoidance import AvoidanceDetector
 from .services.connection import ConnectionChecker
 from .services.calibration import TrainCalibrationService
+from .services.coordinate_execution import CoordinateMovementExecutor
+from .services.automation_recording import AutomationRecordingService
 from .services.dispatcher import ControlMode, DispatchCycle, Dispatcher
 from .services.interlocking import MovementAuthorityService
 from .services.route_updater import ConstantRouteUpdater
@@ -52,6 +54,8 @@ class ControllerRuntime:
     train_database: SQLiteTrainDatabase
     layout_repository: SQLiteLayoutRepository
     calibration: TrainCalibrationService
+    coordinate_movement: CoordinateMovementExecutor
+    recording: AutomationRecordingService
 
     @classmethod
     def create(cls, *, database_path: str = ":memory:") -> "ControllerRuntime":
@@ -105,6 +109,8 @@ class ControllerRuntime:
             train_database=database,
             layout_repository=SQLiteLayoutRepository(database_path),
             calibration=TrainCalibrationService(dispatcher, track, database),
+            coordinate_movement=CoordinateMovementExecutor(dispatcher, track),
+            recording=AutomationRecordingService(),
         )
 
     def add_train(
@@ -182,6 +188,7 @@ class ControllerRuntime:
         return planned_routes
 
     def close(self) -> None:
+        self.coordinate_movement.close()
         self.calibration.close()
         self.train_database.close()
         self.layout_repository.close()

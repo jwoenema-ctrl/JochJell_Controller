@@ -21,9 +21,13 @@ Modular Python controller and browser dashboard for an H0 model railway using th
   planning from the 2D pinboard.
 - The Automation workspace includes the node graph, 2D pinboard and timetable.
   Pinboard drops validate direction, topology, occupancy and calibration before
-  storing a target; they do not implicitly issue a real-Z21 movement command.
+  storing a target; execution is a separate confirmed action and always has a
+  bounded stop timer, including on the native app.
 - **Ping saved DCC IDs** scans all saved locomotives and reports detected, unknown
   and error results using available track feedback.
+- The Trains workspace includes persistent rolling-stock quantities, a guarded
+  DCC CV read/write panel, and an Automation action recorder for speed, direction,
+  and decoder-function actions.
 
 ## Run locally
 

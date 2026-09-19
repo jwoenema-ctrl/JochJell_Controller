@@ -82,6 +82,33 @@ class RollingStockRecord:
 
 
 @dataclass(frozen=True)
+class RollingStockInventoryRecord:
+    """One catalogued rolling-stock type with a changeable quantity."""
+
+    item_id: str
+    name: str
+    vehicle_type: str = "vehicle"
+    quantity: int = 0
+    manufacturer: str = ""
+    model: str = ""
+    length_mm: float | None = None
+    mass_g: float | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def rolling_stock_id(self) -> str:
+        return self.item_id
+
+    @property
+    def inventory_id(self) -> str:
+        return self.item_id
+
+    @property
+    def vehicle_id(self) -> str:
+        return self.item_id
+
+
+@dataclass(frozen=True)
 class CalibrationRecord:
     """One measured short movement used to predict real train travel."""
 
@@ -108,6 +135,8 @@ class TrainDetails:
 DecoderFunction = DecoderFunctionMapping
 ServiceRecord = MaintenanceRecord
 ConsistRecord = RollingStockRecord
+RollingStockInventory = RollingStockInventoryRecord
+InventoryRecord = RollingStockInventoryRecord
 
 
 class SQLiteTrainDatabase:
@@ -232,6 +261,29 @@ class SQLiteTrainDatabase:
                  "name": "TEXT NOT NULL DEFAULT ''", "manufacturer": "TEXT NOT NULL DEFAULT ''",
                  "model": "TEXT NOT NULL DEFAULT ''", "length_mm": "REAL", "mass_g": "REAL",
                  "metadata_json": "TEXT NOT NULL DEFAULT '{}'"},
+            )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rolling_stock_inventory (
+                    item_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    vehicle_type TEXT NOT NULL DEFAULT 'vehicle',
+                    quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+                    manufacturer TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    length_mm REAL,
+                    mass_g REAL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            self._ensure_columns(
+                "rolling_stock_inventory",
+                {"vehicle_type": "TEXT NOT NULL DEFAULT 'vehicle'", "quantity": "INTEGER NOT NULL DEFAULT 0",
+                 "manufacturer": "TEXT NOT NULL DEFAULT ''", "model": "TEXT NOT NULL DEFAULT ''",
+                 "length_mm": "REAL", "mass_g": "REAL", "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+                 "updated_at": "TEXT"},
             )
             self._connection.execute(
                 """
@@ -469,6 +521,114 @@ class SQLiteTrainDatabase:
                 (train_id, rolling_stock_id),
             )
         return cursor.rowcount > 0
+    def upsert_inventory(self, record: RollingStockInventoryRecord) -> RollingStockInventoryRecord:
+        """Insert or update one inventory row without creating duplicate entries."""
+
+        self._validate_inventory(record)
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO rolling_stock_inventory
+                    (item_id, name, vehicle_type, quantity, manufacturer, model,
+                     length_mm, mass_g, metadata_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(item_id) DO UPDATE SET
+                    name = excluded.name, vehicle_type = excluded.vehicle_type,
+                    quantity = excluded.quantity, manufacturer = excluded.manufacturer,
+                    model = excluded.model, length_mm = excluded.length_mm,
+                    mass_g = excluded.mass_g, metadata_json = excluded.metadata_json,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (record.item_id, record.name, record.vehicle_type, record.quantity,
+                 record.manufacturer, record.model, record.length_mm, record.mass_g,
+                 _dump_json(record.metadata)),
+            )
+        return record
+
+    upsert_rolling_stock_inventory = upsert_inventory
+    upsert_inventory_record = upsert_inventory
+    add_inventory = upsert_inventory
+    add_rolling_stock_inventory = upsert_inventory
+
+    def get_inventory(self, item_id: str) -> RollingStockInventoryRecord | None:
+        """Return one inventory row, or ``None`` when it does not exist."""
+
+        self._validate_inventory_id(item_id)
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM rolling_stock_inventory WHERE item_id = ?", (item_id,)
+            ).fetchone()
+        return self._inventory_from_row(row) if row else None
+
+    get_rolling_stock_inventory = get_inventory
+    get_inventory_record = get_inventory
+
+    def list_inventory(self, *, vehicle_type: str | None = None) -> tuple[RollingStockInventoryRecord, ...]:
+        """List inventory rows in deterministic order."""
+
+        with self._lock:
+            if vehicle_type is None:
+                rows = self._connection.execute(
+                    "SELECT * FROM rolling_stock_inventory ORDER BY vehicle_type, name, item_id"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT * FROM rolling_stock_inventory WHERE vehicle_type = ? "
+                    "ORDER BY vehicle_type, name, item_id", (vehicle_type,)
+                ).fetchall()
+        return tuple(self._inventory_from_row(row) for row in rows)
+
+    list_rolling_stock_inventory = list_inventory
+    list_inventory_records = list_inventory
+    get_inventory_records = list_inventory
+
+    def adjust_inventory(self, item_id: str, delta: int, **fields: Any) -> RollingStockInventoryRecord:
+        """Add a signed quantity delta, optionally creating a new item with details."""
+
+        self._validate_inventory_id(item_id)
+        if isinstance(delta, bool) or not isinstance(delta, int):
+            raise ValueError("inventory delta must be an integer")
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM rolling_stock_inventory WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            current = self._inventory_from_row(row) if row else None
+            if current is None:
+                if not fields.get("name"):
+                    raise KeyError(f"unknown inventory item: {item_id}")
+                current = RollingStockInventoryRecord(
+                    item_id=item_id, name=str(fields["name"]),
+                    vehicle_type=str(fields.get("vehicle_type", "vehicle")), quantity=0,
+                    manufacturer=str(fields.get("manufacturer", "")), model=str(fields.get("model", "")),
+                    length_mm=fields.get("length_mm"), mass_g=fields.get("mass_g"),
+                    metadata=dict(fields.get("metadata", {})),
+                )
+            quantity = current.quantity + delta
+            if quantity < 0:
+                raise ValueError("quantity cannot be negative")
+            updates = {key: fields[key] for key in
+                       ("name", "vehicle_type", "manufacturer", "model", "length_mm", "mass_g", "metadata")
+                       if key in fields}
+            return self.upsert_inventory(replace(current, quantity=quantity, **updates))
+
+    adjust_inventory_quantity = adjust_inventory
+    adjust_rolling_stock_inventory_quantity = adjust_inventory
+    adjust_quantity = adjust_inventory
+    change_inventory_quantity = adjust_inventory
+
+    def delete_inventory(self, item_id: str) -> bool:
+        """Delete one inventory row and report whether it existed."""
+
+        self._validate_inventory_id(item_id)
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM rolling_stock_inventory WHERE item_id = ?", (item_id,)
+            )
+        return cursor.rowcount > 0
+
+    delete_inventory_record = delete_inventory
+    delete_rolling_stock_inventory = delete_inventory
+    remove_inventory = delete_inventory
 
     def add_calibration(
         self,
@@ -580,6 +740,15 @@ class SQLiteTrainDatabase:
         )
 
     @classmethod
+    def _inventory_from_row(cls, row: sqlite3.Row) -> RollingStockInventoryRecord:
+        return RollingStockInventoryRecord(
+            item_id=row["item_id"], name=row["name"], vehicle_type=row["vehicle_type"], quantity=int(row["quantity"]),
+            manufacturer=row["manufacturer"], model=row["model"], length_mm=row["length_mm"], mass_g=row["mass_g"],
+            metadata=cls._json_object(row["metadata_json"]),
+        )
+
+
+    @classmethod
     def _calibration_from_row(cls, row: sqlite3.Row) -> CalibrationRecord:
         return CalibrationRecord(
             calibration_id=row["calibration_id"], train_id=row["train_id"],
@@ -632,6 +801,7 @@ class SQLiteTrainDatabase:
             if value is not None and value < 0:
                 raise ValueError(f"{name} cannot be negative")
 
+
     @staticmethod
     def _validate_rolling_stock(record: RollingStockRecord) -> None:
         if not record.train_id.strip():
@@ -644,6 +814,29 @@ class SQLiteTrainDatabase:
             value = getattr(record, name)
             if value is not None and value < 0:
                 raise ValueError(f"{name} cannot be negative")
+
+    @staticmethod
+    def _validate_inventory_id(item_id: str) -> None:
+        if not isinstance(item_id, str) or not item_id.strip():
+            raise ValueError("item_id is required")
+
+    @classmethod
+    def _validate_inventory(cls, record: RollingStockInventoryRecord) -> None:
+        if not isinstance(record, RollingStockInventoryRecord):
+            raise ValueError("record must be a RollingStockInventoryRecord")
+        cls._validate_inventory_id(record.item_id)
+        if not isinstance(record.name, str) or not record.name.strip():
+            raise ValueError("inventory name is required")
+        if isinstance(record.quantity, bool) or not isinstance(record.quantity, int) or record.quantity < 0:
+            raise ValueError("inventory quantity must be a non-negative whole number")
+        if not isinstance(record.vehicle_type, str) or not record.vehicle_type.strip():
+            raise ValueError("vehicle_type is required")
+        for name in ("length_mm", "mass_g"):
+            value = getattr(record, name)
+            if value is not None and value < 0:
+                raise ValueError(f"{name} cannot be negative")
+        if not isinstance(record.metadata, Mapping):
+            raise ValueError("metadata must be a mapping")
 
 
 def _dump_json(value: Mapping[str, Any]) -> str:

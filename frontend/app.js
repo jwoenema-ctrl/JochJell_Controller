@@ -316,6 +316,8 @@
     if (value.presence) app.state.presence = value.presence;
     if (value.rollingStockInventory) app.state.rollingStockInventory = value.rollingStockInventory;
     if (value.programming) app.state.programming = value.programming;
+    if (value.recording) app.state.recording = value.recording;
+    if (value.coordinate_execution !== undefined) app.state.coordinate_execution = value.coordinate_execution;
   }
 
   function mergeTrainDatabaseRecords(records) {
@@ -833,6 +835,7 @@
     renderCalibration();
     renderInventory();
     renderProgramming();
+    renderRecording();
     renderStats();
     renderConnectionEditor();
     renderLayoutAssetInspector();
@@ -876,7 +879,47 @@
     const items = Array.isArray(inventory.items) && inventory.items.length ? inventory.items : fallback;
     const total = inventory.total != null ? inventory.total : items.reduce((sum, item) => sum + Number(item.count || 0), 0);
     $('#inventory-summary').textContent = `${total} vehicle${total === 1 ? '' : 's'}`;
-    host.innerHTML = items.length ? items.map((item) => `<div class="inventory-row"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}</small></span><span class="inventory-type">${escapeHtml(item.vehicle_type || 'rolling stock')}</span><span class="inventory-count">×${escapeHtml(item.count || 0)}</span></div>`).join('') : '<div class="empty-state">No rolling stock is assigned to a saved consist yet.</div>';
+    host.innerHTML = items.length ? items.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}</small></span><span class="inventory-type">${escapeHtml(item.vehicle_type || 'rolling stock')}</span><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : '<div class="empty-state">No rolling stock is assigned to a saved consist yet.</div>';
+  }
+
+  async function saveInventory() {
+    const itemId = $('#inventory-id').value.trim();
+    const name = $('#inventory-name').value.trim();
+    const quantity = Number($('#inventory-quantity').value);
+    if (!itemId || !name || !Number.isInteger(quantity) || quantity < 0) {
+      showToast('Enter a catalogue ID, name, and non-negative whole quantity.', 'warning');
+      return;
+    }
+    await sendCommand({ type: 'upsert_rolling_stock_inventory', item_id: itemId, name, vehicle_type: $('#inventory-type').value, quantity });
+  }
+
+  function renderRecording() {
+    const select = $('#recording-train-select');
+    const status = $('#recording-status');
+    if (!select || !status) return;
+    const trains = app.state.trains || [];
+    select.innerHTML = trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || train.id)}</option>`).join('');
+    if (trains.some((train) => train.id === app.selectedTrainId)) select.value = app.selectedTrainId;
+    const state = app.state.recording || {};
+    const active = state.active;
+    $('#start-recording').disabled = Boolean(active);
+    $('#stop-recording').disabled = !active;
+    $('#play-recording').disabled = !Array.isArray(state.history) || !state.history.length || Boolean(active);
+    status.textContent = active
+      ? `Recording ${active.train_id} · ${active.actions.length} action${active.actions.length === 1 ? '' : 's'}`
+      : state.history && state.history.length ? `${state.history.length} saved plan${state.history.length === 1 ? '' : 's'} · ready to play` : 'No recording yet.';
+  }
+
+  async function startRecording() {
+    const trainId = $('#recording-train-select').value;
+    if (trainId) await sendCommand({ type: 'start_recording', train_id: trainId });
+  }
+
+  async function stopRecording() { await sendCommand({ type: 'stop_recording' }); }
+
+  async function playRecording() {
+    if (!window.confirm('Play the last recorded train actions now?')) return;
+    await sendCommand({ type: 'play_recording', index: Math.max(0, ((app.state.recording || {}).history || []).length - 1), confirm: true });
   }
 
   function renderProgramming() {
@@ -899,7 +942,7 @@
     const trainId = $('#programming-train-select').value;
     if (!trainId) return;
     const command = {
-      type: 'program_decoder',
+      type: 'validate_programming',
       train_id: trainId,
       address: Number($('#programming-address').value),
       target: $('#programming-target').value,
@@ -908,6 +951,34 @@
     };
     if (![command.address, command.cv, command.value].every(Number.isFinite)) {
       showToast('Enter a valid DCC address, CV, and value.', 'warning');
+      return;
+    }
+    await sendCommand(command);
+  }
+
+  function programmingCommand(type) {
+    return {
+      type,
+      train_id: $('#programming-train-select').value,
+      address: Number($('#programming-address').value),
+      target: $('#programming-target').value,
+      cv: Number($('#programming-cv').value),
+      value: Number($('#programming-value').value),
+    };
+  }
+
+  async function writeProgramming() {
+    const command = programmingCommand('program_decoder');
+    const target = command.target === 'programming_track' ? 'programming track' : 'main track';
+    const message = `Write CV${command.cv}=${command.value} to DCC address ${command.address} on the ${target}? This can change decoder settings.`;
+    if (!command.train_id || ![command.address, command.cv, command.value].every(Number.isFinite) || !window.confirm(message)) return;
+    await sendCommand({ ...command, confirm: true });
+  }
+
+  async function readProgramming() {
+    const command = programmingCommand('read_decoder_cv');
+    if (!command.train_id || ![command.address, command.cv].every(Number.isFinite)) {
+      showToast('Enter a valid train, DCC address, and CV first.', 'warning');
       return;
     }
     await sendCommand(command);
@@ -1230,7 +1301,12 @@
       window.removeEventListener('pointerup', finish);
       const target = pinboardPointFromEvent(current);
       const response = await sendCommand({ type: 'move_train_to_coordinate', train_id: trainId, x: target.x, y: target.y });
-      if (response) showToast('Coordinate target sent for ' + trainId, 'success');
+      if (response) {
+        showToast('Coordinate target planned for ' + trainId, 'success');
+        if (window.confirm('Execute this calibrated movement now? The train will move briefly and then stop.')) {
+          await sendCommand({ type: 'execute_coordinate_move', train_id: trainId, confirm: true });
+        }
+      }
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', finish, { once: true });
@@ -2571,6 +2647,19 @@
     $('#calibration-train-select').addEventListener('change', (event) => { app.selectedTrainId = event.target.value; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); renderCalibration(); renderProgramming(); });
     $('#programming-train-select').addEventListener('change', (event) => { app.selectedTrainId = event.target.value; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); renderCalibration(); renderProgramming(); });
     $('#validate-programming').addEventListener('click', validateProgramming);
+    $('#write-programming').addEventListener('click', writeProgramming);
+    $('#read-programming').addEventListener('click', readProgramming);
+    $('#save-inventory').addEventListener('click', saveInventory);
+    $('#inventory-list').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-inventory-adjust]');
+      const row = event.target.closest('[data-inventory-id]');
+      if (!button || !row) return;
+      sendCommand({ type: 'adjust_rolling_stock_inventory', item_id: row.dataset.inventoryId, delta: Number(button.dataset.inventoryAdjust) });
+    });
+    $('#recording-train-select').addEventListener('change', (event) => { app.selectedTrainId = event.target.value; renderSidebar(); renderTrainList(); renderEditor(); renderRecording(); });
+    $('#start-recording').addEventListener('click', startRecording);
+    $('#stop-recording').addEventListener('click', stopRecording);
+    $('#play-recording').addEventListener('click', playRecording);
     $('#start-calibration').addEventListener('click', startCalibration);
     $('#cancel-calibration').addEventListener('click', () => sendCommand({ type: 'cancel_calibration' }));
     $('#record-calibration').addEventListener('click', recordCalibration);

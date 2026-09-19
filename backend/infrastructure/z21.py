@@ -25,6 +25,16 @@ Z21_COMMAND_STATION_IDS = frozenset((0x12, 0x13))
 LAN_X_SET_LOCO_DRIVE = 0xE4
 LAN_X_SET_LOCO_FUNCTION = 0xF8
 LAN_X_SET_TURNOUT = 0x53
+LAN_X_GET_LOCO_INFO = 0xE3
+LAN_X_LOCO_INFO = 0xEF
+LAN_X_CV_READ = 0x23
+LAN_X_CV_WRITE = 0x24
+LAN_X_CV_RESULT = 0x64
+LAN_X_CV_NACK_SC = 0x61
+LAN_X_CV_NACK = 0x61
+LAN_X_CV_POM = 0xE6
+LAN_RAILCOM_DATACHANGED = 0x88
+LAN_RAILCOM_GETDATA = 0x89
 LAN_X_SET_TRACK_POWER_OFF = 0x80
 LAN_X_SET_TRACK_POWER_ON = 0x81
 LAN_RMBUS_DATACHANGED = 0x80
@@ -167,6 +177,33 @@ def build_get_version() -> bytes:
     return encode_xbus(LAN_X_GET_VERSION, LAN_X_GET_VERSION)
 
 
+def build_get_loco_info(address: int) -> bytes:
+    """Build a Z21 locomotive-info poll/subscription request."""
+
+    address = _validate_loco_address(address)
+    address_msb = (address >> 8) & 0x3F
+    if address >= 128:
+        address_msb |= 0xC0
+    return encode_xbus(LAN_X_GET_LOCO_INFO, 0xF0, address_msb, address & 0xFF)
+
+
+def build_railcom_get_data(address: int) -> bytes:
+    """Build a RailCom poll for one saved locomotive address."""
+
+    address = _validate_loco_address(address)
+    return encode_dataset(LAN_RAILCOM_GETDATA, bytes((0x01, address & 0xFF, (address >> 8) & 0xFF)))
+
+
+def _validate_loco_address(address: int) -> int:
+    try:
+        address = int(address)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("address must be an integer") from exc
+    if not 1 <= address <= 0x3FFF:
+        raise ValueError("address must be between 1 and 16383")
+    return address
+
+
 def build_logoff() -> bytes:
     """Build LAN_LOGOFF (0x30), which has no data field."""
 
@@ -186,8 +223,7 @@ def build_set_loco_drive(
     range is 0..126; value 1 is reserved by the protocol for emergency stop.
     """
 
-    if not 1 <= address <= 0x3FFF:
-        raise ValueError("address must be between 1 and 16383")
+    address = _validate_loco_address(address)
     if speed_steps not in (14, 28, 128):
         raise ValueError("speed_steps must be 14, 28, or 128")
     max_speed = {14: 15, 28: 31, 128: 126}[speed_steps]
@@ -206,8 +242,7 @@ def build_set_loco_drive(
 def build_set_loco_function(address: int, function_number: int, *, enabled: bool) -> bytes:
     """Build LAN_X_SET_LOCO_FUNCTION for a DCC locomotive function."""
 
-    if not 1 <= address <= 0x3FFF:
-        raise ValueError("address must be between 1 and 16383")
+    address = _validate_loco_address(address)
     if not 0 <= int(function_number) <= 31:
         raise ValueError("function_number must be between 0 and 31")
     address_msb = (address >> 8) & 0x3F
@@ -239,6 +274,61 @@ def build_set_track_power(enabled: bool) -> bytes:
     """Build the documented Z21 X-BUS track-power command."""
 
     return encode_xbus(0x21, LAN_X_SET_TRACK_POWER_ON if enabled else LAN_X_SET_TRACK_POWER_OFF)
+
+
+def _cv_address(cv: int) -> tuple[int, int]:
+    """Convert the user-facing CV number (CV1..CV1024) to Z21's zero-based address."""
+
+    try:
+        cv = int(cv)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("CV must be an integer") from exc
+    if not 1 <= cv <= 1024:
+        raise ValueError("CV must be between 1 and 1024")
+    address = cv - 1
+    return (address >> 8) & 0xFF, address & 0xFF
+
+
+def build_cv_read(cv: int) -> bytes:
+    """Build direct-mode CV read (programming track)."""
+
+    high, low = _cv_address(cv)
+    return encode_xbus(LAN_X_CV_READ, 0x11, high, low)
+
+
+def build_cv_write(cv: int, value: int) -> bytes:
+    """Build direct-mode CV byte write (programming track)."""
+
+    high, low = _cv_address(cv)
+    try:
+        value = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("CV value must be an integer") from exc
+    if not 0 <= value <= 255:
+        raise ValueError("CV value must be between 0 and 255")
+    return encode_xbus(LAN_X_CV_WRITE, 0x12, high, low, value)
+
+
+def build_cv_pom_read(address: int, cv: int) -> bytes:
+    """Build a RailCom POM CV read for a locomotive address."""
+
+    address = _validate_loco_address(address)
+    high, low = _cv_address(cv)
+    return encode_xbus(LAN_X_CV_POM, 0x30, (address >> 8) & 0x3F, address & 0xFF, 0xE4 | (high & 0x03), low, 0)
+
+
+def build_cv_pom_write(address: int, cv: int, value: int) -> bytes:
+    """Build a POM CV byte write for a locomotive address."""
+
+    address = _validate_loco_address(address)
+    high, low = _cv_address(cv)
+    try:
+        value = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("CV value must be an integer") from exc
+    if not 0 <= value <= 255:
+        raise ValueError("CV value must be between 0 and 255")
+    return encode_xbus(LAN_X_CV_POM, 0x30, (address >> 8) & 0x3F, address & 0xFF, 0xEC | (high & 0x03), low, value)
 
 
 def build_rbus_get_data(group_index: int) -> bytes:
@@ -501,6 +591,7 @@ class Z21LanTransport:
         *,
         expected_header: int | None = None,
         command: str = "request_dataset",
+        keep_connection_on_timeout: bool = False,
     ) -> tuple[CommandResult, tuple[Z21Dataset, ...]]:
         """Send one request and decode the combined response datasets."""
 
@@ -519,6 +610,11 @@ class Z21LanTransport:
                 lambda received: expected_header is None
                 or any(dataset.header == expected_header for dataset in received),
             )
+        except TimeoutError as exc:
+            if keep_connection_on_timeout:
+                return CommandResult(False, command, str(exc)), ()
+            self._status = ConnectionStatus(ConnectionState.DISCONNECTED, self.endpoint, str(exc), self._clock())
+            return CommandResult(False, command, str(exc)), ()
         except (OSError, TypeError, ValueError) as exc:
             self._status = ConnectionStatus(ConnectionState.DISCONNECTED, self.endpoint, str(exc), self._clock())
             return CommandResult(False, command, str(exc)), ()
@@ -554,6 +650,88 @@ class Z21LanTransport:
             if matches(datasets):
                 return datasets
         raise TimeoutError("too many unrelated Z21 datagrams")
+
+    @staticmethod
+    def _cv_reply(datasets: tuple[Z21Dataset, ...], *, command: str) -> tuple[CommandResult, int | None]:
+        for dataset in datasets:
+            data = dataset.data
+            if dataset.header != LAN_X_HEADER or not data:
+                continue
+            if data[:2] == bytes((LAN_X_CV_RESULT, 0x14)) and len(data) >= 6:
+                return CommandResult(True, command, "CV programming acknowledged", data), int(data[4])
+            if data[:2] == bytes((LAN_X_CV_NACK, 0x12)):
+                return CommandResult(False, command, "Z21 reported a programming-track short circuit", data), None
+            if data[:2] == bytes((LAN_X_CV_NACK, 0x13)):
+                return CommandResult(False, command, "decoder did not acknowledge the CV operation", data), None
+        return CommandResult(False, command, "Z21 returned no CV result", b""), None
+
+    def read_cv(self, cv: int) -> tuple[CommandResult, int | None]:
+        """Read a CV in direct service mode on the programming track."""
+
+        try:
+            packet = build_cv_read(cv)
+        except ValueError as exc:
+            return CommandResult(False, "read_cv", str(exc)), None
+        result, datasets = self.request_datasets(packet, expected_header=LAN_X_HEADER, command="read_cv")
+        if not result.accepted:
+            return result, None
+        return self._cv_reply(datasets, command="read_cv")
+
+    def write_cv(self, cv: int, value: int) -> CommandResult:
+        """Write a CV in direct service mode on the programming track."""
+
+        try:
+            packet = build_cv_write(cv, value)
+        except ValueError as exc:
+            return CommandResult(False, "write_cv", str(exc))
+        result, datasets = self.request_datasets(packet, expected_header=LAN_X_HEADER, command="write_cv")
+        if not result.accepted:
+            return result
+        return self._cv_reply(datasets, command="write_cv")[0]
+
+    def write_cv_pom(self, address: int, cv: int, value: int) -> CommandResult:
+        """Write a locomotive CV on the main track (POM)."""
+
+        try:
+            packet = build_cv_pom_write(address, cv, value)
+        except ValueError as exc:
+            return CommandResult(False, "write_cv_pom", str(exc))
+        return self.send_dataset(packet, command="write_cv_pom")
+
+    def read_cv_pom(self, address: int, cv: int) -> tuple[CommandResult, int | None]:
+        """Read a locomotive CV on the main track via RailCom."""
+
+        try:
+            packet = build_cv_pom_read(address, cv)
+        except ValueError as exc:
+            return CommandResult(False, "read_cv_pom", str(exc)), None
+        result, datasets = self.request_datasets(packet, expected_header=LAN_X_HEADER, command="read_cv_pom")
+        if not result.accepted:
+            return result, None
+        return self._cv_reply(datasets, command="read_cv_pom")
+
+    def probe_railcom(self, address: int) -> tuple[CommandResult, bool]:
+        """Poll RailCom for a saved address without disconnecting on no reply."""
+
+        try:
+            packet = build_railcom_get_data(address)
+        except ValueError as exc:
+            return CommandResult(False, "probe_railcom", str(exc)), False
+        result, datasets = self.request_datasets(
+            packet,
+            expected_header=LAN_RAILCOM_DATACHANGED,
+            command="probe_railcom",
+            keep_connection_on_timeout=True,
+        )
+        if not result.accepted:
+            return CommandResult(False, "probe_railcom", "no RailCom response"), False
+        expected = int(address)
+        for dataset in datasets:
+            if dataset.header == LAN_RAILCOM_DATACHANGED and len(dataset.data) >= 2:
+                seen = int.from_bytes(dataset.data[:2], "little")
+                if seen == expected:
+                    return CommandResult(True, "probe_railcom", "RailCom decoder response received", dataset.data), True
+        return CommandResult(False, "probe_railcom", "RailCom response did not identify the requested address"), False
 
     def set_loco_drive(
         self,

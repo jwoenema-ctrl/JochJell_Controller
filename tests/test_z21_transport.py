@@ -10,6 +10,12 @@ from backend.infrastructure.z21 import (
     Z21_MAX_UDP_PAYLOAD,
     Z21LanTransport,
     build_get_version,
+    build_cv_pom_read,
+    build_cv_pom_write,
+    build_cv_read,
+    build_cv_write,
+    build_get_loco_info,
+    build_railcom_get_data,
     build_rbus_get_data,
     build_set_loco_function,
     build_set_track_power,
@@ -295,6 +301,49 @@ class Z21TransportTests(unittest.TestCase):
         self.assertEqual(off, encode_xbus(0xE4, 0xF8, 0x00, 0x07, 0x01))
         with self.assertRaises(ValueError):
             build_set_loco_function(7, 32, enabled=True)
+
+    def test_cv_packet_builders_use_zero_based_cv_addresses(self) -> None:
+        self.assertEqual(build_cv_read(1), encode_xbus(0x23, 0x11, 0x00, 0x00))
+        self.assertEqual(build_cv_write(29, 32), encode_xbus(0x24, 0x12, 0x00, 0x1C, 0x20))
+        self.assertEqual(build_cv_pom_write(7, 29, 32), encode_xbus(0xE6, 0x30, 0x00, 0x07, 0xEC, 0x1C, 0x20))
+        self.assertEqual(build_cv_pom_read(7, 29), encode_xbus(0xE6, 0x30, 0x00, 0x07, 0xE4, 0x1C, 0x00))
+        with self.assertRaises(ValueError):
+            build_cv_read(0)
+        with self.assertRaises(ValueError):
+            build_cv_write(29, 256)
+
+    def test_direct_cv_read_and_write_decode_z21_acknowledgement(self) -> None:
+        read_socket = FakeDatagramSocket([version_reply(), encode_xbus(0x64, 0x14, 0x00, 0x1C, 0x20)])
+        read_transport = connected_transport(read_socket)
+        result, value = read_transport.read_cv(29)
+        self.assertTrue(result.accepted)
+        self.assertEqual(value, 32)
+        self.assertEqual(read_socket.sent[-1][0], build_cv_read(29))
+
+        write_socket = FakeDatagramSocket([version_reply(), encode_xbus(0x64, 0x14, 0x00, 0x1C, 0x20)])
+        write_transport = connected_transport(write_socket)
+        result = write_transport.write_cv(29, 32)
+        self.assertTrue(result.accepted)
+        self.assertEqual(write_socket.sent[-1][0], build_cv_write(29, 32))
+
+    def test_saved_address_and_railcom_probe_do_not_disconnect_on_no_reply(self) -> None:
+        self.assertEqual(build_get_loco_info(7), encode_xbus(0xE3, 0xF0, 0x00, 0x07))
+        self.assertEqual(build_get_loco_info(300), encode_xbus(0xE3, 0xF0, 0xC1, 0x2C))
+        self.assertEqual(build_railcom_get_data(7), encode_dataset(0x0089, b"\x01\x07\x00"))
+
+        response = encode_dataset(0x0088, b"\x07\x00" + bytes(11))
+        detected_socket = FakeDatagramSocket([version_reply(), response])
+        detected_transport = connected_transport(detected_socket)
+        result, detected = detected_transport.probe_railcom(7)
+        self.assertTrue(result.accepted)
+        self.assertTrue(detected)
+
+        absent_socket = FakeDatagramSocket([version_reply(), TimeoutError("no decoder reply")])
+        absent_transport = connected_transport(absent_socket)
+        result, detected = absent_transport.probe_railcom(7)
+        self.assertFalse(result.accepted)
+        self.assertFalse(detected)
+        self.assertTrue(absent_transport.connection_status().connected)
 
 
 if __name__ == "__main__":

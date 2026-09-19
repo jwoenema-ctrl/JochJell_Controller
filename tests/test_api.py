@@ -49,6 +49,40 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_train_actions_can_be_recorded_and_replayed(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            started = app.command({"type": "start_recording", "train_id": "train-3", "timestamp": time.time() - 1})
+            self.assertTrue(started["recording"]["active"])
+            app.command({"type": "speed", "train_id": "train-3", "speed": 20})
+            stopped = app.command({"type": "stop_recording", "timestamp": time.time()})
+            self.assertEqual(len(stopped["recording"]["history"]), 1)
+            self.assertEqual(stopped["recording"]["history"][0]["action_count"], 1)
+            replayed = app.command({"type": "play_recording", "index": 0, "confirm": True})
+            self.assertFalse(replayed["recording"]["active"])
+            self.assertEqual(next(item for item in replayed["trains"] if item["id"] == "t2")["speed"], 20)
+        finally:
+            app.close()
+
+    def test_calibrated_coordinate_execution_stops_after_bounded_timer(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "stop_train", "train_id": "train-3"})
+            app.runtime.train_database.add_calibration(
+                "train-3", speed_kmh=10, duration_ms=100, measured_distance_mm=50,
+                created_at="2026-01-01T00:00:00Z",
+            )
+            app.command({"type": "set_direction", "train_id": "train-3", "direction": "reverse"})
+            app.command({"type": "move_train_to_coordinate", "train_id": "train-3", "x": 515, "y": 150})
+            running = app.command({"type": "execute_coordinate_move", "train_id": "train-3", "confirm": True})
+            self.assertEqual(running["coordinate_execution"]["state"], "running")
+            time.sleep(0.35)
+            self.assertIn(app.state()["coordinate_execution"]["state"], {"completed", "stopped"})
+        finally:
+            app.close()
+
     def test_schedule_rejects_off_track_coordinate_and_canonicalizes_valid_one(self) -> None:
         app = ControllerApplication.sample()
         try:

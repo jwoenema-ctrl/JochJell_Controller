@@ -41,7 +41,7 @@ from backend.core.events import (
 from backend.core.models import BlockState, LayoutSnapshot, ScheduleStatus, SignalAspect, TrainMode, TurnoutPosition
 from backend.core.routing import RouteAlgorithm, find_route
 from backend.infrastructure.train_catalogue import TrainCatalogue, export_csv, export_json, import_csv, import_json
-from backend.infrastructure.train_database import DecoderFunctionMapping, MaintenanceRecord, RollingStockRecord, TrainModel
+from backend.infrastructure.train_database import DecoderFunctionMapping, MaintenanceRecord, RollingStockInventoryRecord, RollingStockRecord, TrainModel
 from backend.infrastructure.settings import SQLiteSettingsRepository, validate_settings
 from backend.infrastructure.wlan import WindowsRouteAPI, preflight_z21_wlan
 from backend.infrastructure.scan_store import MAX_UPLOAD_BODY_BYTES, ScanStore
@@ -50,7 +50,8 @@ from backend.services.dispatcher import ControlMode
 from backend.services.connection_speed import ConnectionSpeedPolicy, next_connection
 from backend.services.block_editor import block_id as validate_block_id, next_block_id, rename_references
 from backend.services.scheduler import ScheduleStop as RuntimeScheduleStop
-from backend.services.coordinate_move import CoordinateMovementPlanner, MovementPlanValidationError
+from backend.services.coordinate_move import CoordinateMovementExecutionPlanner, CoordinateMovementPlanner, MovementPlanValidationError
+from backend.services.automation_recording import PlaybackPlan, RecordedAction
 from backend.services.train_presence import SavedTrainPresenceService
 from backend.services.pinboard import nearest_track_coordinate
 
@@ -140,9 +141,12 @@ class ControllerApplication:
     _presence_state: dict[str, Any] = field(default_factory=lambda: {"results": [], "summary": {"total": 0, "detected": 0, "unknown": 0, "errors": 0}}, init=False, repr=False)
     _programming_state: dict[str, Any] = field(default_factory=lambda: {
         "last_request": None,
+        "last_read": None,
         "supported": False,
         "detail": "Decoder CV programming is validation-only until the Z21 programming transport is enabled.",
     }, init=False, repr=False)
+    _recording_history: list[PlaybackPlan] = field(default_factory=list, init=False, repr=False)
+    _coordinate_execution_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compose the domain runtime once and mirror the initial UI fixture into it."""
@@ -875,6 +879,17 @@ class ControllerApplication:
 
     def rolling_stock_inventory(self) -> dict[str, Any]:
         """Return a fleet-wide rolling-stock inventory derived from saved consists."""
+        stored = self.runtime.train_database.list_inventory() if self.runtime is not None else ()
+        if stored:
+            rows = [
+                {
+                    "id": item.item_id, "name": item.name, "vehicle_type": item.vehicle_type,
+                    "manufacturer": item.manufacturer, "model": item.model, "count": item.quantity,
+                    "train_ids": [], "length_mm": item.length_mm, "mass_g": item.mass_g,
+                }
+                for item in stored
+            ]
+            return {"total": sum(item.quantity for item in stored), "distinct": len(rows), "items": rows, "source": "inventory"}
         grouped: dict[str, dict[str, Any]] = {}
         total = 0
         for train in self.trains:
@@ -907,6 +922,69 @@ class ControllerApplication:
 
     def programming_state(self) -> dict[str, Any]:
         return deepcopy(self._programming_state)
+
+    @staticmethod
+    def _recording_action_payload(action: RecordedAction) -> dict[str, Any]:
+        return {"timestamp": action.timestamp, "operation": str(action.operation), "train_id": action.train_id,
+                "speed": action.speed, "direction": action.direction, "function_number": action.function_number,
+                "enabled": action.enabled}
+
+    def recording_state(self) -> dict[str, Any]:
+        """Expose recording status and immutable plans without transport details."""
+        recorder = self.runtime.recording if self.runtime is not None else None
+        active = {"train_id": recorder.train_id,
+                  "actions": [self._recording_action_payload(action) for action in recorder.actions]}
+        if recorder is None or not recorder.active:
+            active = None
+        return {"active": active, "history": [
+            {"train_id": plan.train_id, "started_at": plan.started_at, "stopped_at": plan.stopped_at,
+             "duration": plan.duration, "action_count": plan.action_count,
+             "actions": [self._recording_action_payload(action) for action in plan.actions]}
+            for plan in self._recording_history[-10:]
+        ]}
+
+    def _record_action_if_active(self, action: dict[str, Any]) -> None:
+        recorder = self.runtime.recording if self.runtime is not None else None
+        if recorder is None or not recorder.active:
+            return
+        try:
+            recorder.append(action, timestamp=time.time())
+        except ValueError:
+            # Recording is observational; a malformed or out-of-order action
+            # must never invalidate the underlying train command.
+            return
+
+    def play_recording(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Play one stored plan immediately; the request itself is the explicit operator action."""
+        if self.runtime is None:
+            raise ValueError("runtime is not available")
+        index = int(payload.get("index", len(self._recording_history) - 1))
+        if index < 0 or index >= len(self._recording_history):
+            raise ValueError("recording index is out of range")
+        if not self.simulation_mode and payload.get("confirm") is not True:
+            raise ValueError("real-track playback requires confirm=true")
+        plan = self._recording_history[index]
+        train_id = self._canonical_train_id(plan.train_id)
+        train = next((item for item in self.trains if item.get("id") == train_id), None)
+        if train is None:
+            raise ValueError(f"Unknown train: {train_id}")
+        maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
+        for action in plan.actions:
+            if action.operation == "speed":
+                result = self.runtime.dispatcher.manual_speed(train_id, float(action.speed))
+            elif action.operation == "direction":
+                result = self.runtime.track.set_train_direction(train_id, forward=action.direction == "forward")
+            else:
+                if not hasattr(self.runtime.track, "set_train_function"):
+                    raise ValueError("the active track adapter does not support decoder functions")
+                result = self.runtime.track.set_train_function(train_id, int(action.function_number), enabled=bool(action.enabled))
+                train.setdefault("decoder_function_states", {})[str(action.function_number)] = bool(action.enabled)
+            if hasattr(result, "accepted") and not result.accepted:
+                raise ValueError(result.detail or "recorded action was rejected")
+            if action.operation == "speed":
+                train["speed"] = round(float(action.speed) * maximum)
+        self.events.append({"type": "recording_played", "train_id": train_id, "action_count": plan.action_count})
+        return self.recording_state()
 
     def request_decoder_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate a programming request without issuing an unsupported CV write."""
@@ -946,15 +1024,63 @@ class ControllerApplication:
         self.events.append({"type": "decoder_programming_validated", "request": request})
         return self.programming_state()
 
+    def execute_decoder_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Execute an explicitly confirmed CV write on a real Z21 track."""
+
+        state = self.request_decoder_programming(payload)
+        request = state["last_request"]
+        if self.simulation_mode:
+            request["status"] = "simulation_only"
+            self._programming_state["detail"] = "Simulation accepted the request without sending a decoder write."
+            return self.programming_state()
+        if self.runtime is None or not hasattr(self.runtime.track, "write_cv"):
+            raise ValueError("the active track adapter does not support CV programming")
+        if request["target"] == "main" and not self.track_power:
+            raise ValueError("switch track power on before programming on the main")
+        result = self.runtime.track.write_cv(request["train_id"], request["cv"], request["value"], target=request["target"])
+        if not result.accepted:
+            request["status"] = "rejected"
+            raise ValueError(result.detail or "Z21 rejected the CV programming request")
+        request["status"] = "sent"
+        self._programming_state["supported"] = True
+        self._programming_state["detail"] = result.detail or "Z21 accepted the CV programming request."
+        self.events.append({"type": "decoder_programmed", "request": deepcopy(request), "detail": result.detail})
+        return self.programming_state()
+
+    def read_decoder_cv(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Read a CV from a real Z21 decoder when the selected mode supports it."""
+
+        state = self.request_decoder_programming(payload)
+        request = state["last_request"]
+        if self.simulation_mode:
+            self._programming_state["last_read"] = {**request, "status": "simulation_only", "value": None}
+            return self.programming_state()
+        if self.runtime is None or not hasattr(self.runtime.track, "read_cv"):
+            raise ValueError("the active track adapter does not support CV reading")
+        if request["target"] == "main" and not self.track_power:
+            raise ValueError("switch track power on before reading on the main")
+        result, value = self.runtime.track.read_cv(request["train_id"], request["cv"], target=request["target"])
+        if not result.accepted:
+            raise ValueError(result.detail or "Z21 rejected the CV read request")
+        self._programming_state["last_read"] = {**request, "status": "read", "value": value}
+        self._programming_state["supported"] = True
+        self._programming_state["detail"] = result.detail or "CV read completed."
+        self.events.append({"type": "decoder_cv_read", "request": deepcopy(self._programming_state["last_read"])})
+        return self.programming_state()
+
     def scan_train_presence(self) -> dict[str, Any]:
         if self.runtime is None:
             raise ValueError("runtime is not available")
         reported = {motion.train_id for motion in self.runtime.track.get_snapshot().trains}
         addresses = {int(train.get("address")): train["id"] for train in self.trains if str(train.get("address", "")).isdigit()}
-        detector = SavedTrainPresenceService(lambda address: {
-            "detected": addresses.get(int(address)) in reported,
-            "source": "reported track feedback",
-        })
+        if not self.simulation_mode and hasattr(self.runtime.track, "probe_train_address"):
+            def probe(address: int) -> dict[str, Any]:
+                result = self.runtime.track.probe_train_address(address)
+                return {"detected": result.accepted, "source": "Z21 RailCom", "detail": result.detail}
+        else:
+            def probe(address: int) -> dict[str, Any]:
+                return {"detected": addresses.get(int(address)) in reported, "source": "reported track feedback"}
+        detector = SavedTrainPresenceService(probe)
         self._presence_state = detector.scan(self.trains).as_dict()
         self.events.append({"type": "train_presence_scan", "summary": self._presence_state["summary"]})
         return deepcopy(self._presence_state)
@@ -1239,6 +1365,8 @@ class ControllerApplication:
             "presence": self.train_presence_state(),
             "rollingStockInventory": self.rolling_stock_inventory(),
             "programming": self.programming_state(),
+            "recording": self.recording_state(),
+            "coordinate_execution": self.runtime.coordinate_movement.status.as_dict() if self.runtime is not None and self.runtime.coordinate_movement.status is not None else None,
             "feedback": snapshot["feedback"],
             "layout": {
                 "name": self.layout_name,
@@ -1820,8 +1948,65 @@ class ControllerApplication:
                 self.events.append({"type": "calibration_started", "run_id": run.run_id, "train_id": train_id})
             elif kind in {"scan_train_presence", "ping_train_addresses", "detect_trains"}:
                 self.scan_train_presence()
-            elif kind in {"program_decoder", "program_cv", "request_programming"}:
+            elif kind in {"start_recording", "begin_recording"}:
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                if not any(item.get("id") == train_id for item in self.trains):
+                    raise ValueError(f"Unknown train: {train_id}")
+                if self.runtime is None:
+                    raise ValueError("runtime is not available")
+                self.runtime.recording.start(train_id, timestamp=float(payload.get("timestamp", time.time())))
+                self.events.append({"type": "recording_started", "train_id": train_id})
+            elif kind in {"record_action", "record_train_action"}:
+                if self.runtime is None:
+                    raise ValueError("runtime is not available")
+                action = payload.get("action", payload)
+                if not isinstance(action, dict):
+                    raise ValueError("action must be an object")
+                action = dict(action)
+                if action.get("train_id"):
+                    action["train_id"] = self._canonical_train_id(str(action["train_id"]))
+                timestamp = None if "timestamp" in action else payload.get("timestamp")
+                self.runtime.recording.append(action, timestamp=None if timestamp is None else float(timestamp))
+            elif kind in {"stop_recording", "end_recording"}:
+                if self.runtime is None:
+                    raise ValueError("runtime is not available")
+                plan = self.runtime.recording.stop(timestamp=float(payload.get("timestamp", time.time())))
+                self._recording_history.append(plan)
+                self.events.append({"type": "recording_stopped", "train_id": plan.train_id, "action_count": plan.action_count})
+            elif kind in {"play_recording", "playback_recording"}:
+                self.play_recording(payload)
+            elif kind in {"upsert_rolling_stock_inventory", "set_rolling_stock_inventory"}:
+                if self.runtime is None:
+                    raise ValueError("runtime is not available")
+                item = RollingStockInventoryRecord(
+                    item_id=str(payload.get("item_id", payload.get("id", ""))).strip(),
+                    name=str(payload.get("name", "")).strip(),
+                    vehicle_type=str(payload.get("vehicle_type", payload.get("type", "vehicle"))).strip() or "vehicle",
+                    quantity=int(payload.get("quantity", payload.get("count", 0))),
+                    manufacturer=str(payload.get("manufacturer", "")), model=str(payload.get("model", "")),
+                    length_mm=payload.get("length_mm"), mass_g=payload.get("mass_g"),
+                    metadata=dict(payload.get("metadata", {})),
+                )
+                self.runtime.train_database.upsert_inventory(item)
+                self.events.append({"type": "rolling_stock_inventory_updated", "item_id": item.item_id, "quantity": item.quantity})
+            elif kind in {"adjust_rolling_stock_inventory", "change_rolling_stock_quantity"}:
+                if self.runtime is None:
+                    raise ValueError("runtime is not available")
+                item_id = str(payload.get("item_id", payload.get("id", ""))).strip()
+                item = self.runtime.train_database.adjust_inventory(
+                    item_id, int(payload.get("delta", payload.get("change", 0))),
+                    **{key: payload[key] for key in ("name", "vehicle_type", "manufacturer", "model", "length_mm", "mass_g", "metadata") if key in payload},
+                )
+                self.events.append({"type": "rolling_stock_inventory_updated", "item_id": item.item_id, "quantity": item.quantity})
+            elif kind in {"request_programming", "validate_programming"}:
                 self.request_decoder_programming(payload)
+            elif kind in {"program_decoder", "program_cv"}:
+                if payload.get("confirm") is True:
+                    self.execute_decoder_programming(payload)
+                else:
+                    self.request_decoder_programming(payload)
+            elif kind in {"read_decoder_cv", "read_cv"}:
+                self.read_decoder_cv(payload)
             elif kind in {"cancel_calibration", "stop_calibration"}:
                 if self.runtime is None:
                     raise ValueError("runtime is not available")
@@ -1872,7 +2057,8 @@ class ControllerApplication:
                 target = {"x": round(plan.x, 2), "y": round(plan.y, 2),
                           "from_node": plan.source_block_id.lower(), "to_node": plan.target_block_id.lower(),
                           "progress": round(plan.progress, 6), "distance_mm": round(plan.distance_mm, 2),
-                          "estimated_duration_ms": plan.estimated_duration_ms}
+                          "estimated_duration_ms": plan.estimated_duration_ms, "direction": plan.direction,
+                          "speed_kmh": plan.speed_kmh}
                 train["target_coordinate"] = target
                 route = (plan.source_block_id, plan.target_block_id)
                 train["route"] = [item.lower() for item in route]
@@ -1882,6 +2068,37 @@ class ControllerApplication:
                     if hasattr(result, "accepted") and not result.accepted:
                         raise ValueError(result.detail or "coordinate route was rejected")
                 self.events.append({"type": "train_coordinate_targeted", "train_id": train_id, "coordinate": target})
+            elif kind in {"execute_coordinate_move", "run_coordinate_move"}:
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((item for item in self.trains if item["id"] == train_id), None)
+                if train is None or self.runtime is None:
+                    raise ValueError("a known train and active runtime are required")
+                if not self.simulation_mode and payload.get("confirm") is not True:
+                    raise ValueError("real-track coordinate movement requires confirm=true")
+                target = train.get("target_coordinate")
+                if not isinstance(target, dict):
+                    raise ValueError("create a coordinate target before executing movement")
+                calibration = self.runtime.calibration.history(train_id)
+                if not calibration:
+                    raise ValueError("record a calibration measurement for this train before coordinate movement")
+                try:
+                    from backend.services.coordinate_move import CoordinateMovementPlan
+                    movement_plan = CoordinateMovementPlan(
+                        train_id=train_id, x=float(target["x"]), y=float(target["y"]),
+                        source_block_id=str(target["from_node"]).upper(), target_block_id=str(target["to_node"]).upper(),
+                        progress=float(target.get("progress", 0)), distance_mm=float(target["distance_mm"]),
+                        speed_kmh=float(target.get("speed_kmh", 10)), estimated_duration_ms=int(target.get("estimated_duration_ms", 1)),
+                        segment_length_mm=max(1.0, float(target["distance_mm"])), calibration_speed_kmh=float(calibration[0].speed_kmh),
+                        calibration_duration_ms=int(calibration[0].duration_ms), direction=str(target.get("direction", train.get("direction", "forward"))),
+                    )
+                    execution = CoordinateMovementExecutionPlanner(max_duration_ms=120000).build(movement_plan, calibration)
+                except (KeyError, TypeError, ValueError, MovementPlanValidationError) as exc:
+                    raise ValueError(str(exc)) from exc
+                if not self.track_power:
+                    raise ValueError("switch track power on before coordinate movement")
+                status = self.runtime.coordinate_movement.start(execution, confirmed=True)
+                self._coordinate_execution_state = status.as_dict()
+                self.events.append({"type": "train_coordinate_execution_started", "train_id": train_id, "duration_ms": execution.duration_ms})
             elif kind == "set_direction":
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 train = next((item for item in self.trains if item["id"] == train_id), None)
@@ -1903,6 +2120,7 @@ class ControllerApplication:
                     raise ValueError(result.detail or "direction command rejected")
                 control.manual_speed = control.automatic_speed = 0.0
                 train["direction"] = direction
+                self._record_action_if_active({"operation": "direction", "train_id": train_id, "direction": direction})
                 self.events.append({"type": "train_direction_changed", "train_id": train_id, "direction": direction})
             elif kind in {"speed", "set_speed", "drive"}:
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
@@ -1943,6 +2161,7 @@ class ControllerApplication:
                     )
                 )
                 self.events.append({"type": "train_command", "train_id": train_id, "speed": train["speed"]})
+                self._record_action_if_active({"operation": "speed", "train_id": train_id, "speed": requested_speed / maximum})
             elif kind in {"stop_train", "stop"}:
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 train = next((item for item in self.trains if item["id"] == train_id), None)
@@ -1978,6 +2197,7 @@ class ControllerApplication:
                         raise ValueError(result.detail or "decoder function command rejected")
                 states = train.setdefault("decoder_function_states", {})
                 states[str(function_number)] = enabled
+                self._record_action_if_active({"operation": "function", "train_id": train_id, "function_number": function_number, "enabled": enabled})
                 self.events.append({"type": "train_function_changed", "train_id": train_id, "function_number": function_number, "enabled": enabled})
             elif kind in {"track_power", "power"}:
                 previous_power = self.track_power

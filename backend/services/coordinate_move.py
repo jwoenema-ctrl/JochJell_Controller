@@ -10,13 +10,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Any, Iterable, Mapping
+import threading
+import time
+from typing import Any, Callable, Iterable, Mapping
 
 
 class MovementPlanValidationError(ValueError):
     """A coordinate movement request cannot be made safe from its inputs."""
 
     def __init__(self, message: str, *, field: str = "movement") -> None:
+        super().__init__(message)
+        self.field = field
+
+
+class MovementExecutionError(RuntimeError):
+    """A timed coordinate movement could not be safely started or stopped."""
+
+    def __init__(self, message: str, *, field: str = "execution") -> None:
         super().__init__(message)
         self.field = field
 
@@ -37,6 +47,7 @@ class CoordinateMovementPlan:
     segment_length_mm: float
     calibration_speed_kmh: float
     calibration_duration_ms: int
+    direction: str = "forward"
 
     @property
     def source_block(self) -> str:
@@ -49,6 +60,419 @@ class CoordinateMovementPlan:
         """Alias useful to integrations that use the shorter field name."""
 
         return self.target_block_id
+
+
+@dataclass(frozen=True, slots=True)
+class TimedMovementRequest:
+    """A validated, hardware-neutral request for one bounded movement."""
+
+    train_id: str
+    direction: str
+    speed_kmh: float
+    duration_ms: int
+    stop_after: bool = True
+
+    @property
+    def stop_after_ms(self) -> int | None:
+        """The timer deadline, when the request has stop-after semantics."""
+
+        return self.duration_ms if self.stop_after else None
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinateMovementExecutionPlan:
+    """Validated execution data derived from a coordinate plan and calibration."""
+
+    movement_plan: CoordinateMovementPlan
+    calibration_speed_kmh: float
+    calibration_duration_ms: int
+    measured_distance_mm: float
+    request: TimedMovementRequest
+
+    @property
+    def train_id(self) -> str:
+        return self.request.train_id
+
+    @property
+    def direction(self) -> str:
+        return self.request.direction
+
+    @property
+    def speed_kmh(self) -> float:
+        return self.request.speed_kmh
+
+    @property
+    def duration_ms(self) -> int:
+        return self.request.duration_ms
+
+    @property
+    def stop_after(self) -> bool:
+        return self.request.stop_after
+
+    @property
+    def stop_after_ms(self) -> int | None:
+        return self.request.stop_after_ms
+
+    def timed_request(self) -> TimedMovementRequest:
+        """Return the data-only request suitable for a runtime adapter."""
+
+        return self.request
+
+
+@dataclass(frozen=True, slots=True)
+class MovementExecutionStatus:
+    """Observable state for one runtime-owned timed movement."""
+
+    state: str
+    request: TimedMovementRequest | None = None
+    error: str = ""
+
+    @property
+    def running(self) -> bool:
+        return self.state == "running"
+
+
+class CoordinateMovementExecutor:
+    """Execute one confirmed coordinate request with a bounded stop timer.
+
+    Planning never sends commands.  This service is the explicit runtime
+    boundary: callers must pass ``confirmed=True`` before it can set direction
+    or speed.  The executor owns the timer and sends the stop operation when
+    the request expires, including when a caller closes or cancels it.
+    """
+
+    DEFAULT_MAX_DURATION_MS = 120_000
+
+    def __init__(
+        self,
+        dispatcher: Any,
+        track: Any,
+        *,
+        timer_factory: Callable[[float, Callable[[], None]], Any] = threading.Timer,
+        max_duration_ms: int = DEFAULT_MAX_DURATION_MS,
+        max_speed_kmh: float = 140.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if isinstance(max_duration_ms, bool) or int(max_duration_ms) != max_duration_ms:
+            raise MovementExecutionError("max_duration_ms must be a whole number", field="duration_ms")
+        if max_duration_ms <= 0:
+            raise MovementExecutionError("max_duration_ms must be positive", field="duration_ms")
+        if not math.isfinite(float(max_speed_kmh)) or float(max_speed_kmh) <= 0:
+            raise MovementExecutionError("max_speed_kmh must be positive and finite", field="speed_kmh")
+        self.dispatcher = dispatcher
+        self.track = track
+        self._timer_factory = timer_factory
+        self._max_duration_ms = int(max_duration_ms)
+        self._max_speed_kmh = float(max_speed_kmh)
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._timer: Any | None = None
+        self._status = MovementExecutionStatus("idle")
+        self._started_at: float | None = None
+
+    @property
+    def status(self) -> MovementExecutionStatus:
+        with self._lock:
+            return self._status
+
+    @property
+    def active(self) -> bool:
+        return self.status.running
+
+    def start(
+        self,
+        execution: CoordinateMovementExecutionPlan,
+        *,
+        confirmed: bool = False,
+    ) -> MovementExecutionStatus:
+        """Start one request only after explicit caller confirmation."""
+
+        if confirmed is not True:
+            raise MovementExecutionError(
+                "explicit confirmation is required before coordinate movement",
+                field="confirmed",
+            )
+        if not isinstance(execution, CoordinateMovementExecutionPlan):
+            raise MovementExecutionError(
+                "a validated coordinate movement execution plan is required",
+                field="execution",
+            )
+        request = execution.request
+        with self._lock:
+            if self._status.running:
+                raise MovementExecutionError("a coordinate movement is already running", field="state")
+            self._validate_request(request)
+            control = self._register_control(request.train_id)
+            if not _is_manual_mode(getattr(control, "mode", "manual")):
+                raise MovementExecutionError(
+                    "switch the train to manual control before coordinate movement", field="mode"
+                )
+            if float(getattr(control, "desired_speed", 0.0)) > 0:
+                raise MovementExecutionError("the train must be stopped before coordinate movement", field="speed")
+            self._validate_track_stopped(request.train_id)
+
+            normalized_speed = request.speed_kmh / self._max_speed_kmh
+            self._set_direction(request)
+            result = self.dispatcher.manual_speed(request.train_id, normalized_speed)
+            if hasattr(result, "accepted") and not result.accepted:
+                raise MovementExecutionError(result.detail or "coordinate movement speed was rejected", field="speed")
+
+            self._started_at = self._clock()
+            self._status = MovementExecutionStatus("running", request)
+            try:
+                self._timer = self._timer_factory(request.duration_ms / 1000.0, self._finish)
+                if hasattr(self._timer, "daemon"):
+                    self._timer.daemon = True
+                self._timer.start()
+            except Exception as exc:
+                self._timer = None
+                self._stop_locked(request, error=str(exc))
+                raise MovementExecutionError("coordinate movement timer could not start", field="timer") from exc
+            return self._status
+
+    def stop(self) -> MovementExecutionStatus:
+        """Cancel the timer and stop the active train, if any."""
+
+        with self._lock:
+            if not self._status.running or self._status.request is None:
+                return self._status
+            timer, self._timer = self._timer, None
+            if timer is not None and hasattr(timer, "cancel"):
+                timer.cancel()
+            self._stop_locked(self._status.request)
+            return self._status
+
+    execute = start
+    cancel = stop
+
+    def close(self) -> None:
+        """Stop an active movement before the owning runtime is closed."""
+
+        self.stop()
+
+    def _validate_request(self, request: TimedMovementRequest) -> None:
+        if not request.stop_after or request.stop_after_ms != request.duration_ms:
+            raise MovementExecutionError("coordinate movement must stop after its duration", field="stop_after")
+        if request.duration_ms <= 0 or request.duration_ms > self._max_duration_ms:
+            raise MovementExecutionError("movement duration exceeds the executor safety limit", field="duration_ms")
+        if request.direction not in {"forward", "reverse"}:
+            raise MovementExecutionError("direction must be forward or reverse", field="direction")
+        if not math.isfinite(float(request.speed_kmh)) or request.speed_kmh <= 0:
+            raise MovementExecutionError("speed must be positive and finite", field="speed_kmh")
+        if request.speed_kmh > self._max_speed_kmh:
+            raise MovementExecutionError("speed exceeds the executor safety limit", field="speed_kmh")
+
+    def _register_control(self, train_id: str) -> Any:
+        register = getattr(self.dispatcher, "register_train", None)
+        if register is None:
+            raise MovementExecutionError("dispatcher cannot register a train", field="dispatcher")
+        return register(train_id)
+
+    def _validate_track_stopped(self, train_id: str) -> None:
+        snapshot = self.track.get_snapshot()
+        motion = next((item for item in getattr(snapshot, "trains", ()) if item.train_id == train_id), None)
+        if motion is not None and (float(motion.speed) > 0 or float(motion.target_speed) > 0):
+            raise MovementExecutionError("the train must be stopped before coordinate movement", field="speed")
+
+    def _set_direction(self, request: TimedMovementRequest) -> None:
+        desired_forward = request.direction == "forward"
+        current_forward = self.track.get_train_direction(request.train_id)
+        if current_forward == desired_forward:
+            return
+        result = self.track.set_train_direction(request.train_id, forward=desired_forward)
+        if hasattr(result, "accepted") and not result.accepted:
+            raise MovementExecutionError(result.detail or "coordinate movement direction was rejected", field="direction")
+
+    def _finish(self) -> None:
+        with self._lock:
+            if not self._status.running or self._status.request is None:
+                return
+            self._timer = None
+            self._stop_locked(self._status.request)
+
+    def _stop_locked(self, request: TimedMovementRequest, *, error: str = "") -> None:
+        try:
+            result = self.track.stop_train(request.train_id)
+            if hasattr(result, "accepted") and not result.accepted and not error:
+                error = result.detail or "coordinate movement stop was rejected"
+            control = self._register_control(request.train_id)
+            if hasattr(control, "manual_speed"):
+                control.manual_speed = 0.0
+            if hasattr(control, "automatic_speed"):
+                control.automatic_speed = 0.0
+            if hasattr(control, "last_command"):
+                control.last_command = "coordinate_move_stop"
+            self._status = MovementExecutionStatus("failed" if error else "stopped", request, error)
+        except Exception as exc:
+            self._status = MovementExecutionStatus("failed", request, error or str(exc))
+
+
+def _is_manual_mode(mode: object) -> bool:
+    return str(getattr(mode, "value", mode)).lower() == "manual"
+
+
+class CoordinateMovementExecutionPlanner:
+    """Validate a coordinate plan and turn it into a bounded movement request.
+
+    Duration is recalculated from the stored calibration record rather than
+    trusting a caller-provided timer.  No dispatcher, track, timer, or
+    hardware object is used.
+    """
+
+    def __init__(self, *, max_duration_ms: int | None = None) -> None:
+        if max_duration_ms is not None:
+            if isinstance(max_duration_ms, bool):
+                raise MovementPlanValidationError(
+                    "max_duration_ms must be a whole number", field="execution.max_duration_ms"
+                )
+            try:
+                validated_max_duration = _positive_duration(
+                    max_duration_ms, "execution.max_duration_ms"
+                )
+            except MovementPlanValidationError as exc:
+                raise MovementPlanValidationError(
+                    str(exc), field="execution.max_duration_ms"
+                ) from exc
+            if validated_max_duration <= 0:
+                raise MovementPlanValidationError(
+                    "max_duration_ms must be positive", field="execution.max_duration_ms"
+                )
+            max_duration_ms = validated_max_duration
+        self._max_duration_ms = max_duration_ms
+
+    def validate(
+        self,
+        movement_plan: CoordinateMovementPlan,
+        calibration: Mapping[str, Any] | object | Iterable[Mapping[str, Any] | object],
+        *,
+        stop_after: bool = True,
+    ) -> None:
+        """Validate execution inputs without constructing or dispatching a request."""
+
+        self._validated_request(movement_plan, calibration, stop_after=stop_after)
+
+    def build(
+        self,
+        movement_plan: CoordinateMovementPlan,
+        calibration: Mapping[str, Any] | object | Iterable[Mapping[str, Any] | object],
+        *,
+        stop_after: bool = True,
+    ) -> CoordinateMovementExecutionPlan:
+        """Build a validated execution plan containing a timed request."""
+
+        request, selected, measured_distance = self._validated_request(
+            movement_plan, calibration, stop_after=stop_after
+        )
+        return CoordinateMovementExecutionPlan(
+            movement_plan=movement_plan,
+            calibration_speed_kmh=_positive_finite(
+                _value(selected, "speed_kmh", "speed"), "calibration.speed_kmh"
+            ),
+            calibration_duration_ms=_positive_duration(
+                _value(selected, "duration_ms", "duration"), "calibration.duration_ms"
+            ),
+            measured_distance_mm=measured_distance,
+            request=request,
+        )
+
+    def request(
+        self,
+        movement_plan: CoordinateMovementPlan,
+        calibration: Mapping[str, Any] | object | Iterable[Mapping[str, Any] | object],
+        *,
+        stop_after: bool = True,
+    ) -> TimedMovementRequest:
+        """Build only the hardware-neutral timed request."""
+
+        return self.build(movement_plan, calibration, stop_after=stop_after).request
+
+    def _validated_request(
+        self,
+        movement_plan: CoordinateMovementPlan,
+        calibration: Mapping[str, Any] | object | Iterable[Mapping[str, Any] | object],
+        *,
+        stop_after: bool,
+    ) -> tuple[TimedMovementRequest, object, float]:
+        if not isinstance(stop_after, bool) or not stop_after:
+            raise MovementPlanValidationError(
+                "coordinate movement must stop after its duration", field="execution.stop_after"
+            )
+
+        train_id = _required_text(_value(movement_plan, "train_id"), "execution.train_id")
+        direction = _required_text(
+            _value_or_default(movement_plan, "direction", "forward"), "execution.direction"
+        ).lower()
+        if direction not in {"forward", "reverse"}:
+            raise MovementPlanValidationError(
+                "execution direction must be 'forward' or 'reverse'", field="execution.direction"
+            )
+        speed_kmh = _positive_finite(_value(movement_plan, "speed_kmh"), "execution.speed_kmh")
+        distance_mm = _finite(_value(movement_plan, "distance_mm"), "execution.distance_mm")
+        if distance_mm <= 0:
+            raise MovementPlanValidationError(
+                "execution distance must be positive", field="execution.distance_mm"
+            )
+
+        selected = self._select_calibration(movement_plan, calibration)
+        calibration_duration = _positive_duration(
+            _value(selected, "duration_ms", "duration"), "calibration.duration_ms"
+        )
+        measured_distance = _positive_finite(
+            _value(selected, "measured_distance_mm", "distance_mm"),
+            "calibration.measured_distance_mm",
+        )
+        try:
+            duration_ms = math.ceil(distance_mm * calibration_duration / measured_distance)
+        except (OverflowError, ValueError) as exc:
+            raise MovementPlanValidationError(
+                "execution duration must be finite", field="execution.duration_ms"
+            ) from exc
+        if duration_ms <= 0:
+            raise MovementPlanValidationError(
+                "execution duration must be positive", field="execution.duration_ms"
+            )
+        if self._max_duration_ms is not None and duration_ms > self._max_duration_ms:
+            raise MovementPlanValidationError(
+                "execution duration exceeds the configured safety limit",
+                field="execution.duration_ms",
+            )
+        return (
+            TimedMovementRequest(train_id, direction, speed_kmh, duration_ms, True),
+            selected,
+            measured_distance,
+        )
+
+    @staticmethod
+    def _select_calibration(
+        movement_plan: CoordinateMovementPlan,
+        calibration: Mapping[str, Any] | object | Iterable[Mapping[str, Any] | object],
+    ) -> object:
+        records = _records(calibration)
+        if not records:
+            raise MovementPlanValidationError(
+                "a stored calibration record is required for execution", field="execution.calibration"
+            )
+        expected_speed = _positive_finite(
+            _value_or_default(movement_plan, "calibration_speed_kmh", _value(movement_plan, "speed_kmh")),
+            "execution.calibration_speed_kmh",
+        )
+        candidates: list[tuple[float, object]] = []
+        for record in records:
+            try:
+                record_speed = _positive_finite(
+                    _value(record, "speed_kmh", "speed"), "calibration.speed_kmh"
+                )
+                _positive_duration(_value(record, "duration_ms", "duration"), "calibration.duration_ms")
+                _positive_finite(
+                    _value(record, "measured_distance_mm", "distance_mm"),
+                    "calibration.measured_distance_mm",
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise MovementPlanValidationError(
+                    f"invalid stored calibration record: {exc}", field="execution.calibration"
+                ) from exc
+            candidates.append((abs(record_speed - expected_speed), record))
+        return min(candidates, key=lambda item: item[0])[1]
 
 
 class CoordinateMovementPlanner:
@@ -151,7 +575,36 @@ class CoordinateMovementPlanner:
             segment_length_mm=segment_length_mm,
             calibration_speed_kmh=float(_value(calibration, "speed_kmh", "speed")),
             calibration_duration_ms=int(_value(calibration, "duration_ms", "duration")),
+            direction=direction,
         )
+
+    def execution_plan(
+        self,
+        movement_plan: CoordinateMovementPlan,
+        *,
+        stop_after: bool = True,
+        max_duration_ms: int | None = None,
+    ) -> CoordinateMovementExecutionPlan:
+        """Build a timed execution plan from this planner's stored calibration."""
+
+        return CoordinateMovementExecutionPlanner(max_duration_ms=max_duration_ms).build(
+            movement_plan, self._calibrations, stop_after=stop_after
+        )
+
+    def timed_request(
+        self,
+        movement_plan: CoordinateMovementPlan,
+        *,
+        stop_after: bool = True,
+        max_duration_ms: int | None = None,
+    ) -> TimedMovementRequest:
+        """Build a hardware-neutral timed request from a coordinate plan."""
+
+        return self.execution_plan(
+            movement_plan,
+            stop_after=stop_after,
+            max_duration_ms=max_duration_ms,
+        ).request
 
     def _locate_segment(self, x: float, y: float) -> tuple[object, float, float]:
         best: tuple[float, object, float, float] | None = None
@@ -240,6 +693,13 @@ def _value(value: object, *names: str) -> Any:
     raise KeyError(names[0])
 
 
+def _value_or_default(value: object, name: str, default: Any) -> Any:
+    try:
+        return _value(value, name)
+    except KeyError:
+        return default
+
+
 def _id(value: object, kind: str) -> str:
     try:
         return _required_text(_value(value, "id", f"{kind}_id"), f"{kind}.id")
@@ -307,6 +767,13 @@ def _positive_finite(value: Any, field: str) -> float:
     return result
 
 
+def _positive_duration(value: Any, field: str) -> int:
+    result = _positive_finite(value, field)
+    if result != int(result):
+        raise MovementPlanValidationError(f"{field} must be a whole number", field=field)
+    return int(result)
+
+
 def _non_negative_finite(value: Any, field: str) -> float:
     result = _finite(value, field)
     if result < 0:
@@ -350,3 +817,40 @@ def plan_coordinate_movement(
         direction=direction,
         occupied_blocks=occupied_blocks,
     )
+
+
+def build_coordinate_movement_execution_plan(
+    movement_plan: CoordinateMovementPlan,
+    calibration: Mapping[str, Any] | object | Iterable[Mapping[str, Any] | object],
+    *,
+    stop_after: bool = True,
+    max_duration_ms: int | None = None,
+) -> CoordinateMovementExecutionPlan:
+    """Build a validated, timed execution plan without sending a command."""
+
+    return CoordinateMovementExecutionPlanner(max_duration_ms=max_duration_ms).build(
+        movement_plan, calibration, stop_after=stop_after
+    )
+
+
+def build_timed_movement_request(
+    movement_plan: CoordinateMovementPlan,
+    calibration: Mapping[str, Any] | object | Iterable[Mapping[str, Any] | object],
+    *,
+    stop_after: bool = True,
+    max_duration_ms: int | None = None,
+) -> TimedMovementRequest:
+    """Build the data-only timed request consumed by a runtime adapter."""
+
+    return build_coordinate_movement_execution_plan(
+        movement_plan,
+        calibration,
+        stop_after=stop_after,
+        max_duration_ms=max_duration_ms,
+    ).request
+
+
+# Short aliases keep the request and execution types easy to discover for
+# adapters that use generic movement terminology.
+MovementRequest = TimedMovementRequest
+MovementExecutionPlan = CoordinateMovementExecutionPlan
