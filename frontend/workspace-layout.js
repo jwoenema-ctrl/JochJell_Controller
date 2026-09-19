@@ -11,6 +11,9 @@
     trains: ['Train overview', '#train-panel'],
     'train-profile': ['Train profile', '#train-editor-panel'],
     assembler: ['Train assembler', '#assembler-panel'],
+    'rolling-stock': ['Rolling stock inventory', '#rolling-stock-panel'],
+    programming: ['DCC programming', '#programming-panel'],
+    calibration: ['Motion calibration', '#calibration-panel'],
     timetable: ['Timetable', '#timetable-panel'],
     scans: ['3D track viewer', '#scan-panel'],
     'control-center': ['Control center', '.control-panel'],
@@ -22,7 +25,7 @@
   const MAIN = {
     dispatch: ['layout-info', 'node-graph', 'systematic', 'trains'],
     layout: ['layout-info', 'node-graph', 'systematic'],
-    trains: ['trains', 'train-profile', 'assembler'], timetable: ['timetable'], scans: ['scans']
+    trains: ['trains', 'train-profile', 'rolling-stock', 'programming', 'calibration', 'assembler'], timetable: ['timetable'], scans: ['scans']
   };
   const SIDEBAR = ['control-center', 'selected-train', 'simulation', 'connection-health'];
   const copy = value => JSON.parse(JSON.stringify(value));
