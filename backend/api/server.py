@@ -1104,6 +1104,81 @@ class ControllerApplication:
             "progress": round(coordinate.progress, 6),
         }
 
+    def _schedule_coordinate_target(self, schedule: dict[str, Any], stop_id: str, train_id: str) -> dict[str, Any] | None:
+        """Plan a calibrated destination for a timetable departure.
+
+        A timetable may contain one destination coordinate for the whole service
+        or a coordinate on an individual multi-stop entry. This method only
+        plans and applies the route target; physical movement remains governed by
+        the dispatcher and the train's current control mode.
+        """
+
+        raw: Any = schedule.get("destination_coordinate")
+        suffix = str(stop_id).split("#", 1)[1] if "#" in str(stop_id) else ""
+        stops = schedule.get("stops")
+        if suffix.isdigit() and isinstance(stops, (list, tuple)):
+            index = int(suffix)
+            if 0 <= index < len(stops) and isinstance(stops[index], dict):
+                raw = stops[index].get("destination_coordinate", raw)
+        if not raw:
+            return None
+        if self.runtime is None:
+            raise ValueError("controller runtime unavailable")
+        train_id = self._canonical_train_id(train_id)
+        train = next((item for item in self.trains if str(item.get("id")) == train_id), None)
+        if train is None:
+            raise ValueError(f"Unknown train: {train_id}")
+        if not isinstance(raw, dict):
+            raise ValueError("destination_coordinate must contain x and y")
+        try:
+            x, y = float(raw.get("x")), float(raw.get("y"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("destination_coordinate must contain numeric x and y") from exc
+        calibration = self.runtime.calibration.history(train_id)
+        if not calibration:
+            raise ValueError(f"train {train_id} needs a calibration measurement before schedule movement")
+        motion = next((item for item in self.runtime.track.get_snapshot().trains if item.train_id == train_id), None)
+        current = str((motion.block_id if motion else train.get("block_id", "")) or "").strip().upper()
+        direction = "forward" if self.runtime.track.get_train_direction(train_id) else "reverse"
+        try:
+            planner_blocks = [{**block, "id": str(block.get("id", "")).strip().upper()} for block in self.blocks]
+            planner_edges = [{**edge, "from": str(edge.get("from", "")).strip().upper(), "to": str(edge.get("to", "")).strip().upper()} for edge in self._topology_edges()]
+            plan = CoordinateMovementPlanner(planner_blocks, planner_edges, calibration).plan(
+                train_id, x, y, speed_kmh=10, direction=direction,
+                occupied_blocks=self.runtime.track.get_snapshot().occupied_blocks,
+            )
+        except MovementPlanValidationError as exc:
+            raise ValueError(str(exc)) from exc
+        if current and current != plan.source_block_id:
+            raise ValueError("scheduled destination must be ahead of the train in its current direction")
+        target = {
+            "x": round(plan.x, 2), "y": round(plan.y, 2),
+            "from_node": plan.source_block_id.lower(), "to_node": plan.target_block_id.lower(),
+            "progress": round(plan.progress, 6), "distance_mm": round(plan.distance_mm, 2),
+            "estimated_duration_ms": plan.estimated_duration_ms, "direction": plan.direction,
+            "speed_kmh": plan.speed_kmh, "schedule_id": str(schedule.get("id", "")),
+        }
+        train["target_coordinate"] = target
+        train["route"] = [plan.source_block_id.lower(), plan.target_block_id.lower()]
+        self.runtime.route_updater.set_route(train_id, (plan.source_block_id, plan.target_block_id))
+        if hasattr(self.runtime.track, "set_train_route"):
+            result = self.runtime.track.set_train_route(train_id, (plan.source_block_id, plan.target_block_id))
+            if hasattr(result, "accepted") and not result.accepted:
+                raise ValueError(result.detail or "scheduled coordinate route was rejected")
+        mode = str(train.get("mode", "manual")).lower()
+        if mode == ControlMode.AUTOMATIC.value:
+            maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140))))
+            speed = max(0.0, min(1.0, float(train.get("requested_speed_kmh", train.get("speed", 10)) or 10) / maximum))
+            result = self.runtime.dispatcher.automatic_speed(train_id, speed)
+            if hasattr(result, "accepted") and not result.accepted:
+                raise ValueError(result.detail or "scheduled automatic movement was rejected")
+        self.events.append({
+            "type": "schedule_coordinate_targeted", "schedule_id": str(schedule.get("id", "")),
+            "stop_id": str(stop_id), "train_id": train_id, "coordinate": deepcopy(target),
+            "mode": mode,
+        })
+        return target
+
     def train_catalogue(self, format_name: str = "json") -> dict[str, Any]:
         """Return a portable export of all persisted train model details."""
 
@@ -1598,6 +1673,8 @@ class ControllerApplication:
                     row = next((item for item in self.schedules if item.get("id") == schedule_id), None)
                     if row is not None:
                         row["state"] = state
+                        if schedule_event.kind.value == "departure":
+                            self._schedule_coordinate_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
                     self._publish_domain_event(
                         ScheduleStateChanged(
                             schedule_id=schedule_id,
@@ -2644,6 +2721,8 @@ class ControllerApplication:
                     row = next((item for item in self.schedules if item.get("id") == schedule_id), None)
                     if row is not None:
                         row["state"] = state
+                        if schedule_event.kind.value == "departure":
+                            self._schedule_coordinate_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
                     self._publish_domain_event(
                         ScheduleStateChanged(
                             schedule_id=schedule_id,

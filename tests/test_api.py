@@ -100,6 +100,32 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_schedule_departure_targets_calibrated_coordinate_for_automatic_train(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.runtime.train_database.add_calibration(
+                "train-101", speed_kmh=10, duration_ms=100, measured_distance_mm=50,
+                created_at="2026-01-01T00:00:00Z",
+            )
+            app.command({
+                "type": "add_schedule",
+                "schedule": {
+                    "id": "coordinate-departure", "time": "00:01", "service": "Calibrated run",
+                    "number": "101", "train_id": "train-101", "station_id": "ST01", "platform": "P01",
+                    "destination_coordinate": {"x": 300, "y": 150},
+                },
+            })
+            app.runtime.scheduler.reset(tick=0)
+            app.runtime.scheduler.start()
+            app.tick(2)
+            train = next(item for item in app.state()["trains"] if item["id"] == "t1")
+            self.assertEqual(train["target_coordinate"]["schedule_id"], "coordinate-departure")
+            self.assertEqual((train["target_coordinate"]["from_node"], train["target_coordinate"]["to_node"]), ("b01", "b02"))
+            self.assertTrue(any(event["type"] == "schedule_coordinate_targeted" for event in app.state()["events"]))
+        finally:
+            app.close()
+
     def test_http_state_and_command_round_trip(self) -> None:
         app = ControllerApplication.sample()
         server = make_server("127.0.0.1", 0, app)

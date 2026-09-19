@@ -68,16 +68,7 @@
 
   const clone = (value) => JSON.parse(JSON.stringify(value));
 
-  // The assembler deliberately stays small and local: these entries are UI
-  // templates, while the saved consist remains the source of truth.
-  const ROLLING_STOCK_CATALOGUE = [
-    { id: 'ns-186-001', type: 'locomotive', name: 'NS 186 001', detail: 'Traxx electric · 6,400 kW', length_mm: 216, mass_g: 86000 },
-    { id: 'obb-1116-195', type: 'locomotive', name: 'ÖBB 1116 195', detail: 'Taurus electric · 6,400 kW', length_mm: 225, mass_g: 87000 },
-    { id: 'i11-a-50-88', type: 'coach', name: 'I11 A 50 88', detail: '1st class · 26.4 m', length_mm: 264, mass_g: 44000 },
-    { id: 'i11-b-50-88', type: 'coach', name: 'I11 B 50 88', detail: '2nd class · 26.4 m', length_mm: 264, mass_g: 42000 },
-    { id: 'eanos-31-84', type: 'wagon', name: 'Eanos 31 84', detail: 'Open wagon · 22.5 t', length_mm: 156, mass_g: 22000 },
-    { id: 'ns-sng-2316', type: 'multiple unit', name: 'NS SNG 2316', detail: '3-car electric multiple unit', length_mm: 594, mass_g: 132000 }
-  ];
+
 
   const app = {
     state: clone(SAMPLE_STATE),
@@ -106,6 +97,37 @@
     layoutAssetEditing: null,
     pinboardCursor: null
   };
+
+  function rollingStockCatalogue() {
+    const inventory = app.state.rollingStockInventory || {};
+    const persisted = Array.isArray(inventory.items) && inventory.items.length
+      ? inventory.items
+      : Array.isArray(inventory.catalogue) ? inventory.catalogue : [];
+    const source = persisted.length ? persisted : (app.state.trains || []).flatMap((train) => train.consist || []);
+    const seen = new Set();
+    return source.reduce((items, raw, index) => {
+      const item = raw || {};
+      const id = String(item.id || item.item_id || item.catalogue_id || item.rolling_stock_id || item.name || `rolling-stock-${index + 1}`);
+      if (seen.has(id)) return items;
+      seen.add(id);
+      const type = String(item.vehicle_type || item.type || 'vehicle');
+      const name = String(item.name || item.model || id);
+      const detail = item.detail || [item.manufacturer, item.model].filter(Boolean).join(' · ') || type;
+      const hasQuantity = item.count != null || item.quantity != null;
+      items.push({
+        id,
+        type,
+        name,
+        detail,
+        manufacturer: item.manufacturer || '',
+        model: item.model || '',
+        length_mm: item.length_mm,
+        mass_g: item.mass_g,
+        count: hasQuantity ? Number(item.count ?? item.quantity) : 1,
+      });
+      return items;
+    }, []);
+  }
 
   // A dial draft is separate from measured speed: requesting zero is not proof
   // that a locomotive has stopped. Only acknowledged state unlocks direction.
@@ -867,19 +889,11 @@
   function renderInventory() {
     const host = $('#inventory-list');
     if (!host) return;
-    const fallback = [];
-    (app.state.trains || []).forEach((train) => (train.consist || []).forEach((item) => fallback.push({
-      id: item.catalogue_id || item.id || item.name || 'vehicle',
-      name: item.name || item.type || 'Rolling stock',
-      vehicle_type: item.vehicle_type || item.type || 'rolling stock',
-      count: 1,
-      train_ids: [train.id],
-    })));
     const inventory = app.state.rollingStockInventory || {};
-    const items = Array.isArray(inventory.items) && inventory.items.length ? inventory.items : fallback;
+    const items = rollingStockCatalogue();
     const total = inventory.total != null ? inventory.total : items.reduce((sum, item) => sum + Number(item.count || 0), 0);
     $('#inventory-summary').textContent = `${total} vehicle${total === 1 ? '' : 's'}`;
-    host.innerHTML = items.length ? items.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}</small></span><span class="inventory-type">${escapeHtml(item.vehicle_type || 'rolling stock')}</span><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : '<div class="empty-state">No rolling stock is assigned to a saved consist yet.</div>';
+    host.innerHTML = items.length ? items.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}</small></span><span class="inventory-type">${escapeHtml(item.type || 'rolling stock')}</span><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : '<div class="empty-state">No rolling stock is assigned to a saved consist yet.</div>';
   }
 
   async function saveInventory() {
@@ -1939,7 +1953,7 @@
     const length = consist.reduce((total, item) => {
       const declared = Number(item.length_mm);
       if (Number.isFinite(declared) && declared > 0) return total + declared;
-      const catalogueItem = ROLLING_STOCK_CATALOGUE.find((entry) => entry.id === item.catalogue_id || entry.name === item.name);
+      const catalogueItem = rollingStockCatalogue().find((entry) => entry.id === item.catalogue_id || entry.name === item.name);
       const catalogueLength = Number(catalogueItem && catalogueItem.length_mm);
       if (Number.isFinite(catalogueLength) && catalogueLength > 0) return total + catalogueLength;
       unknownLength = true;
@@ -1951,14 +1965,15 @@
   function addRollingStock() {
     const train = selectedTrain();
     const catalogueSelect = $('#rolling-stock-select');
-    const item = ROLLING_STOCK_CATALOGUE.find((entry) => entry.id === (catalogueSelect && catalogueSelect.value));
+    const item = rollingStockCatalogue().find((entry) => entry.id === (catalogueSelect && catalogueSelect.value));
     if (!train || !item) {
       showToast('Choose a rolling-stock entry first.', 'warning');
       return;
     }
     const consist = consistForTrain(train, true);
     const instanceId = `${item.id}-${app.nextConsistItemNumber++}`;
-    consist.push({ ...clone(item), id: instanceId, catalogue_id: item.id });
+    const { count, ...catalogueData } = item;
+    consist.push({ ...clone(catalogueData), id: instanceId, catalogue_id: item.id });
     renderAssembler();
     showToast(`${item.name} added to draft consist`, 'success');
   }
@@ -2010,8 +2025,14 @@
       $('#rolling-stock-select').addEventListener('change', (event) => { event.target.dataset.selected = event.target.value; });
     }
     const stockSelect = $('#rolling-stock-select');
-    stockSelect.innerHTML = ROLLING_STOCK_CATALOGUE.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.type)}</option>`).join('');
-    const selectedCatalogueId = stockSelect.dataset.selected || ROLLING_STOCK_CATALOGUE[0].id;
+    const catalogue = rollingStockCatalogue();
+    stockSelect.innerHTML = catalogue.length
+      ? catalogue.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.type)}${item.count != null ? ` · ×${escapeHtml(item.count)}` : ''}</option>`).join('')
+      : '<option value="">No rolling stock in inventory</option>';
+    stockSelect.disabled = !catalogue.length;
+    const selectedCatalogueId = catalogue.some((item) => item.id === stockSelect.dataset.selected)
+      ? stockSelect.dataset.selected
+      : catalogue[0]?.id || '';
     stockSelect.value = selectedCatalogueId;
     stockSelect.dataset.selected = stockSelect.value;
     select.innerHTML = app.state.trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || `Train ${train.number}`)} · #${escapeHtml(train.number || '—')}</option>`).join('');
