@@ -13,8 +13,8 @@ from typing import Any, Mapping
 
 WORKSPACE_PANELS = {
     "dispatch": ["layout-info", "node-graph", "systematic", "trains"],
-    "layout": ["layout-info", "node-graph", "systematic"],
-    "trains": ["trains", "train-profile", "assembler"],
+    "layout": ["layout-info", "node-graph", "systematic", "routes", "scans"],
+    "trains": ["trains", "train-profile", "rolling-stock", "programming", "calibration", "assembler"],
     "timetable": ["timetable"],
     "scans": ["scans"],
 }
@@ -39,14 +39,33 @@ def validate_workspace_layout(value: Any, current: Mapping[str, Any] | None = No
     if not isinstance(pages, dict) or set(pages) - set(WORKSPACE_PANELS):
         raise ValueError("unknown workspace page")
     result = deepcopy(DEFAULT_WORKSPACE_LAYOUT)
+    def migrate_legacy_order(page: str, key: str, order: Any) -> Any:
+        if page == "layout" and key == "order" and isinstance(order, list):
+            legacy = ["layout-info", "node-graph", "systematic"]
+            if len(order) == len(legacy) and set(order) == set(legacy):
+                return list(order) + ["routes", "scans"]
+        if page == "trains" and key == "order" and isinstance(order, list):
+            legacy = ["trains", "train-profile", "assembler"]
+            if len(order) == len(legacy) and set(order) == set(legacy):
+                return ["trains", "train-profile", "rolling-stock", "programming", "calibration", "assembler"]
+        return order
+
     if current:
         for page, preferences in current.get("pages", {}).items():
             if page in result["pages"]:
-                result["pages"][page].update(deepcopy(preferences))
+                migrated = deepcopy(preferences)
+                for key in ("order", "sidebar_order"):
+                    if key in migrated:
+                        migrated[key] = migrate_legacy_order(page, key, migrated[key])
+                result["pages"][page].update(migrated)
     for page, patch in pages.items():
         if not isinstance(patch, dict) or set(patch) - {"order", "sidebar_order", "sidebar_side"}:
             raise ValueError(f"invalid workspace preferences for {page}")
-        result["pages"][page].update(deepcopy(patch))
+        migrated = deepcopy(patch)
+        for key in ("order", "sidebar_order"):
+            if key in migrated:
+                migrated[key] = migrate_legacy_order(page, key, migrated[key])
+        result["pages"][page].update(migrated)
     for page, preferences in result["pages"].items():
         if preferences["sidebar_side"] not in ("left", "right"):
             raise ValueError("sidebar_side must be left or right")

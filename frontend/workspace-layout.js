@@ -25,7 +25,7 @@
   const PAGE_LABELS = { dispatch: 'Dispatch', layout: 'Layout editor', trains: 'Trains', timetable: 'Timetable', scans: '3D scans' };
   const MAIN = {
     dispatch: ['layout-info', 'node-graph', 'systematic', 'trains'],
-    layout: ['layout-info', 'node-graph', 'systematic', 'routes'],
+    layout: ['layout-info', 'node-graph', 'systematic', 'routes', 'scans'],
     trains: ['trains', 'train-profile', 'rolling-stock', 'programming', 'calibration', 'assembler'], timetable: ['timetable'], scans: ['scans']
   };
   const SIDEBAR = ['control-center', 'selected-train', 'simulation', 'connection-health'];

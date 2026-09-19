@@ -631,7 +631,7 @@
     else if (response.scan) app.state.scans.push(response.scan);
     if (response.scan) app.selectedScanId = response.scan.id;
     renderScanLibrary();
-    if (app.workspace === 'scans') renderScans();
+    if (['layout', 'scans'].includes(app.workspace)) renderScans();
     return response;
   }
 
@@ -859,7 +859,7 @@
     renderSidebar();
     renderGraph();
     renderSystematicView();
-    if (app.workspace === 'scans') renderScans();
+    if (['layout', 'scans'].includes(app.workspace)) renderScans();
     renderScanLibrary();
     renderTrainList();
     renderEditor();
@@ -2356,7 +2356,7 @@
     $('#graph-editor-tools').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
     $('#connection-limit-editor').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
     $$('.map-legend .editor-action').forEach((button) => button.classList.toggle('is-hidden', page !== 'layout'));
-    $('#scan-panel').classList.toggle('is-hidden', page !== 'scans');
+    $('#scan-panel').classList.toggle('is-hidden', !['layout', 'scans'].includes(page));
     $('#route-panel').classList.toggle('is-hidden', page !== 'layout');
     $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     const trainSection = page === 'trains' ? app.trainSection : null;
@@ -2395,7 +2395,7 @@
     else { app.layoutEditing = false; if (page === 'dispatch' && app.layoutView === 'editor') app.layoutView = 'graph'; }
     renderGraph();
     updateWorkspaceVisibility();
-    if (page === 'scans') { renderScans(); window.requestAnimationFrame(() => app.scanViewer && app.scanViewer.resize()); }
+    if (['layout', 'scans'].includes(page)) { renderScans(); window.requestAnimationFrame(() => app.scanViewer && app.scanViewer.resize()); }
     if (page === 'settings') { renderScanLibrary(); if (!app.settingsDirty) renderSettings(); }
     window.history.replaceState(null, '', `#${page}`);
     window.scrollTo({ top: 0, behavior: 'instant' });

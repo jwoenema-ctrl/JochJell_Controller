@@ -162,6 +162,8 @@ async function shot(page, name) {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('.mode-nav').getByRole('button', { name: 'Automation', exact: true }).click();
   assert.equal(await page.locator('#route-panel').isVisible(), true, 'Automation should expose saved route plans');
+  assert.equal(await page.locator('#scan-panel').isVisible(), true, 'Automation should expose the 3D track viewer');
+  await page.locator('#scan-viewer-host canvas').waitFor({ state: 'visible' });
   await page.locator('#new-route').click();
   await page.locator('#route-id').fill('smoke-route');
   await page.locator('#route-name').fill('Smoke route');

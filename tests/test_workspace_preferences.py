@@ -22,7 +22,7 @@ class WorkspacePreferencesTests(unittest.TestCase):
         second = validate_settings({"workspace_layout": {"pages": {"layout": {"order": order}}}}, first)
         self.assertEqual(second["theme"], "dark")
         self.assertEqual(second["workspace_layout"]["pages"]["dispatch"]["sidebar_side"], "right")
-        self.assertEqual(second["workspace_layout"]["pages"]["layout"]["order"], order)
+        self.assertEqual(second["workspace_layout"]["pages"]["layout"]["order"], order + ["routes", "scans"])
         self.assertEqual(first["workspace_layout"]["pages"]["layout"]["order"], DEFAULT_WORKSPACE_LAYOUT["pages"]["layout"]["order"])
 
     def test_invalid_preferences_are_atomic(self):
