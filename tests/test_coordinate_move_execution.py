@@ -56,6 +56,11 @@ class FakeDispatcher:
         self.control.manual_speed = speed
         return SimpleNamespace(accepted=True, detail="")
 
+    def automatic_speed(self, train_id, speed):
+        self.speed_commands.append((train_id, speed))
+        self.control.automatic_speed = speed
+        return SimpleNamespace(accepted=True, detail="")
+
 
 class FakeTrack:
     def __init__(self, *, direction=True, speed=0.0, target_speed=0.0):
@@ -238,6 +243,26 @@ class CoordinateMovementExecutionTests(unittest.TestCase):
 
         self.assertEqual(executor.status.state, "completed")
         self.assertEqual(track.stop_commands, ["train-7"])
+
+    def test_runtime_executor_allows_only_explicit_automatic_schedule_mode(self):
+        execution = self.planner().execution_plan(self.planner().plan("train-7", 60, 10))
+        dispatcher = FakeDispatcher(mode="automatic")
+        track = FakeTrack()
+        timers = []
+        executor = RuntimeCoordinateMovementExecutor(
+            dispatcher,
+            track,
+            timer_factory=lambda seconds, callback: timers.append(FakeTimer(seconds, callback)) or timers[-1],
+            max_speed_kmh=20,
+        )
+
+        with self.assertRaisesRegex(CoordinateExecutionError, "manual control"):
+            executor.start(execution, confirmed=True)
+        status = executor.start(execution, confirmed=True, allow_automatic=True)
+        self.assertEqual(status.state, "running")
+        self.assertEqual(dispatcher.speed_commands, [("train-7", 0.5)])
+        timers[0].fire()
+        self.assertEqual(executor.status.state, "completed")
 
 
 if __name__ == "__main__":

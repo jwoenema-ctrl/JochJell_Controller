@@ -1165,13 +1165,31 @@ class ControllerApplication:
             result = self.runtime.track.set_train_route(train_id, (plan.source_block_id, plan.target_block_id))
             if hasattr(result, "accepted") and not result.accepted:
                 raise ValueError(result.detail or "scheduled coordinate route was rejected")
+        if hasattr(self.runtime.track, "set_train_coordinate_target"):
+            result = self.runtime.track.set_train_coordinate_target(train_id, plan.progress)
+            if hasattr(result, "accepted") and not result.accepted:
+                raise ValueError(result.detail or "scheduled coordinate target was rejected")
         mode = str(train.get("mode", "manual")).lower()
         if mode == ControlMode.AUTOMATIC.value:
             maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140))))
             speed = max(0.0, min(1.0, float(train.get("requested_speed_kmh", train.get("speed", 10)) or 10) / maximum))
-            result = self.runtime.dispatcher.automatic_speed(train_id, speed)
-            if hasattr(result, "accepted") and not result.accepted:
-                raise ValueError(result.detail or "scheduled automatic movement was rejected")
+            if self.simulation_mode:
+                result = self.runtime.dispatcher.automatic_speed(train_id, speed)
+                if hasattr(result, "accepted") and not result.accepted:
+                    raise ValueError(result.detail or "scheduled automatic movement was rejected")
+            else:
+                if not self.track_power:
+                    raise ValueError("switch track power on before scheduled coordinate movement")
+                try:
+                    execution = CoordinateMovementExecutionPlanner(max_duration_ms=120000).build(plan, calibration)
+                    status = self.runtime.coordinate_movement.start(execution, confirmed=True, allow_automatic=True)
+                except (ValueError, MovementPlanValidationError) as exc:
+                    raise ValueError(str(exc)) from exc
+                self._coordinate_execution_state = status.as_dict()
+                self.events.append({
+                    "type": "schedule_coordinate_execution_started", "schedule_id": str(schedule.get("id", "")),
+                    "stop_id": str(stop_id), "train_id": train_id, "duration_ms": execution.duration_ms,
+                })
         self.events.append({
             "type": "schedule_coordinate_targeted", "schedule_id": str(schedule.get("id", "")),
             "stop_id": str(stop_id), "train_id": train_id, "coordinate": deepcopy(target),

@@ -44,6 +44,17 @@ class ModuleTests(unittest.TestCase):
         self.assertTrue(track.set_train_function("T1", 2, enabled=False).accepted)
         self.assertEqual(track.get_train_functions("T1"), {2: False})
 
+    def test_simulator_stops_at_calibrated_coordinate_target(self) -> None:
+        track = SimulatedTrackSystem(tick_seconds=1, acceleration=10, blocks=["B01", "B02"])
+        track.add_train("T1", "B01", route=("B01", "B02"))
+        self.assertTrue(track.set_train_coordinate_target("T1", 0.3).accepted)
+        self.assertTrue(track.set_train_speed("T1", 0.5).accepted)
+        snapshot = track.tick()
+        motion = snapshot.trains[0]
+        self.assertAlmostEqual(motion.position, 0.3)
+        self.assertEqual(motion.speed, 0)
+        self.assertEqual(motion.target_speed, 0)
+
     def test_database_and_safety_services(self) -> None:
         with SQLiteTrainDatabase() as database:
             database.upsert(TrainModel("T1", "Test locomotive", decoder_address=3))

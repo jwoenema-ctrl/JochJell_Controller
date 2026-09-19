@@ -89,6 +89,7 @@ class CoordinateMovementExecutor:
         *,
         normalized_speed: float | None = None,
         confirmed: bool = False,
+        allow_automatic: bool = False,
     ) -> CoordinateExecutionStatus:
         if confirmed is not True:
             raise CoordinateExecutionError("explicit confirmation is required before coordinate movement")
@@ -108,8 +109,9 @@ class CoordinateMovementExecutor:
             if self._status is not None and self._status.state == "running":
                 raise CoordinateExecutionError("a coordinate movement is already active")
             control = self._dispatcher.register_train(request.train_id)
-            if str(getattr(getattr(control, "mode", None), "value", getattr(control, "mode", ""))).lower() != "manual":
-                raise CoordinateExecutionError("coordinate movement requires manual control")
+            mode = str(getattr(getattr(control, "mode", None), "value", getattr(control, "mode", ""))).lower()
+            if mode != "manual" and not (allow_automatic and mode == "automatic"):
+                raise CoordinateExecutionError("coordinate movement requires manual control or an explicit automatic schedule")
             if float(getattr(control, "desired_speed", 0.0)) > 0:
                 raise CoordinateExecutionError("the train must be stopped before coordinate movement")
             snapshot = self._track.get_snapshot()
@@ -122,7 +124,9 @@ class CoordinateMovementExecutor:
                 )
                 if hasattr(direction_result, "accepted") and not direction_result.accepted:
                     raise CoordinateExecutionError(direction_result.detail or "train direction was rejected")
-            speed_result = self._dispatcher.manual_speed(request.train_id, float(normalized_speed))
+            speed_result = (self._dispatcher.automatic_speed(request.train_id, float(normalized_speed))
+                            if mode == "automatic" else
+                            self._dispatcher.manual_speed(request.train_id, float(normalized_speed)))
             if hasattr(speed_result, "accepted") and not speed_result.accepted:
                 raise CoordinateExecutionError(speed_result.detail or "movement speed was rejected")
             status = CoordinateExecutionStatus(request.train_id, "running", request.direction, request.speed_kmh, request.duration_ms)

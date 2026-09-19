@@ -136,6 +136,10 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(train["target_coordinate"]["schedule_id"], "coordinate-departure")
             self.assertEqual((train["target_coordinate"]["from_node"], train["target_coordinate"]["to_node"]), ("b01", "b02"))
             self.assertTrue(any(event["type"] == "schedule_coordinate_targeted" for event in app.state()["events"]))
+            app.tick(30)
+            motion = next(item for item in app.state()["trains"] if item["id"] == "t1")["motion"]
+            self.assertAlmostEqual(motion["position"], train["target_coordinate"]["progress"], places=6)
+            self.assertEqual(motion["speed"], 0)
         finally:
             app.close()
 

@@ -23,6 +23,7 @@ class _Train:
     direction: int
     route: tuple[str, ...]
     route_index: int
+    coordinate_target: float | None = None
 
 
 @dataclass
@@ -179,6 +180,23 @@ class SimulatedTrackSystem:
             self._refresh_safety_targets()
         return CommandResult(True, "set_train_route", "route updated")
 
+    def set_train_coordinate_target(self, train_id: str, position: float | None) -> CommandResult:
+        """Set a normalized in-block stop target for calibrated movements."""
+
+        if position is not None and not 0.0 <= float(position) <= 1.0:
+            return CommandResult(False, "set_train_coordinate_target", "position must be between 0 and 1")
+        with self._lock:
+            train = self._trains.get(train_id)
+            if train is None:
+                return CommandResult(False, "set_train_coordinate_target", "unknown train")
+            train.coordinate_target = None if position is None else float(position)
+            if train.coordinate_target is not None and train.coordinate_target <= train.position:
+                train.coordinate_target = train.position
+                train.commanded_speed = train.target_speed = train.speed = 0.0
+            else:
+                self._refresh_safety_targets()
+        return CommandResult(True, "set_train_coordinate_target", "coordinate target updated")
+
     def set_train_speed(self, train_id: str, speed: float) -> CommandResult:
         """Set a normalized target speed in the inclusive range 0..1."""
 
@@ -187,6 +205,9 @@ class SimulatedTrackSystem:
             train = self._trains.get(train_id)
             if train is None:
                 return CommandResult(False, "set_train_speed", "unknown train")
+            if speed > 0 and train.coordinate_target is not None and train.position >= train.coordinate_target - self._BOUNDARY_EPSILON:
+                train.commanded_speed = train.target_speed = train.speed = 0.0
+                return CommandResult(True, "set_train_speed", "coordinate target already reached")
             train.commanded_speed = float(speed)
             self._refresh_safety_targets()
         return CommandResult(True, "set_train_speed", "target speed updated")
@@ -398,6 +419,10 @@ class SimulatedTrackSystem:
             movement = train.speed * self.tick_seconds
             if boundary is not None and movement >= boundary.distance:
                 self._hold_at_boundary(train)
+                continue
+            if train.coordinate_target is not None and train.position + movement >= train.coordinate_target:
+                train.position = train.coordinate_target
+                train.commanded_speed = train.target_speed = train.speed = 0.0
                 continue
 
             previous_block = train.block_id
