@@ -1062,6 +1062,34 @@
     return 'X ' + Number(point.x).toFixed(1) + ' · Y ' + Number(point.y).toFixed(1);
   }
 
+  function parsePinboardCoordinate(value) {
+    const text = String(value || '').trim();
+    const match = text.match(/x\s*[:=]?\s*(-?\d+(?:\.\d+)?)\s*(?:[,;·|]\s*|\s+)y\s*[:=]?\s*(-?\d+(?:\.\d+)?)/i)
+      || text.match(/^\s*(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)\s*$/);
+    if (!match) return null;
+    const x = Number(match[1]); const y = Number(match[2]);
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
+  }
+
+  function nearestPinboardCoordinate(point) {
+    const blocks = app.state.layout.blocks || [];
+    const blockMap = Object.fromEntries(blocks.map((block) => [String(block.id || '').toLowerCase(), block]));
+    let best = null;
+    normalizedEdges(app.state.layout, blocks).forEach((edge) => {
+      const from = blockMap[String(edge.from).toLowerCase()];
+      const to = blockMap[String(edge.to).toLowerCase()];
+      if (!from || !to) return;
+      const start = blockCenter(from); const end = blockCenter(to);
+      const dx = end.x - start.x; const dy = end.y - start.y; const lengthSquared = dx * dx + dy * dy;
+      if (!lengthSquared) return;
+      const progress = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared));
+      const projected = { x: start.x + dx * progress, y: start.y + dy * progress };
+      const distance = Math.hypot(point.x - projected.x, point.y - projected.y);
+      if (!best || distance < best.distance) best = { ...projected, distance, from_node: String(edge.from).toLowerCase(), to_node: String(edge.to).toLowerCase(), progress };
+    });
+    return best && best.distance <= 32 ? best : null;
+  }
+
   function pinboardTrainPoint(train, blockMap) {
     const motion = train.motion || {};
     const from = blockMap[String(motion.from_block_id || motion.block_id || train.position || '').toLowerCase()];
@@ -1688,6 +1716,7 @@
     $('#schedule-number').value = current.number || '';
     $('#schedule-origin').value = current.origin || '';
     $('#schedule-destination').value = current.destination || '';
+    $('#schedule-coordinate').value = current.destination_coordinate ? formatPinboardCoordinate(current.destination_coordinate) : '';
     $('#schedule-route').value = current.route || '';
     $('#schedule-state').value = current.state || 'Draft';
     const trains = (app.state.trains || []).map((train) => ({ value: train.id, label: `${train.name || `Train ${train.number || train.id}`} · #${train.number || '—'}` }));
@@ -1713,6 +1742,17 @@
     const trainId = $('#schedule-train').value;
     const origin = $('#schedule-origin').value.trim();
     const destination = $('#schedule-destination').value.trim();
+    const coordinateText = $('#schedule-coordinate').value.trim();
+    let destinationCoordinate;
+    if (coordinateText) {
+      const parsedCoordinate = parsePinboardCoordinate(coordinateText);
+      const projectedCoordinate = parsedCoordinate && nearestPinboardCoordinate(parsedCoordinate);
+      if (!projectedCoordinate) {
+        showToast('Destination coordinate is not on the configured track.', 'warning');
+        return;
+      }
+      destinationCoordinate = { x: Number(projectedCoordinate.x.toFixed(2)), y: Number(projectedCoordinate.y.toFixed(2)), from_node: projectedCoordinate.from_node, to_node: projectedCoordinate.to_node, progress: Number(projectedCoordinate.progress.toFixed(6)) };
+    }
     const route = $('#schedule-route').value.trim() || [origin, destination].filter(Boolean).join('  →  ');
     const stationId = $('#schedule-station').value;
     const platformId = $('#schedule-platform').value;
@@ -1727,6 +1767,7 @@
       station_id: stationId || undefined,
       platform: platformId || '',
       route,
+      destination_coordinate: destinationCoordinate,
       stops: stationId ? [{ station_id: stationId, platform_id: platformId || null, arrival_seconds: arrivalSeconds, departure_seconds: arrivalSeconds + 60 }] : [],
       state: $('#schedule-state').value || 'Draft'
     };
@@ -1966,7 +2007,7 @@
     $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     $('#train-editor-panel').classList.toggle('is-hidden', page !== 'trains');
     $('.bottom-grid').classList.toggle('is-hidden', !['dispatch', 'layout', 'trains', 'timetable'].includes(page));
-    $('#timetable-panel').classList.toggle('is-hidden', !['layout', 'timetable'].includes(page));
+    $('#timetable-panel').classList.toggle('is-hidden', !['dispatch', 'layout', 'timetable'].includes(page));
     $('#calibration-panel').classList.toggle('is-hidden', page !== 'trains');
     $('#assembler-panel').classList.toggle('is-hidden', page !== 'trains');
     $('#fit-layout').classList.toggle('is-hidden', !trackPage);

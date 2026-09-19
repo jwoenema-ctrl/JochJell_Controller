@@ -52,6 +52,7 @@ from backend.services.block_editor import block_id as validate_block_id, next_bl
 from backend.services.scheduler import ScheduleStop as RuntimeScheduleStop
 from backend.services.coordinate_move import CoordinateMovementPlanner, MovementPlanValidationError
 from backend.services.train_presence import SavedTrainPresenceService
+from backend.services.pinboard import nearest_track_coordinate
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -879,6 +880,25 @@ class ControllerApplication:
         self._presence_state = detector.scan(self.trains).as_dict()
         self.events.append({"type": "train_presence_scan", "summary": self._presence_state["summary"]})
         return deepcopy(self._presence_state)
+
+    def _validate_schedule_coordinate(self, schedule: dict[str, Any]) -> None:
+        raw = schedule.get("destination_coordinate")
+        if not raw:
+            return
+        if not isinstance(raw, dict):
+            raise ValueError("destination_coordinate must contain x and y")
+        try:
+            x, y = float(raw.get("x")), float(raw.get("y"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("destination_coordinate must contain numeric x and y") from exc
+        coordinate = nearest_track_coordinate(self.blocks, self._topology_edges(), x, y)
+        if coordinate is None:
+            raise ValueError("destination coordinate is not on the configured track")
+        schedule["destination_coordinate"] = {
+            "x": round(coordinate.x, 2), "y": round(coordinate.y, 2),
+            "from_node": coordinate.from_node.lower(), "to_node": coordinate.to_node.lower(),
+            "progress": round(coordinate.progress, 6),
+        }
 
     def train_catalogue(self, format_name: str = "json") -> dict[str, Any]:
         """Return a portable export of all persisted train model details."""
@@ -2266,6 +2286,7 @@ class ControllerApplication:
                 schedule.setdefault("service", "New service")
                 schedule.setdefault("number", "NEW")
                 schedule.setdefault("state", "Draft")
+                self._validate_schedule_coordinate(schedule)
                 self.schedules.append(schedule)
                 self._sync_runtime_from_ui()
                 self._publish_domain_event(
@@ -2280,7 +2301,9 @@ class ControllerApplication:
                 schedule = next((item for item in self.schedules if item.get("id") == schedule_id), None)
                 if schedule is None:
                     raise ValueError(f"Unknown schedule: {schedule_id}")
-                schedule.update(dict(payload.get("schedule", {})))
+                updates = dict(payload.get("schedule", {}))
+                self._validate_schedule_coordinate(updates)
+                schedule.update(updates)
                 self._sync_runtime_from_ui()
                 self._publish_domain_event(
                     ScheduleStateChanged(

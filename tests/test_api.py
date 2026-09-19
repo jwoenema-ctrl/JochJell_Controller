@@ -49,6 +49,23 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_schedule_rejects_off_track_coordinate_and_canonicalizes_valid_one(self) -> None:
+        app = ControllerApplication.sample()
+        try:
+            with self.assertRaisesRegex(ValueError, "not on the configured track"):
+                app.command({
+                    "type": "add_schedule",
+                    "schedule": {"id": "off-track", "train_id": "train-3", "station_id": "ST01", "platform": "P01", "destination_coordinate": {"x": 10, "y": 10}},
+                })
+            result = app.command({
+                "type": "add_schedule",
+                "schedule": {"id": "on-track", "train_id": "train-3", "station_id": "ST01", "platform": "P01", "destination_coordinate": {"x": 328, "y": 150}},
+            })
+            schedule = next(item for item in result["schedules"] if item["id"] == "on-track")
+            self.assertEqual((schedule["destination_coordinate"]["from_node"], schedule["destination_coordinate"]["to_node"]), ("b01", "b02"))
+        finally:
+            app.close()
+
     def test_http_state_and_command_round_trip(self) -> None:
         app = ControllerApplication.sample()
         server = make_server("127.0.0.1", 0, app)
