@@ -104,10 +104,12 @@ async function shot(page, name) {
   assert.ok(host.height >= 250 && host.height <= 600, `Unbounded viewport height ${host.height}`);
   assert.equal(await page.locator('#layout-panel').isVisible(), false, 'Scans should not show the dispatch panels');
   await shot(page, 'scans-desktop');
-  for (const name of ['Home', 'Automation', 'Trains', 'Settings']) {
+  for (const name of ['Home', 'Automation', 'Trains']) {
     await page.locator('.mode-nav').getByRole('button', { name, exact: true }).click();
     assert.equal(await page.locator('#settings-page').isVisible(), false);
   }
+  await page.locator('.mode-nav').getByRole('button', { name: 'Settings', exact: true }).click();
+  assert.equal(await page.locator('#settings-page').isVisible(), true);
   await page.locator('.mode-nav').getByRole('button', { name: 'Automation', exact: true }).click();
   await page.getByRole('button', { name: 'Systematic track', exact: true }).click();
   assert.equal(await page.locator('#systematic-panel').isVisible(), true);
