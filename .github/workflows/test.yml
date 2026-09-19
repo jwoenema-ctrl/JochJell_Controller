@@ -47,6 +47,8 @@ jobs:
         run: node tests/browser_smoke.cjs
         env:
           SCREENSHOT_DIR: artifacts/ui-verification
+      - name: Verify rolling-stock inventory and assembler
+        run: node tests/rolling_stock_assembler.cjs
       - name: Preserve browser screenshots
         if: always()
         uses: actions/upload-artifact@v4

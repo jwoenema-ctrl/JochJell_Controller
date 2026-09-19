@@ -60,6 +60,12 @@ async function stopServer() {
 
   await page.goto(`${url}/#trains`);
   await page.waitForFunction(() => document.querySelector('#sync-message').textContent.includes('online'));
+  await page.getByRole('link', { name: 'Rolling stock', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#rolling-stock-panel').classList.contains('is-hidden') === false);
+  await page.locator('#inventory-search').fill('310');
+  assert.match(await page.locator('#inventory-list').textContent(), /310 mm/, 'Rolling-stock search must include persisted length data');
+  await page.locator('#inventory-search').fill('');
+
   await page.getByRole('link', { name: 'Assembler', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#assembler-panel').classList.contains('is-hidden') === false);
 
