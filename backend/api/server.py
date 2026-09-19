@@ -955,9 +955,11 @@ class ControllerApplication:
             return
 
     def play_recording(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Play one stored plan immediately; the request itself is the explicit operator action."""
+        """Play one stored plan immediately and leave the train in a safe stopped state."""
         if self.runtime is None:
             raise ValueError("runtime is not available")
+        if not self.track_power:
+            raise ValueError("switch track power on before playing a recording")
         index = int(payload.get("index", len(self._recording_history) - 1))
         if index < 0 or index >= len(self._recording_history):
             raise ValueError("recording index is out of range")
@@ -968,23 +970,41 @@ class ControllerApplication:
         train = next((item for item in self.trains if item.get("id") == train_id), None)
         if train is None:
             raise ValueError(f"Unknown train: {train_id}")
+        control = self.runtime.dispatcher.register_train(train_id)
+        is_automatic = control.mode is ControlMode.AUTOMATIC
+        allow_automatic = payload.get("automatic") is True
+        if is_automatic and not allow_automatic:
+            raise ValueError("automatic-mode playback requires automatic=true")
         maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
-        for action in plan.actions:
-            if action.operation == "speed":
-                result = self.runtime.dispatcher.manual_speed(train_id, float(action.speed))
-            elif action.operation == "direction":
-                result = self.runtime.track.set_train_direction(train_id, forward=action.direction == "forward")
-            else:
-                if not hasattr(self.runtime.track, "set_train_function"):
-                    raise ValueError("the active track adapter does not support decoder functions")
-                result = self.runtime.track.set_train_function(train_id, int(action.function_number), enabled=bool(action.enabled))
-                train.setdefault("decoder_function_states", {})[str(action.function_number)] = bool(action.enabled)
-            if hasattr(result, "accepted") and not result.accepted:
-                raise ValueError(result.detail or "recorded action was rejected")
-            if action.operation == "speed":
-                train["speed"] = round(float(action.speed) * maximum)
-        self.events.append({"type": "recording_played", "train_id": train_id, "action_count": plan.action_count})
-        return self.recording_state()
+        movement_attempted = False
+        try:
+            for action in plan.actions:
+                if action.operation == "speed":
+                    if float(action.speed) > 0:
+                        movement_attempted = True
+                    command = self.runtime.dispatcher.automatic_speed if is_automatic else self.runtime.dispatcher.manual_speed
+                    result = command(train_id, float(action.speed))
+                elif action.operation == "direction":
+                    result = self.runtime.track.set_train_direction(train_id, forward=action.direction == "forward")
+                    if hasattr(result, "accepted") and result.accepted:
+                        train["direction"] = action.direction
+                else:
+                    if not hasattr(self.runtime.track, "set_train_function"):
+                        raise ValueError("the active track adapter does not support decoder functions")
+                    result = self.runtime.track.set_train_function(train_id, int(action.function_number), enabled=bool(action.enabled))
+                    train.setdefault("decoder_function_states", {})[str(action.function_number)] = bool(action.enabled)
+                if hasattr(result, "accepted") and not result.accepted:
+                    raise ValueError(result.detail or "recorded action was rejected")
+                if action.operation == "speed":
+                    train["speed"] = round(float(action.speed) * maximum)
+                    train["requested_speed_kmh"] = train["speed"]
+            self.events.append({"type": "recording_played", "train_id": train_id, "action_count": plan.action_count})
+            return self.recording_state()
+        finally:
+            if movement_attempted:
+                self.runtime.track.stop_train(train_id)
+            control.manual_speed = control.automatic_speed = 0.0
+            train["speed"] = train["requested_speed_kmh"] = 0
 
     def request_decoder_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate a programming request without issuing an unsupported CV write."""

@@ -8,8 +8,10 @@ import tempfile
 import time
 import unittest
 import urllib.request
+from unittest.mock import patch
 
 from backend.api.server import ControllerApplication, make_server
+from backend.infrastructure.interfaces import CommandResult
 
 
 class ApiTests(unittest.TestCase):
@@ -61,7 +63,69 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(stopped["recording"]["history"][0]["action_count"], 1)
             replayed = app.command({"type": "play_recording", "index": 0, "confirm": True})
             self.assertFalse(replayed["recording"]["active"])
-            self.assertEqual(next(item for item in replayed["trains"] if item["id"] == "t2")["speed"], 20)
+            self.assertEqual(next(item for item in replayed["trains"] if item["id"] == "t2")["speed"], 0)
+            control = app.runtime.dispatcher.trains["train-3"]
+            self.assertEqual((control.manual_speed, control.automatic_speed), (0.0, 0.0))
+        finally:
+            app.close()
+
+    def test_replayed_direction_updates_train_state(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "stop_train", "train_id": "train-3"})
+            app.command({"type": "start_recording", "train_id": "train-3"})
+            app.command({"type": "set_direction", "train_id": "train-3", "direction": "reverse"})
+            app.command({"type": "stop_recording"})
+            app.command({"type": "set_direction", "train_id": "train-3", "direction": "forward"})
+            replayed = app.command({"type": "play_recording", "index": 0, "confirm": True})
+            self.assertEqual(next(item for item in replayed["trains"] if item["id"] == "t2")["direction"], "Reverse")
+        finally:
+            app.close()
+
+    def test_playback_rejects_power_off_and_automatic_mode_without_opt_in(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "start_recording", "train_id": "train-3"})
+            app.command({"type": "speed", "train_id": "train-3", "speed": 20})
+            app.command({"type": "stop_recording"})
+            app.command({"type": "stop_train", "train_id": "train-3"})
+            app.command({"type": "track_power", "enabled": False})
+            with self.assertRaisesRegex(ValueError, "track power"):
+                app.command({"type": "play_recording", "index": 0, "confirm": True})
+
+            app.command({"type": "track_power", "enabled": True})
+            app.command({"type": "set_train_mode", "train_id": "train-101", "mode": "automatic"})
+            app.command({"type": "stop_train", "train_id": "train-101"})
+            app.command({"type": "start_recording", "train_id": "train-101"})
+            app.command({"type": "speed", "train_id": "train-101", "speed": 20})
+            app.command({"type": "stop_recording"})
+            app.command({"type": "stop_train", "train_id": "train-101"})
+            with self.assertRaisesRegex(ValueError, "automatic=true"):
+                app.command({"type": "play_recording", "index": 1, "confirm": True})
+            replayed = app.command({"type": "play_recording", "index": 1, "confirm": True, "automatic": True})
+            self.assertEqual(next(item for item in replayed["trains"] if item["id"] == "t1")["speed"], 0)
+        finally:
+            app.close()
+
+    def test_playback_failure_after_motion_stops_and_resets_targets(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "start_recording", "train_id": "train-3"})
+            app.command({"type": "speed", "train_id": "train-3", "speed": 20})
+            app.command({"type": "set_train_function", "train_id": "train-3", "function_number": 2, "enabled": True})
+            app.command({"type": "stop_recording"})
+            app.command({"type": "stop_train", "train_id": "train-3"})
+            track = app.runtime.track
+            with patch.object(track, "stop_train", wraps=track.stop_train) as stop_train,                  patch.object(track, "set_train_function", return_value=CommandResult(False, "set_train_function", "rejected")):
+                with self.assertRaisesRegex(ValueError, "rejected"):
+                    app.command({"type": "play_recording", "index": 0, "confirm": True})
+            self.assertTrue(stop_train.called)
+            control = app.runtime.dispatcher.trains["train-3"]
+            self.assertEqual((control.manual_speed, control.automatic_speed), (0.0, 0.0))
+            self.assertEqual(next(item for item in app.trains if item["id"] == "train-3")["speed"], 0)
         finally:
             app.close()
 

@@ -893,18 +893,21 @@
     const items = rollingStockCatalogue();
     const total = inventory.total != null ? inventory.total : items.reduce((sum, item) => sum + Number(item.count || 0), 0);
     $('#inventory-summary').textContent = `${total} vehicle${total === 1 ? '' : 's'}`;
-    host.innerHTML = items.length ? items.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}</small></span><span class="inventory-type">${escapeHtml(item.type || 'rolling stock')}</span><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : '<div class="empty-state">No rolling stock is assigned to a saved consist yet.</div>';
+    const query = String($('#inventory-search')?.value || '').trim().toLowerCase();
+    const filtered = items.filter((item) => !query || [item.id, item.name, item.type, item.manufacturer, item.model, item.length_mm].some((value) => String(value ?? '').toLowerCase().includes(query)));
+    host.innerHTML = filtered.length ? filtered.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}${item.length_mm ? ` · ${escapeHtml(item.length_mm)} mm` : ''}</small></span><span class="inventory-type">${escapeHtml(item.type || 'rolling stock')}</span><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : `<div class="empty-state">${query ? 'No catalogue entries match that search.' : 'No rolling stock is assigned to a saved consist yet.'}</div>`;
   }
 
   async function saveInventory() {
     const itemId = $('#inventory-id').value.trim();
     const name = $('#inventory-name').value.trim();
     const quantity = Number($('#inventory-quantity').value);
-    if (!itemId || !name || !Number.isInteger(quantity) || quantity < 0) {
-      showToast('Enter a catalogue ID, name, and non-negative whole quantity.', 'warning');
+    const length = Number($('#inventory-length').value);
+    if (!itemId || !name || !Number.isInteger(quantity) || quantity < 0 || !Number.isFinite(length) || length < 0) {
+      showToast('Enter a catalogue ID, name, length, and non-negative whole quantity.', 'warning');
       return;
     }
-    await sendCommand({ type: 'upsert_rolling_stock_inventory', item_id: itemId, name, vehicle_type: $('#inventory-type').value, quantity });
+    await sendCommand({ type: 'upsert_rolling_stock_inventory', item_id: itemId, name, vehicle_type: $('#inventory-type').value, quantity, length_mm: length });
   }
 
   function renderRecording() {
@@ -932,8 +935,8 @@
   async function stopRecording() { await sendCommand({ type: 'stop_recording' }); }
 
   async function playRecording() {
-    if (!window.confirm('Play the last recorded train actions now?')) return;
-    await sendCommand({ type: 'play_recording', index: Math.max(0, ((app.state.recording || {}).history || []).length - 1), confirm: true });
+    if (!window.confirm('Play the last recorded train actions now? The train will be stopped when playback finishes.')) return;
+    await sendCommand({ type: 'play_recording', index: Math.max(0, ((app.state.recording || {}).history || []).length - 1), confirm: true, automatic: true });
   }
 
   function renderProgramming() {
@@ -946,9 +949,9 @@
     if (train && $('#programming-address')) $('#programming-address').value = train.address || train.number || '';
     const state = app.state.programming || {};
     const last = state.last_request;
-    $('#programming-state').textContent = state.supported ? 'Ready' : 'Validation only';
+    $('#programming-state').textContent = state.supported ? 'Ready' : state.detail || 'Transport unavailable';
     $('#programming-status').textContent = last
-      ? `Validated CV${last.cv}=${last.value} for #${last.address} on ${last.target === 'programming_track' ? 'programming track' : 'main track'}; no decoder write was sent.`
+      ? `CV${last.cv}=${last.value} for #${last.address} on ${last.target === 'programming_track' ? 'programming track' : 'main track'} · ${last.status || 'request validated'}.`
       : state.detail || 'No programming request validated.';
   }
 
@@ -2708,6 +2711,7 @@
     $('#write-programming').addEventListener('click', writeProgramming);
     $('#read-programming').addEventListener('click', readProgramming);
     $('#save-inventory').addEventListener('click', saveInventory);
+    $('#inventory-search').addEventListener('input', renderInventory);
     $('#inventory-list').addEventListener('click', (event) => {
       const button = event.target.closest('[data-inventory-adjust]');
       const row = event.target.closest('[data-inventory-id]');

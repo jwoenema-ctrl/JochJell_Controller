@@ -268,9 +268,11 @@
               <span class="tiny-status" id="inventory-summary">0 vehicles</span>
             </div>
             <div class="inventory-editor">
+              <input id="inventory-search" placeholder="Search catalogue, length or type" aria-label="Search rolling stock inventory">
               <input id="inventory-id" placeholder="Catalogue ID" aria-label="Rolling stock catalogue ID">
               <input id="inventory-name" placeholder="Name" aria-label="Rolling stock name">
               <select id="inventory-type" aria-label="Rolling stock type"><option value="coach">Coach</option><option value="wagon">Wagon</option><option value="locomotive">Locomotive</option><option value="vehicle">Vehicle</option></select>
+              <input id="inventory-length" type="number" min="0" step="0.1" placeholder="Length (mm)" aria-label="Rolling stock length in millimetres">
               <input id="inventory-quantity" type="number" min="0" step="1" value="0" aria-label="Rolling stock quantity">
               <button type="button" class="button button-soft" id="save-inventory">Save quantity</button>
             </div>
@@ -289,7 +291,7 @@
               <label>Value<input id="programming-value" type="number" min="0" max="255" step="1" value="0"></label>
             </div>
             <div class="button-row programming-actions"><button type="button" class="button button-soft" id="validate-programming">Validate request</button><button type="button" class="button button-primary" id="write-programming">Program decoder</button><button type="button" class="button button-soft" id="read-programming">Read CV</button></div>
-            <p class="settings-help">This prepares and validates a CV write request. It does not write to the decoder until the Z21 programming transport is enabled.</p>
+              <p class="settings-help">Validate the target first, then explicitly confirm a CV read or write. Main-track programming uses RailCom/POM; service-mode writes require the programming-track transport.</p>
             <p class="settings-status" id="programming-status" role="status">No programming request validated.</p>
           </section>
           <section class="panel calibration-panel" id="calibration-panel">

@@ -66,7 +66,9 @@ This updates the reported traversal and reapplies its limit to the still-active
 request, restoring that request when the new outgoing connection is unrestricted.
 Do not treat this endpoint as telemetry; accurate reports are the caller's
 responsibility. No physical animation position or measured velocity is fabricated.
-Automatic occupancy-only identification and speed calibration are not implemented.
-Decoder speed is normalized against configured model maximum; physical km/h is
-not measured and requires decoder calibration. Tests use a fake transport, never
-live rolling stock.
+Automatic occupancy-only identification is not inferred from R-BUS contacts alone.
+The controller does provide an explicit per-locomotive calibration workflow: it
+runs a bounded 10 km/h movement, records the operator-measured distance, and
+reuses that calibration for coordinate movement and scheduled targets. Decoder
+speed remains normalized against the configured model maximum outside calibrated
+coordinate operations. Tests use a fake transport, never live rolling stock.
