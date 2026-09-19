@@ -947,10 +947,14 @@
     if (trains.some((train) => train.id === app.selectedTrainId)) select.value = app.selectedTrainId;
     const train = trains.find((item) => item.id === select.value) || selectedTrain();
     if (train && $('#programming-address')) $('#programming-address').value = train.address || train.number || '';
+    if (train && $('#programming-new-address')) $('#programming-new-address').value = train.address || train.number || '';
     const state = app.state.programming || {};
     const last = state.last_request;
+    const lastAddress = state.last_address_request;
     $('#programming-state').textContent = state.supported ? 'Ready' : state.detail || 'Transport unavailable';
-    $('#programming-status').textContent = last
+    $('#programming-status').textContent = lastAddress
+      ? `DCC address ${lastAddress.address} → ${lastAddress.new_address} on ${lastAddress.target === 'programming_track' ? 'programming track' : 'main track'} · ${lastAddress.status || 'request validated'}.`
+      : last
       ? `CV${last.cv}=${last.value} for #${last.address} on ${last.target === 'programming_track' ? 'programming track' : 'main track'} · ${last.status || 'request validated'}.`
       : state.detail || 'No programming request validated.';
   }
@@ -999,6 +1003,20 @@
       return;
     }
     await sendCommand(command);
+  }
+
+  async function programDccAddress() {
+    const trainId = $('#programming-train-select').value;
+    const address = Number($('#programming-address').value);
+    const newAddress = Number($('#programming-new-address').value);
+    const target = $('#programming-target').value;
+    if (!trainId || ![address, newAddress].every(Number.isInteger) || address < 1 || newAddress < 1) {
+      showToast('Enter the current and new DCC addresses first.', 'warning');
+      return;
+    }
+    const targetLabel = target === 'programming_track' ? 'programming track' : 'main track';
+    if (!window.confirm(`Program DCC address ${newAddress} for decoder ${address} on the ${targetLabel}? The locomotive will use the new address after programming.`)) return;
+    await sendCommand({ type: 'program_dcc_address', train_id: trainId, address, new_address: newAddress, target, confirm: true });
   }
 
   async function startCalibration() {
@@ -2725,6 +2743,7 @@
     $('#validate-programming').addEventListener('click', validateProgramming);
     $('#write-programming').addEventListener('click', writeProgramming);
     $('#read-programming').addEventListener('click', readProgramming);
+    $('#program-dcc-address').addEventListener('click', programDccAddress);
     $('#save-inventory').addEventListener('click', saveInventory);
     $('#inventory-search').addEventListener('input', renderInventory);
     $('#inventory-list').addEventListener('click', (event) => {

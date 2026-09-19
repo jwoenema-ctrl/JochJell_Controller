@@ -141,9 +141,10 @@ class ControllerApplication:
     _presence_state: dict[str, Any] = field(default_factory=lambda: {"results": [], "summary": {"total": 0, "detected": 0, "unknown": 0, "errors": 0}}, init=False, repr=False)
     _programming_state: dict[str, Any] = field(default_factory=lambda: {
         "last_request": None,
+        "last_address_request": None,
         "last_read": None,
         "supported": False,
-        "detail": "Decoder CV programming is validation-only until the Z21 programming transport is enabled.",
+        "detail": "Decoder CV and address programming is available when the active track transport supports it.",
     }, init=False, repr=False)
     _recording_history: list[PlaybackPlan] = field(default_factory=list, init=False, repr=False)
     _coordinate_execution_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
@@ -1047,8 +1048,8 @@ class ControllerApplication:
     def execute_decoder_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Execute an explicitly confirmed CV write on a real Z21 track."""
 
-        state = self.request_decoder_programming(payload)
-        request = state["last_request"]
+        self.request_decoder_programming(payload)
+        request = self._programming_state["last_request"]
         if self.simulation_mode:
             request["status"] = "simulation_only"
             self._programming_state["detail"] = "Simulation accepted the request without sending a decoder write."
@@ -1065,6 +1066,71 @@ class ControllerApplication:
         self._programming_state["supported"] = True
         self._programming_state["detail"] = result.detail or "Z21 accepted the CV programming request."
         self.events.append({"type": "decoder_programmed", "request": deepcopy(request), "detail": result.detail})
+        return self.programming_state()
+
+    def request_dcc_address_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate a requested decoder-address change without touching hardware."""
+
+        train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+        train = next((item for item in self.trains if item.get("id") == train_id), None)
+        if train is None:
+            raise ValueError(f"Unknown train: {train_id}")
+        target = str(payload.get("target", "main")).strip().lower()
+        if target not in {"main", "programming_track"}:
+            raise ValueError("target must be main or programming_track")
+        try:
+            current_address = int(payload.get("address", train.get("address", train.get("number"))))
+            new_address = int(payload.get("new_address", payload.get("address")))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("current and new DCC addresses must be integers") from exc
+        if not 1 <= current_address <= 9999 or not 1 <= new_address <= 9999:
+            raise ValueError("DCC addresses must be between 1 and 9999")
+        actual_address = train.get("address", train.get("number"))
+        if actual_address not in (None, "") and int(actual_address) != current_address:
+            raise ValueError(f"current DCC address does not match the saved address ({int(actual_address)})")
+        collision = next((item for item in self.trains if item.get("id") != train_id and str(item.get("address", "")) == str(new_address)), None)
+        if collision is not None:
+            raise ValueError(f"DCC address {new_address} is already assigned to {collision.get('name', collision.get('id'))}")
+        request = {
+            "train_id": train_id,
+            "address": current_address,
+            "new_address": new_address,
+            "target": target,
+            "operation": "address",
+            "status": "validated",
+        }
+        self._programming_state["last_address_request"] = request
+        self.events.append({"type": "dcc_address_programming_validated", "request": deepcopy(request)})
+        return self.programming_state()
+
+    def execute_dcc_address_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Program and persist a decoder address after explicit confirmation."""
+
+        self.request_dcc_address_programming(payload)
+        request = self._programming_state["last_address_request"]
+        train = next(item for item in self.trains if item.get("id") == request["train_id"])
+        if self.simulation_mode:
+            train["address"] = request["new_address"]
+            request["status"] = "simulation_only"
+            self._sync_train_database()
+            self._programming_state["supported"] = True
+            self._programming_state["detail"] = "Simulation updated the saved decoder address without sending a hardware write."
+            self.events.append({"type": "dcc_address_programmed", "request": deepcopy(request), "detail": self._programming_state["detail"]})
+            return self.programming_state()
+        if request["target"] == "main" and not self.track_power:
+            raise ValueError("switch track power on before programming on the main")
+        if self.runtime is None or not hasattr(self.runtime.track, "program_dcc_address"):
+            raise ValueError("the active track adapter does not support DCC address programming")
+        result = self.runtime.track.program_dcc_address(train["id"], request["new_address"], target=request["target"])
+        if not result.accepted:
+            request["status"] = "rejected"
+            raise ValueError(result.detail or "Z21 rejected the DCC address programming request")
+        train["address"] = request["new_address"]
+        request["status"] = "sent"
+        self._sync_train_database()
+        self._programming_state["supported"] = True
+        self._programming_state["detail"] = result.detail or "Z21 accepted the DCC address programming request."
+        self.events.append({"type": "dcc_address_programmed", "request": deepcopy(request), "detail": self._programming_state["detail"]})
         return self.programming_state()
 
     def read_decoder_cv(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2133,11 +2199,18 @@ class ControllerApplication:
                 self.events.append({"type": "rolling_stock_inventory_updated", "item_id": item.item_id, "quantity": item.quantity})
             elif kind in {"request_programming", "validate_programming"}:
                 self.request_decoder_programming(payload)
+            elif kind in {"request_dcc_address_programming", "validate_dcc_address"}:
+                self.request_dcc_address_programming(payload)
             elif kind in {"program_decoder", "program_cv"}:
                 if payload.get("confirm") is True:
                     self.execute_decoder_programming(payload)
                 else:
                     self.request_decoder_programming(payload)
+            elif kind in {"program_dcc_address", "program_decoder_address"}:
+                if payload.get("confirm") is True:
+                    self.execute_dcc_address_programming(payload)
+                else:
+                    self.request_dcc_address_programming(payload)
             elif kind in {"read_decoder_cv", "read_cv"}:
                 self.read_decoder_cv(payload)
             elif kind in {"cancel_calibration", "stop_calibration"}:

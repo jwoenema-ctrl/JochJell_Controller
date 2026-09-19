@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
 
 from backend.infrastructure.z21 import (
     LAN_RMBUS_DATACHANGED,
@@ -24,6 +25,8 @@ from backend.infrastructure.z21 import (
     encode_xbus,
     iter_datasets,
 )
+from backend.infrastructure.interfaces import CommandResult
+from backend.infrastructure.real_track import Z21TrackSystem
 
 
 class FakeDatagramSocket:
@@ -344,6 +347,22 @@ class Z21TransportTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertFalse(detected)
         self.assertTrue(absent_transport.connection_status().connected)
+
+    def test_program_dcc_address_writes_short_and_long_address_sequences(self) -> None:
+        track = Z21TrackSystem(Mock())
+        track.register_train("T1", 7)
+        track.read_cv = Mock(return_value=(CommandResult(True, "read_cv", "ok"), 0))
+        track.write_cv = Mock(return_value=CommandResult(True, "write_cv", "ok"))
+
+        result = track.program_dcc_address("T1", 300, target="programming_track")
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(track.write_cv.call_args_list, [
+            unittest.mock.call("T1", 17, 193, target="programming_track"),
+            unittest.mock.call("T1", 18, 44, target="programming_track"),
+            unittest.mock.call("T1", 29, 32, target="programming_track"),
+        ])
+        self.assertEqual(track._train_addresses["T1"], 300)
 
 
 if __name__ == "__main__":

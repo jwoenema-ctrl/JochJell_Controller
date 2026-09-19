@@ -280,6 +280,43 @@ class Z21TrackSystem:
             return self.transport.write_cv_pom(address, cv, value)
         return self.transport.write_cv(cv, value)
 
+    def program_dcc_address(self, train_id: str, address: int, *, target: str = "programming_track") -> CommandResult:
+        """Program a short or long DCC address and select it through CV29.
+
+        The address bytes are written before CV29 so a decoder does not switch
+        to the new address until the complete address is present.  CV29 is
+        read first and only its long-address bit is changed; all other decoder
+        options are preserved.
+        """
+
+        target = str(target).strip().lower()
+        if target not in {"main", "programming_track"}:
+            return CommandResult(False, "program_dcc_address", "target must be main or programming_track")
+        try:
+            address = int(address)
+        except (TypeError, ValueError):
+            return CommandResult(False, "program_dcc_address", "DCC address must be an integer")
+        if not 1 <= address <= 9999:
+            return CommandResult(False, "program_dcc_address", "DCC address must be between 1 and 9999")
+        result, cv29 = self.read_cv(train_id, 29, target=target)
+        if not result.accepted or cv29 is None:
+            return CommandResult(False, "program_dcc_address", result.detail or "could not read CV29 before address programming")
+        try:
+            cv29 = int(cv29)
+        except (TypeError, ValueError):
+            return CommandResult(False, "program_dcc_address", "Z21 returned an invalid CV29 value")
+        long_address = address > 127
+        writes = (
+            ((17, 192 + ((address >> 8) & 0x3F)), (18, address & 0xFF))
+            if long_address else ((1, address),)
+        ) + ((29, (cv29 | 0x20) if long_address else (cv29 & ~0x20)),)
+        for cv, value in writes:
+            result = self.write_cv(train_id, cv, value, target=target)
+            if not result.accepted:
+                return CommandResult(False, "program_dcc_address", result.detail or f"CV{cv} write was rejected")
+        self.register_train(train_id, address, forward=self.get_train_direction(train_id))
+        return CommandResult(True, "program_dcc_address", f"DCC address {address} programmed via {target}")
+
     def set_power(self, enabled: bool) -> CommandResult:
         """Switch Z21 track voltage using the LAN X-BUS command."""
 

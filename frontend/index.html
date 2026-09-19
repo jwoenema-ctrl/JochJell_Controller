@@ -285,12 +285,13 @@
             </div>
             <div class="programming-form">
               <label>Train<select id="programming-train-select" aria-label="Train to program"></select></label>
-              <label>DCC address<input id="programming-address" type="number" min="1" max="9999" step="1"></label>
+              <label>Current DCC address<input id="programming-address" type="number" min="1" max="9999" step="1"></label>
+              <label>New DCC address<input id="programming-new-address" type="number" min="1" max="9999" step="1"></label>
               <label>Target<select id="programming-target"><option value="main">Main track</option><option value="programming_track">Programming track</option></select></label>
               <label>CV<input id="programming-cv" type="number" min="1" max="1024" step="1" value="29"></label>
               <label>Value<input id="programming-value" type="number" min="0" max="255" step="1" value="0"></label>
             </div>
-            <div class="button-row programming-actions"><button type="button" class="button button-soft" id="validate-programming">Validate request</button><button type="button" class="button button-primary" id="write-programming">Program decoder</button><button type="button" class="button button-soft" id="read-programming">Read CV</button></div>
+            <div class="button-row programming-actions"><button type="button" class="button button-soft" id="validate-programming">Validate request</button><button type="button" class="button button-primary" id="write-programming">Program decoder</button><button type="button" class="button button-soft" id="read-programming">Read CV</button><button type="button" class="button button-soft" id="program-dcc-address">Program DCC address</button></div>
               <p class="settings-help">Validate the target first, then explicitly confirm a CV read or write. Main-track programming uses RailCom/POM; service-mode writes require the programming-track transport.</p>
             <p class="settings-status" id="programming-status" role="status">No programming request validated.</p>
           </section>

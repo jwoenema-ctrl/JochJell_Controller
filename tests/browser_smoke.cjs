@@ -63,6 +63,16 @@ async function shot(page, name) {
   assert.match(await page.locator('.train-row').first().textContent(), /→|#/, 'Locomotive rows show service data');
   await page.getByRole('link', { name: 'Overview', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#train-panel .panel-heading h2').textContent === 'Train overview');
+  await page.getByRole('link', { name: 'Programming', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#programming-panel').classList.contains('is-hidden') === false);
+  await page.locator('#programming-new-address').fill('7');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#program-dcc-address').click();
+  await page.waitForFunction(() => document.querySelector('#programming-status').textContent.includes('DCC address 3 → 7'));
+  const programmedState = await (await page.request.get(`${url}/api/state`)).json();
+  assert.equal(programmedState.trains.find(train => train.id === 't2').number, '7', 'Programming must persist a new DCC address');
+  await page.getByRole('link', { name: 'Overview', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#train-panel .panel-heading h2').textContent === 'Train overview');
   await page.getByRole('button', { name: 'Settings', exact: true }).first().click();
   await page.waitForFunction(() => document.querySelector('#settings-save-status').textContent.includes('up to date'));
   assert.equal(await page.locator('.dashboard').isVisible(), false, 'Settings must be a distinct page');
