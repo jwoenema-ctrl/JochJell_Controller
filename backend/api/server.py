@@ -1168,7 +1168,15 @@ class ControllerApplication:
         if not self.simulation_mode and hasattr(self.runtime.track, "probe_train_address"):
             def probe(address: int) -> dict[str, Any]:
                 result = self.runtime.track.probe_train_address(address)
-                return {"detected": result.accepted, "source": "Z21 RailCom", "detail": result.detail}
+                railcom_detected = bool(result.accepted and result.command == "probe_railcom")
+                station_known = bool(result.accepted and result.command == "probe_loco_info")
+                source = "Z21 RailCom" if railcom_detected else "Z21 locomotive info"
+                return {
+                    "detected": railcom_detected,
+                    "known_to_station": station_known,
+                    "source": source,
+                    "detail": result.detail,
+                }
         else:
             def probe(address: int) -> dict[str, Any]:
                 return {"detected": addresses.get(int(address)) in reported, "source": "reported track feedback"}

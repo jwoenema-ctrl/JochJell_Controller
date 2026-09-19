@@ -24,7 +24,9 @@ Modular Python controller and browser dashboard for an H0 model railway using th
   storing a target; execution is a separate confirmed action and always has a
   bounded stop timer, including on the native app.
 - **Ping saved DCC IDs** scans all saved locomotives and reports detected, unknown
-  and error results using available track feedback.
+  and error results using RailCom when available. A Z21 locomotive-info reply is
+  shown as station-known context, but is never counted as physical presence by
+  itself because that reply comes from the command station rather than the decoder.
 - The Trains workspace includes persistent rolling-stock quantities, a guarded
   DCC CV read/write panel, and an Automation action recorder for speed, direction,
   and decoder-function actions.

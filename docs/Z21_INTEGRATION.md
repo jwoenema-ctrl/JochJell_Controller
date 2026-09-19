@@ -17,7 +17,10 @@ track-power control has the same command boundary as locomotive and turnout cont
 R-BUS feedback polling is available through `Z21TrackSystem.bind_feedback()` and
 `poll_feedback()`. Each mapped contact becomes protected physical occupancy in the dispatcher;
 the current adapter deliberately labels it as a sensor until RailCom or a separate train-ID
-service can associate the contact with a specific train.
+service can associate the contact with a specific train. The saved-address presence scan first
+uses RailCom and only counts a matching RailCom address as physical detection. It also issues
+`LAN_X_GET_LOCO_INFO` as a fallback diagnostic: a matching reply means the Z21 knows the address,
+not that a decoder is physically present, and the UI keeps that result in the unknown category.
 
 `Z21TrackSystem` translates normalized application commands into those packets. It intentionally
 requires a DCC address for real train control; the train database owns that mapping so UI IDs and

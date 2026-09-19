@@ -607,6 +607,21 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_presence_keeps_station_known_fallback_out_of_physical_detected_count(self) -> None:
+        app = ControllerApplication.sample()
+        try:
+            app.simulation_mode = False
+            app.runtime.track.probe_train_address = lambda _address: CommandResult(
+                True, "probe_loco_info", "Z21 locomotive information received"
+            )
+            presence = app.scan_train_presence()
+            self.assertTrue(presence["results"])
+            self.assertTrue(all(item["response"]["known_to_station"] for item in presence["results"] if item["dcc_address"] is not None))
+            self.assertTrue(all(item["detected"] is False for item in presence["results"] if item["dcc_address"] is not None))
+            self.assertEqual(presence["summary"]["detected"], 0)
+        finally:
+            app.close()
+
     def test_saved_route_crud_replans_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             database_path = f"{folder}/controller.sqlite3"

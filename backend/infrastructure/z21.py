@@ -592,8 +592,14 @@ class Z21LanTransport:
         expected_header: int | None = None,
         command: str = "request_dataset",
         keep_connection_on_timeout: bool = False,
+        response_matches: Callable[[tuple[Z21Dataset, ...]], bool] | None = None,
     ) -> tuple[CommandResult, tuple[Z21Dataset, ...]]:
-        """Send one request and decode the combined response datasets."""
+        """Send one request and decode the combined response datasets.
+
+        ``response_matches`` is an optional content-aware matcher for commands
+        whose response header is shared by unrelated broadcasts.  The default
+        header matcher remains compatible with the simpler request methods.
+        """
 
         if not self._status.connected or self._socket is None:
             return CommandResult(False, command, f"Z21 is not connected at {self.endpoint}: {self._status.detail or self._status.state.value}"), ()
@@ -606,9 +612,12 @@ class Z21LanTransport:
             sent = self._socket.sendto(packet, (self.host, self.port))
             if sent != len(packet):
                 raise OSError("short UDP send")
-            datasets = self._receive_until(
+            matcher = response_matches or (
                 lambda received: expected_header is None
-                or any(dataset.header == expected_header for dataset in received),
+                or any(dataset.header == expected_header for dataset in received)
+            )
+            datasets = self._receive_until(
+                matcher,
             )
         except TimeoutError as exc:
             if keep_connection_on_timeout:
@@ -719,12 +728,17 @@ class Z21LanTransport:
             return CommandResult(False, "probe_railcom", str(exc)), False
         result, datasets = self.request_datasets(
             packet,
-            expected_header=LAN_RAILCOM_DATACHANGED,
             command="probe_railcom",
             keep_connection_on_timeout=True,
+            response_matches=lambda received: any(
+                dataset.header == LAN_RAILCOM_DATACHANGED
+                and len(dataset.data) >= 2
+                and int.from_bytes(dataset.data[:2], "little") == int(address)
+                for dataset in received
+            ),
         )
         if not result.accepted:
-            return CommandResult(False, "probe_railcom", "no RailCom response"), False
+            return CommandResult(False, "probe_railcom", result.detail or "no RailCom response"), False
         expected = int(address)
         for dataset in datasets:
             if dataset.header == LAN_RAILCOM_DATACHANGED and len(dataset.data) >= 2:
@@ -732,6 +746,44 @@ class Z21LanTransport:
                 if seen == expected:
                     return CommandResult(True, "probe_railcom", "RailCom decoder response received", dataset.data), True
         return CommandResult(False, "probe_railcom", "RailCom response did not identify the requested address"), False
+
+    @staticmethod
+    def _loco_info_address(dataset: Z21Dataset) -> int | None:
+        """Decode the address from a LAN_X_LOCO_INFO response dataset."""
+
+        data = dataset.data
+        if dataset.header != LAN_X_HEADER or len(data) < 4 or data[0] != LAN_X_LOCO_INFO:
+            return None
+        return ((data[1] & 0x3F) << 8) | data[2]
+
+    def probe_loco_info(self, address: int) -> tuple[CommandResult, bool]:
+        """Poll Z21 locomotive information for a saved address.
+
+        This is a secondary fallback for decoders without usable RailCom.  A
+        positive result means that the command station returned information for
+        the requested address; RailCom remains the stronger physical-presence
+        signal when it is available.
+        """
+
+        try:
+            packet = build_get_loco_info(address)
+        except ValueError as exc:
+            return CommandResult(False, "probe_loco_info", str(exc)), False
+        expected = int(address)
+        result, datasets = self.request_datasets(
+            packet,
+            command="probe_loco_info",
+            keep_connection_on_timeout=True,
+            response_matches=lambda received: any(
+                self._loco_info_address(dataset) == expected for dataset in received
+            ),
+        )
+        if not result.accepted:
+            return CommandResult(False, "probe_loco_info", result.detail or "no locomotive-info response"), False
+        for dataset in datasets:
+            if self._loco_info_address(dataset) == expected:
+                return CommandResult(True, "probe_loco_info", "Z21 locomotive information received", dataset.data), True
+        return CommandResult(False, "probe_loco_info", "locomotive-info response did not identify the requested address"), False
 
     def set_loco_drive(
         self,

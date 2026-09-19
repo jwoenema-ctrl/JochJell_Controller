@@ -1652,8 +1652,9 @@
     $$('.train-row', $('#train-list')).forEach((row) => row.addEventListener('click', () => selectTrain(row.dataset.trainId)));
     const presence = app.state.presence || {};
     const summary = presence.summary || {};
+    const stationKnown = (presence.results || []).filter((item) => item.response && item.response.known_to_station).length;
     $('#train-presence-status').textContent = summary.total
-      ? summary.detected + ' detected · ' + summary.unknown + ' unknown · ' + summary.errors + ' errors. Presence is based on available track feedback.'
+      ? summary.detected + ' detected · ' + summary.unknown + ' unknown · ' + summary.errors + ' errors.' + (stationKnown ? ` ${stationKnown} known to Z21 only; RailCom is required for physical detection.` : ' Presence is based on available track feedback.')
       : 'No train presence scan run yet.';
   }
 

@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 from backend.infrastructure.z21 import (
     LAN_RMBUS_DATACHANGED,
+    LAN_X_LOCO_INFO,
     LAN_X_HEADER,
     Z21_MAX_UDP_PAYLOAD,
     Z21LanTransport,
@@ -347,6 +348,48 @@ class Z21TransportTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertFalse(detected)
         self.assertTrue(absent_transport.connection_status().connected)
+
+    def test_railcom_probe_ignores_unrelated_broadcast_before_requested_address(self) -> None:
+        unrelated = encode_dataset(0x0088, b"\x0c\x00" + bytes(11))
+        requested = encode_dataset(0x0088, b"\x07\x00" + bytes(11))
+        socket = FakeDatagramSocket([version_reply(), unrelated, requested])
+        transport = connected_transport(socket)
+
+        result, detected = transport.probe_railcom(7)
+
+        self.assertTrue(result.accepted)
+        self.assertTrue(detected)
+        self.assertEqual(result.payload, requested[4:])
+
+    def test_loco_info_probe_decodes_requested_address_and_keeps_connection_on_timeout(self) -> None:
+        reply = encode_xbus(LAN_X_LOCO_INFO, 0x00, 0x07, 0x00)
+        socket = FakeDatagramSocket([version_reply(), reply])
+        transport = connected_transport(socket)
+
+        result, detected = transport.probe_loco_info(7)
+
+        self.assertTrue(result.accepted)
+        self.assertTrue(detected)
+        self.assertEqual(result.command, "probe_loco_info")
+
+        absent_socket = FakeDatagramSocket([version_reply(), TimeoutError("no loco info")])
+        absent_transport = connected_transport(absent_socket)
+        result, detected = absent_transport.probe_loco_info(7)
+        self.assertFalse(result.accepted)
+        self.assertFalse(detected)
+        self.assertTrue(absent_transport.connection_status().connected)
+
+    def test_real_track_uses_loco_info_as_non_railcom_fallback(self) -> None:
+        reply = encode_xbus(LAN_X_LOCO_INFO, 0x00, 0x07, 0x00)
+        socket = FakeDatagramSocket([version_reply(), TimeoutError("no RailCom"), reply])
+        transport = connected_transport(socket)
+        track = Z21TrackSystem(transport)
+
+        result = track.probe_train_address(7)
+
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.command, "probe_loco_info")
+        self.assertTrue(transport.connection_status().connected)
 
     def test_program_dcc_address_writes_short_and_long_address_sequences(self) -> None:
         track = Z21TrackSystem(Mock())

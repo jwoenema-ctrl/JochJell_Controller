@@ -126,12 +126,21 @@ class Z21TrackSystem:
         return self.transport.connection_status()
 
     def probe_train_address(self, address: int) -> CommandResult:
-        """Poll RailCom for one DCC address without treating no reply as link loss."""
+        """Poll one DCC address without treating a missing reply as link loss.
+
+        RailCom is preferred because it identifies a decoder on the track.  A
+        Z21 locomotive-info response is retained as a documented fallback for
+        decoders that do not provide RailCom data.
+        """
 
         result, detected = self.transport.probe_railcom(address)
         if detected:
             return result
-        return CommandResult(False, "probe_train_address", result.detail or "no decoder response")
+        fallback, detected = self.transport.probe_loco_info(address)
+        if detected:
+            return fallback
+        detail = "; ".join(value for value in (result.detail, fallback.detail) if value)
+        return CommandResult(False, "probe_train_address", detail or "no decoder response")
 
     def read_power_telemetry(self) -> dict:
         result, datasets = self.transport.request_datasets(
