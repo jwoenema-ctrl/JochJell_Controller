@@ -76,6 +76,7 @@ class SimulatedTrackSystem:
         self._authorities: dict[str, tuple[str, ...]] = {}
         self._signals: dict[str, _Signal] = {}
         self._turnouts: dict[str, int] = {}
+        self._train_functions: dict[str, dict[int, bool]] = {}
         self._powered = True
         self._tick = 0
         self._lock = RLock()
@@ -160,6 +161,7 @@ class SimulatedTrackSystem:
         with self._lock:
             if self._trains.pop(train_id, None) is None:
                 return CommandResult(False, "remove_train", "unknown train")
+            self._train_functions.pop(train_id, None)
             self._authorities.pop(train_id, None)
             self._refresh_safety_targets()
         return CommandResult(True, "remove_train", "train removed")
@@ -209,6 +211,27 @@ class SimulatedTrackSystem:
         """Set one train's target speed to zero."""
 
         return self.set_train_speed(train_id, 0.0)
+
+    def set_train_function(self, train_id: str, function_number: int, *, enabled: bool) -> CommandResult:
+        """Store a decoder function state in simulation for parity with Z21."""
+
+        try:
+            number = int(function_number)
+        except (TypeError, ValueError):
+            return CommandResult(False, "set_train_function", "function number must be an integer")
+        if not 0 <= number <= 31:
+            return CommandResult(False, "set_train_function", "function number must be between 0 and 31")
+        with self._lock:
+            if train_id not in self._trains:
+                return CommandResult(False, "set_train_function", "unknown train")
+            self._train_functions.setdefault(train_id, {})[number] = bool(enabled)
+        return CommandResult(True, "set_train_function", "decoder function updated")
+
+    def get_train_functions(self, train_id: str) -> Mapping[int, bool]:
+        """Return the simulated decoder function states for one train."""
+
+        with self._lock:
+            return dict(self._train_functions.get(train_id, {}))
 
     def set_power(self, enabled: bool) -> CommandResult:
         """Switch simulated track power on or off."""

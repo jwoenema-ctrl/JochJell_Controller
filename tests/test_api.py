@@ -65,6 +65,19 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_recorded_decoder_function_replays_in_simulation(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "start_recording", "train_id": "train-3"})
+            app.command({"type": "set_train_function", "train_id": "train-3", "function_number": 2, "enabled": True})
+            app.command({"type": "stop_recording"})
+            replayed = app.command({"type": "play_recording", "index": 0, "confirm": True})
+            train = next(item for item in replayed["trains"] if item["id"] == "t2")
+            self.assertTrue(train["decoder_function_states"]["2"])
+        finally:
+            app.close()
+
     def test_calibrated_coordinate_execution_stops_after_bounded_timer(self) -> None:
         app = ControllerApplication.sample()
         app.stop_motion_clock()

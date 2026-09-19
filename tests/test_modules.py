@@ -36,6 +36,14 @@ class ModuleTests(unittest.TestCase):
         self.assertEqual(snapshot.occupied_blocks, {"B01": ("T2",), "B02": ("T1",)})
         self.assertEqual(next(item for item in snapshot.trains if item.train_id == "T2").target_speed, 0)
 
+    def test_simulator_remembers_decoder_function_states(self) -> None:
+        track = SimulatedTrackSystem(blocks=["B01"])
+        track.add_train("T1", "B01")
+        self.assertTrue(track.set_train_function("T1", 2, enabled=True).accepted)
+        self.assertEqual(track.get_train_functions("T1"), {2: True})
+        self.assertTrue(track.set_train_function("T1", 2, enabled=False).accepted)
+        self.assertEqual(track.get_train_functions("T1"), {2: False})
+
     def test_database_and_safety_services(self) -> None:
         with SQLiteTrainDatabase() as database:
             database.upsert(TrainModel("T1", "Test locomotive", decoder_address=3))
