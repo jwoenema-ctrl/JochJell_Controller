@@ -139,7 +139,15 @@ class ControllerApplication:
     _motion_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _scheduler_remainder_seconds: float = field(default=0.0, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
-    _presence_state: dict[str, Any] = field(default_factory=lambda: {"results": [], "summary": {"total": 0, "detected": 0, "unknown": 0, "errors": 0}}, init=False, repr=False)
+    _presence_state: dict[str, Any] = field(default_factory=lambda: {
+        "results": [],
+        "summary": {"total": 0, "detected": 0, "unknown": 0, "errors": 0},
+        "running": False,
+        "started_at": None,
+        "completed_at": None,
+        "error": None,
+    }, init=False, repr=False)
+    _presence_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _programming_state: dict[str, Any] = field(default_factory=lambda: {
         "last_request": None,
         "last_address_request": None,
@@ -280,6 +288,10 @@ class ControllerApplication:
             self.stop_background_refresh()
         except Exception:
             pass
+        worker = self._presence_thread
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=0.2)
+        self._presence_thread = None
         try:
             if runtime is not None:
                 try:
@@ -1161,13 +1173,40 @@ class ControllerApplication:
         return self.programming_state()
 
     def scan_train_presence(self) -> dict[str, Any]:
+        """Synchronously scan saved addresses for direct callers and tests."""
+
         if self.runtime is None:
             raise ValueError("runtime is not available")
-        reported = {motion.train_id for motion in self.runtime.track.get_snapshot().trains}
-        addresses = {int(train.get("address")): train["id"] for train in self.trains if str(train.get("address", "")).isdigit()}
-        if not self.simulation_mode and hasattr(self.runtime.track, "probe_train_address"):
+        with self._lock:
+            saved_trains = deepcopy(self.trains)
+            reported = {motion.train_id for motion in self.runtime.track.get_snapshot().trains}
+            track = self.runtime.track
+            simulation_mode = self.simulation_mode
+        result = self._scan_presence_records(saved_trains, reported, track=track, simulation_mode=simulation_mode)
+        with self._lock:
+            self._presence_state = {
+                **result,
+                "running": False,
+                "started_at": self._presence_state.get("started_at"),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "error": None,
+            }
+            return deepcopy(self._presence_state)
+
+    def _scan_presence_records(
+        self,
+        saved_trains: list[dict[str, Any]],
+        reported: set[str],
+        *,
+        track: Any,
+        simulation_mode: bool,
+    ) -> dict[str, Any]:
+        """Scan an immutable caller snapshot without acquiring the app lock."""
+
+        addresses = {int(train.get("address")): train["id"] for train in saved_trains if str(train.get("address", "")).isdigit()}
+        if not simulation_mode and hasattr(track, "probe_train_address"):
             def probe(address: int) -> dict[str, Any]:
-                result = self.runtime.track.probe_train_address(address)
+                result = track.probe_train_address(address)
                 railcom_detected = bool(result.accepted and result.command == "probe_railcom")
                 station_known = bool(result.accepted and result.command == "probe_loco_info")
                 source = "Z21 RailCom" if railcom_detected else "Z21 locomotive info"
@@ -1181,8 +1220,48 @@ class ControllerApplication:
             def probe(address: int) -> dict[str, Any]:
                 return {"detected": addresses.get(int(address)) in reported, "source": "reported track feedback"}
         detector = SavedTrainPresenceService(probe)
-        self._presence_state = detector.scan(self.trains).as_dict()
-        self.events.append({"type": "train_presence_scan", "summary": self._presence_state["summary"]})
+        return detector.scan(saved_trains).as_dict()
+
+    def _start_presence_scan(self) -> dict[str, Any]:
+        """Start a non-blocking presence scan from a lock-protected snapshot."""
+
+        if self.runtime is None:
+            raise ValueError("runtime is not available")
+        if self._presence_thread is not None and self._presence_thread.is_alive():
+            return deepcopy(self._presence_state)
+        saved_trains = deepcopy(self.trains)
+        reported = {motion.train_id for motion in self.runtime.track.get_snapshot().trains}
+        track = self.runtime.track
+        simulation_mode = self.simulation_mode
+        started_at = datetime.now(timezone.utc).isoformat()
+        self._presence_state = {
+            **self._presence_state,
+            "running": True,
+            "started_at": started_at,
+            "completed_at": None,
+            "error": None,
+        }
+
+        def worker() -> None:
+            try:
+                result = self._scan_presence_records(saved_trains, reported, track=track, simulation_mode=simulation_mode)
+                error = None
+            except Exception as exc:  # Keep one hardware scan from killing the controller worker.
+                result = {"results": [], "summary": {"total": 0, "detected": 0, "unknown": 0, "errors": 1}}
+                error = f"{type(exc).__name__}: {exc}"
+            with self._lock:
+                self._presence_state = {
+                    **result,
+                    "running": False,
+                    "started_at": started_at,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "error": error,
+                }
+                self.events.append({"type": "train_presence_scan", "summary": self._presence_state["summary"], "error": error})
+                self._presence_thread = None
+
+        self._presence_thread = threading.Thread(target=worker, name="h0-train-presence", daemon=True)
+        self._presence_thread.start()
         return deepcopy(self._presence_state)
 
     def _validate_schedule_coordinate(self, schedule: dict[str, Any]) -> None:
@@ -2243,7 +2322,7 @@ class ControllerApplication:
                 train["speed"] = 0
                 self.events.append({"type": "calibration_started", "run_id": run.run_id, "train_id": train_id})
             elif kind in {"scan_train_presence", "ping_train_addresses", "detect_trains"}:
-                self.scan_train_presence()
+                self._start_presence_scan()
             elif kind in {"start_recording", "begin_recording"}:
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 if not any(item.get("id") == train_id for item in self.trains):

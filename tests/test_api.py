@@ -622,6 +622,32 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_presence_command_returns_immediately_and_finishes_in_background(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.simulation_mode = False
+            app.trains[0]["address"] = 7
+
+            def slow_station_probe(_address: int) -> CommandResult:
+                time.sleep(0.2)
+                return CommandResult(True, "probe_loco_info", "station knows address")
+
+            app.runtime.track.probe_train_address = slow_station_probe
+            started_at = time.monotonic()
+            started = app.command({"type": "scan_train_presence"})
+            self.assertLess(time.monotonic() - started_at, 0.15)
+            self.assertTrue(started["presence"]["running"])
+            deadline = time.monotonic() + 2
+            while app.train_presence_state()["running"] and time.monotonic() < deadline:
+                time.sleep(0.02)
+            completed = app.train_presence_state()
+            self.assertFalse(completed["running"])
+            self.assertIsNotNone(completed["completed_at"])
+            self.assertIsNone(completed["error"])
+        finally:
+            app.close()
+
     def test_saved_route_crud_replans_and_persists(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             database_path = f"{folder}/controller.sqlite3"

@@ -1653,7 +1653,9 @@
     const presence = app.state.presence || {};
     const summary = presence.summary || {};
     const stationKnown = (presence.results || []).filter((item) => item.response && item.response.known_to_station).length;
-    $('#train-presence-status').textContent = summary.total
+    $('#train-presence-status').textContent = presence.running
+      ? 'Scanning saved DCC IDs… the controller remains responsive.'
+      : summary.total
       ? summary.detected + ' detected · ' + summary.unknown + ' unknown · ' + summary.errors + ' errors.' + (stationKnown ? ` ${stationKnown} known to Z21 only; RailCom is required for physical detection.` : ' Presence is based on available track feedback.')
       : 'No train presence scan run yet.';
   }
