@@ -1534,8 +1534,22 @@
 
   function renderTrainList() {
     const query = app.filter.trim().toLowerCase();
-    const trains = app.state.trains.filter((train) => !query || [train.name, train.number, train.position, train.status].join(' ').toLowerCase().includes(query));
-    $('#train-list').innerHTML = trains.length ? trains.map((train) => `<button class="train-row ${train.id === app.selectedTrainId ? 'is-selected' : ''}" data-train-id="${escapeHtml(train.id)}"><span class="train-cell-main"><strong>${escapeHtml(train.name || `Train ${train.number}`)}</strong><small>${escapeHtml(train.class || 'Rolling stock')} · #${escapeHtml(train.number || '—')}</small></span><span class="train-position">${escapeHtml(train.position || '—')}</span><span class="train-status ${train.status === 'Delayed' ? 'warning' : ''}"><i class="signal-dot ${train.status === 'Delayed' ? 'yellow' : 'green'}"></i>${escapeHtml(train.status || 'Unknown')}</span><span class="train-speed">${Math.round(Number(train.speed) || 0)}<small> km/h</small></span></button>`).join('') : `<div class="empty-state">No trains match “${escapeHtml(app.filter)}”.</div>`;
+    const locomotiveView = app.workspace === 'trains' && app.trainSection === 'locomotives';
+    const source = locomotiveView ? app.state.trains.filter((train) => {
+      const type = String(train.vehicle_type || train.type || '').trim().toLowerCase();
+      return !type || ['locomotive', 'loco', 'engine'].includes(type);
+    }) : app.state.trains;
+    const trains = source.filter((train) => !query || [train.name, train.number, train.position, train.status, train.destination, train.destination_block_id, train.class].join(' ').toLowerCase().includes(query));
+    const heading = $('#train-panel .panel-heading h2');
+    if (heading) heading.textContent = locomotiveView ? 'Locomotives' : 'Train overview';
+    const eyebrow = $('#train-panel .panel-heading .eyebrow');
+    if (eyebrow) eyebrow.textContent = locomotiveView ? 'LOCOMOTIVE FLEET' : 'FLEET & POSITIONS';
+    const empty = locomotiveView ? 'No locomotive records match the current filter.' : `No trains match “${escapeHtml(app.filter)}”.`;
+    $('#train-list').innerHTML = trains.length ? trains.map((train) => {
+      const destination = train.next_destination || train.destination || train.destination_block_id;
+      const mode = train.mode === 'automatic' || train.class === 'Automatic' ? 'Automatic' : train.mode === 'manual' || train.class === 'Manual' ? 'Manual' : train.class || 'Stopped';
+      return `<button class="train-row ${train.id === app.selectedTrainId ? 'is-selected' : ''}" data-train-id="${escapeHtml(train.id)}"><span class="train-cell-main"><strong>${escapeHtml(train.name || `Train ${train.number}`)}</strong><small>${escapeHtml(mode)} · #${escapeHtml(train.number || '—')}${destination ? ` · → ${escapeHtml(destination)}` : ''}</small></span><span class="train-position">${escapeHtml(train.position || '—')}</span><span class="train-status ${train.status === 'Delayed' ? 'warning' : ''}"><i class="signal-dot ${train.status === 'Delayed' ? 'yellow' : 'green'}"></i>${escapeHtml(train.status || 'Unknown')}</span><span class="train-speed">${Math.round(Number(train.speed) || 0)}<small> km/h</small></span></button>`;
+    }).join('') : `<div class="empty-state">${empty}</div>`;
     $$('.train-row', $('#train-list')).forEach((row) => row.addEventListener('click', () => selectTrain(row.dataset.trainId)));
     const presence = app.state.presence || {};
     const summary = presence.summary || {};
@@ -2202,7 +2216,7 @@
     $('#scan-panel').classList.toggle('is-hidden', page !== 'scans');
     $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     const trainSection = page === 'trains' ? app.trainSection : null;
-    $('#train-panel').classList.toggle('is-hidden', page === 'trains' ? trainSection !== 'overview' : page !== 'dispatch');
+    $('#train-panel').classList.toggle('is-hidden', page === 'trains' ? !['overview', 'locomotives'].includes(trainSection) : page !== 'dispatch');
     // Keep the selected train editor available on the default overview for
     // existing workflows; the Locomotives tab simply focuses the same module.
     $('#train-editor-panel').classList.toggle('is-hidden', page !== 'trains');
@@ -2624,6 +2638,7 @@
       app.trainSection = link.dataset.trainSection || 'overview';
       if (app.workspace !== 'trains') navigateWorkspace('trains');
       else updateWorkspaceVisibility();
+      renderTrainList();
       const target = document.querySelector(link.getAttribute('href'));
       target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }));
