@@ -1068,7 +1068,30 @@
     return { x: Number(block.x || 0) + Number(block.width || 100) / 2, y: Number(block.y || 0) + Number(block.height || 50) / 2 };
   }
 
-  function edgePath(from, to) {
+  function edgeControlPoints(from, to, edge) {
+    const controls = Array.isArray(edge && (edge.control_points || edge.controlPoints))
+      ? (edge.control_points || edge.controlPoints).map((point) => ({ x: Number(point.x), y: Number(point.y) })).filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+      : [];
+    return [blockCenter(from), ...controls, blockCenter(to)];
+  }
+
+  function splinePath(points) {
+    if (points.length < 2) return '';
+    if (points.length === 2 && Math.abs(points[0].y - points[1].y) < 8) return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
+    let path = `M ${points[0].x} ${points[0].y}`;
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const start = points[index]; const end = points[index + 1];
+      const previous = points[index - 1] || start; const next = points[index + 2] || end;
+      const c1 = { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 };
+      const c2 = { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 };
+      path += ` C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`;
+    }
+    return path;
+  }
+
+  function edgePath(from, to, edge) {
+    const points = edgeControlPoints(from, to, edge);
+    if (points.length > 2) return splinePath(points);
     const start = blockCenter(from); const end = blockCenter(to);
     if (Math.abs(start.y - end.y) < 8) return `M ${start.x} ${start.y} L ${end.x} ${end.y}`;
     const middleX = (start.x + end.x) / 2;
@@ -1128,7 +1151,7 @@
     const blockMap = Object.fromEntries(blocks.flatMap((block) => [[block.id, block], [String(block.id || '').toLowerCase(), block]]));
     const edges = normalizedEdges(layout, blocks);
     const edgeMarkup = edges.map((edge) => {
-      const path = edgePath(blockMap[edge.from], blockMap[edge.to]);
+      const path = edgePath(blockMap[edge.from], blockMap[edge.to], edge);
       const status = edge.status || blockMap[edge.from].status || 'free';
       return `<path class="track-edge-outline" d="${path}"></path><path class="track-edge edge-${escapeHtml(status)}" d="${path}"></path>`;
     }).join('');
@@ -1223,13 +1246,27 @@
       const from = blockMap[String(edge.from).toLowerCase()];
       const to = blockMap[String(edge.to).toLowerCase()];
       if (!from || !to) return;
-      const start = blockCenter(from); const end = blockCenter(to);
-      const dx = end.x - start.x; const dy = end.y - start.y; const lengthSquared = dx * dx + dy * dy;
-      if (!lengthSquared) return;
-      const progress = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared));
-      const projected = { x: start.x + dx * progress, y: start.y + dy * progress };
-      const distance = Math.hypot(point.x - projected.x, point.y - projected.y);
-      if (!best || distance < best.distance) best = { ...projected, distance, from_node: String(edge.from).toLowerCase(), to_node: String(edge.to).toLowerCase(), progress };
+      const points = edgeControlPoints(from, to, edge);
+      const samples = [];
+      for (let index = 0; index <= 24; index += 1) {
+        const progress = index / 24;
+        if (points.length === 2) {
+          samples.push({ x: points[0].x + (points[1].x - points[0].x) * progress, y: points[0].y + (points[1].y - points[0].y) * progress });
+        } else {
+          const segment = Math.min(points.length - 2, Math.floor(progress * (points.length - 1)));
+          const local = progress * (points.length - 1) - segment;
+          const start = points[segment]; const end = points[segment + 1];
+          const previous = points[segment - 1] || start; const next = points[segment + 2] || end;
+          const c1 = { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 };
+          const c2 = { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 };
+          const u = local; const v = 1 - u;
+          samples.push({ x: v * v * v * start.x + 3 * v * v * u * c1.x + 3 * v * u * u * c2.x + u * u * u * end.x, y: v * v * v * start.y + 3 * v * v * u * c1.y + 3 * v * u * u * c2.y + u * u * u * end.y });
+        }
+      }
+      samples.forEach((sample, index) => {
+        const distance = Math.hypot(point.x - sample.x, point.y - sample.y);
+        if (!best || distance < best.distance) best = { ...sample, distance, from_node: String(edge.from).toLowerCase(), to_node: String(edge.to).toLowerCase(), progress: index / 24 };
+      });
     });
     return best && best.distance <= 32 ? best : null;
   }
@@ -1252,7 +1289,7 @@
     const blockMap = Object.fromEntries(blocks.flatMap((block) => [[block.id, block], [String(block.id || '').toLowerCase(), block]]));
     const edges = normalizedEdges(layout, blocks);
     const edgeMarkup = edges.map((edge) => {
-      const path = edgePath(blockMap[edge.from], blockMap[edge.to]);
+      const path = edgePath(blockMap[edge.from], blockMap[edge.to], edge);
       return '<path class="pinboard-rail" d="' + path + '"></path>';
     }).join('');
     const nodeMarkup = blocks.map((block) => {

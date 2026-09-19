@@ -1505,7 +1505,25 @@ class ControllerApplication:
                 links.add((entry, straight))
             if entry and diverging:
                 links.add((entry, diverging))
-        return [{"from": left, "to": right, "status": "free"} for left, right in sorted(links)]
+        return [self._edge_with_geometry(left, right) for left, right in sorted(links)]
+
+    def _edge_with_geometry(self, left: str, right: str, *, status: str = "free") -> dict[str, Any]:
+        edge = {"from": left, "to": right, "status": status}
+        connected = {str(left).upper(), str(right).upper()}
+        control_points: list[dict[str, float]] = []
+        for waypoint in sorted(self.waypoints, key=lambda item: str(item.get("id", ""))):
+            nodes = {str(value).upper() for value in waypoint.get("connected_node_ids", waypoint.get("connectedNodeIds", ())) }
+            if not connected.issubset(nodes):
+                continue
+            try:
+                point = {"x": float(waypoint.get("x", 0)), "y": float(waypoint.get("y", 0))}
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(point["x"]) and math.isfinite(point["y"]):
+                control_points.append(point)
+        if control_points:
+            edge["control_points"] = control_points
+        return edge
 
     def _ui_connection_limits(self) -> list[dict[str, Any]]:
         return [{"from": row["from"].lower(), "to": row["to"].lower(),
@@ -1567,7 +1585,7 @@ class ControllerApplication:
                 links.update({("b01", "b02"), ("b02", "b03"), ("b03", "b04")})
             else:
                 links.update(tuple(sorted((left, right))) for left, right in zip(block_ids, block_ids[1:]))
-        return [{"from": left, "to": right, "status": "free"} for left, right in sorted(links)]
+        return [self._edge_with_geometry(left, right) for left, right in sorted(links)]
 
     def _ui_turnouts(self) -> list[dict[str, Any]]:
         locks = self.runtime.interlocking.locks if self.runtime is not None and hasattr(self.runtime, "interlocking") else {}

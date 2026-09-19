@@ -34,6 +34,16 @@ class CoordinateMovementTests(unittest.TestCase):
         self.assertEqual((plan.source_block_id, plan.target_block_id), ("B", "A"))
         self.assertAlmostEqual(plan.distance_mm, 500)
 
+    def test_waypoint_control_points_project_coordinates_on_curved_segment(self):
+        planner = CoordinateMovementPlanner(
+            BLOCKS,
+            [{"from": "A", "to": "B", "length_mm": 1000, "control_points": [{"x": 60, "y": 60}]}],
+            CALIBRATION,
+        )
+        plan = planner.plan("train-7", 60, 60)
+        self.assertAlmostEqual(plan.progress, 0.5)
+        self.assertAlmostEqual(plan.distance_mm, 500)
+
     def test_object_style_topology_and_calibration_are_supported(self):
         @dataclass
         class Block:

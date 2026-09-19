@@ -615,14 +615,12 @@ class CoordinateMovementPlanner:
                 continue
             ax, ay = _center(self._block_by_id[left])
             bx, by = _center(self._block_by_id[right])
-            dx, dy = bx - ax, by - ay
-            length_squared = dx * dx + dy * dy
-            if length_squared <= 0:
+            points = ((ax, ay), *_edge_control_points(edge), (bx, by))
+            projected = _project_polyline(points, x, y)
+            if projected is None:
                 continue
-            progress = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / length_squared))
-            px, py = ax + dx * progress, ay + dy * progress
-            distance = math.hypot(x - px, y - py)
-            length_mm = _segment_length(edge, self._block_by_id[left], self._block_by_id[right], math.sqrt(length_squared), self._layout_scale_mm)
+            px, py, progress, distance, layout_distance = projected
+            length_mm = _segment_length(edge, self._block_by_id[left], self._block_by_id[right], layout_distance, self._layout_scale_mm)
             candidate = (distance, edge, progress, length_mm)
             if best is None or distance < best[0]:
                 best = candidate
@@ -731,6 +729,52 @@ def _segment_length(edge: object, left: object, right: object, layout_distance: 
         if value is not None and float(value) > 0:
             return _positive_finite(value, "block.length_mm")
     return _positive_finite(layout_distance * scale, "derived segment length")
+
+
+def _edge_control_points(edge: object) -> tuple[tuple[float, float], ...]:
+    raw = _value_or_none(edge, "control_points")
+    if raw is None:
+        raw = _value_or_none(edge, "controlPoints")
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    points: list[tuple[float, float]] = []
+    for value in raw:
+        try:
+            point_x = float(_value(value, "x"))
+            point_y = float(_value(value, "y"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(point_x) and math.isfinite(point_y):
+            points.append((point_x, point_y))
+    return tuple(points)
+
+
+def _project_polyline(points: tuple[tuple[float, float], ...], x: float, y: float) -> tuple[float, float, float, float, float] | None:
+    if len(points) < 2:
+        return None
+    lengths = [math.hypot(points[index + 1][0] - points[index][0], points[index + 1][1] - points[index][1]) for index in range(len(points) - 1)]
+    total = sum(lengths)
+    if total <= 0:
+        return None
+    best: tuple[float, float, float, float] | None = None
+    travelled = 0.0
+    for index, length in enumerate(lengths):
+        if length <= 0:
+            continue
+        ax, ay = points[index]
+        bx, by = points[index + 1]
+        dx, dy = bx - ax, by - ay
+        local = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / (length * length)))
+        px, py = ax + dx * local, ay + dy * local
+        distance = math.hypot(x - px, y - py)
+        progress = (travelled + length * local) / total
+        if best is None or distance < best[0]:
+            best = (distance, px, py, progress)
+        travelled += length
+    if best is None:
+        return None
+    distance, px, py, progress = best
+    return px, py, progress, distance, total
 
 
 def _value_or_none(value: object, name: str) -> Any:
