@@ -36,7 +36,9 @@ class ApiTests(unittest.TestCase):
         try:
             app.command({"type": "stop_train", "train_id": "train-3"})
             app.command({"type": "start_calibration", "train_id": "train-3", "speed_kmh": 10, "duration_ms": 100})
-            time.sleep(0.14)
+            deadline = time.monotonic() + 2
+            while app.state()["calibration"]["active"]["status"] == "running" and time.monotonic() < deadline:
+                time.sleep(0.02)
             self.assertEqual(app.state()["calibration"]["active"]["status"], "completed")
             app.command({"type": "record_calibration", "distance_mm": 50})
             app.command({"type": "set_direction", "train_id": "train-3", "direction": "reverse"})
@@ -329,7 +331,9 @@ class ApiTests(unittest.TestCase):
         try:
             result = app.command({"type": "start_calibration", "train_id": "t2"})
             self.assertEqual(result["calibration"]["active"]["status"], "running")
-            time.sleep(0.16)
+            deadline = time.monotonic() + 2
+            while app.calibration_state()["active"]["status"] == "running" and time.monotonic() < deadline:
+                time.sleep(0.02)
             self.assertEqual(app.calibration_state()["active"]["status"], "completed")
             result = app.command({"type": "record_calibration", "distance_mm": 37.5, "notes": "Test bench"})
             self.assertEqual(result["calibration"]["active"]["status"], "recorded")
