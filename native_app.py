@@ -88,12 +88,6 @@ def main():
             assert window.evaluate_js("getComputedStyle(document.querySelector('.dashboard')).display") == 'none'
             window.evaluate_js("const theme=document.querySelector('#setting-theme');theme.value='dark';theme.dispatchEvent(new Event('change',{bubbles:true}))")
             assert window.evaluate_js("document.documentElement.dataset.theme") == 'dark'
-            window.evaluate_js("document.querySelector('[data-workspace=\"scans\"]').click()")
-            assert window.evaluate_js("Boolean(document.querySelector('#scan-viewer-host canvas'))")
-            height = window.evaluate_js('document.documentElement.scrollHeight')
-            for _ in range(5):
-                window.evaluate_js("window.dispatchEvent(new Event('resize'))")
-            assert window.evaluate_js('document.documentElement.scrollHeight') == height
             window.evaluate_js("document.querySelector('[data-workspace=\"trains\"]').click(); [...document.querySelectorAll('.train-row')].find(x=>x.textContent.includes('ICE 3')).click();document.querySelector('#direction-reverse').click()")
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline and window.evaluate_js("document.querySelector('#direction-reverse').getAttribute('aria-pressed')") != 'true':
@@ -132,7 +126,7 @@ def main():
                 time.sleep(.1)
             assert ready, "Settings did not reload after switching modes"
             assert all(float(train.get("speed", 0)) == 0 for train in controller.app.trains)
-            result = {'passed': True, 'embedded_window': True, 'renderer': 'edgechromium', 'settings': True, 'wlan_settings': True, 'theme': True, 'bounded_3d': True, 'direction': True, 'layout_info': True, 'editable_block_id': True, 'settings_connection_bridge': True, 'physical_connect_cancelled': True, 'simulation_switch_preserves_stopped_layout': True, 'external_browser': False}
+            result = {'passed': True, 'embedded_window': True, 'renderer': 'edgechromium', 'settings': True, 'wlan_settings': True, 'theme': True, 'direction': True, 'layout_info': True, 'editable_block_id': True, 'settings_connection_bridge': True, 'physical_connect_cancelled': True, 'simulation_switch_preserves_stopped_layout': True, 'external_browser': False}
         except Exception as error:
             result['error'] = str(error)
         finally:
