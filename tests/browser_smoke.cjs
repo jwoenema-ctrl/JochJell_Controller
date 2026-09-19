@@ -219,6 +219,7 @@ async function shot(page, name) {
     const waypoint = state.layout.waypoints.find(item => item.id === 'WP02');
     return waypoint && (Number(waypoint.x) !== before.x || Number(waypoint.y) !== before.y);
   }, waypointBefore);
+  assert.ok(await page.locator('#layout-svg .pinboard-rail').evaluateAll(paths => paths.some(path => String(path.getAttribute('d') || '').includes('C'))), 'Spline control point should render a curved rail');
   await page.getByRole('button', { name: 'Node graph', exact: true }).click();
   await page.locator('#layout-power-toggle').click();
   await page.waitForFunction(() => document.querySelector('#layout-power-toggle').textContent === 'Power on');

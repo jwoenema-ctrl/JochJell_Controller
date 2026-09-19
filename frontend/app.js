@@ -1125,6 +1125,60 @@
     return path;
   }
 
+  function splinePointAt(points, index, progress) {
+    const start = points[index]; const end = points[index + 1];
+    const previous = points[index - 1] || start; const next = points[index + 2] || end;
+    const c1 = { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 };
+    const c2 = { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 };
+    const u = Math.max(0, Math.min(1, progress)); const v = 1 - u;
+    return {
+      x: v * v * v * start.x + 3 * v * v * u * c1.x + 3 * v * u * u * c2.x + u * u * u * end.x,
+      y: v * v * v * start.y + 3 * v * v * u * c1.y + 3 * v * u * u * c2.y + u * u * u * end.y
+    };
+  }
+
+  function splinePointAtProgress(points, progress) {
+    if (points.length < 2) return { x: 0, y: 0, dx: 1, dy: 0 };
+    if (points.length === 2) {
+      const amount = Math.max(0, Math.min(1, progress));
+      return { x: points[0].x + (points[1].x - points[0].x) * amount, y: points[0].y + (points[1].y - points[0].y) * amount, dx: points[1].x - points[0].x, dy: points[1].y - points[0].y };
+    }
+    const samples = [];
+    let total = 0;
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const segment = [{ point: splinePointAt(points, index, 0), distance: 0 }];
+      for (let step = 1; step <= 24; step += 1) {
+        const point = splinePointAt(points, index, step / 24);
+        const previous = segment[segment.length - 1].point;
+        const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
+        total += distance;
+        segment.push({ point, distance });
+      }
+      samples.push(segment);
+    }
+    if (total <= 0) return { x: points[0].x, y: points[0].y, dx: 1, dy: 0 };
+    let remaining = Math.max(0, Math.min(1, progress)) * total;
+    for (let index = 0; index < samples.length; index += 1) {
+      const segment = samples[index];
+      const segmentLength = segment.reduce((sum, item) => sum + item.distance, 0);
+      if (remaining > segmentLength && index < samples.length - 1) { remaining -= segmentLength; continue; }
+      let travelled = 0;
+      for (let sample = 1; sample < segment.length; sample += 1) {
+        const step = segment[sample];
+        if (travelled + step.distance >= remaining || sample === segment.length - 1) {
+          const local = step.distance > 0 ? Math.max(0, Math.min(1, (remaining - travelled) / step.distance)) : 0;
+          const previous = segment[sample - 1].point;
+          const x = previous.x + (step.point.x - previous.x) * local;
+          const y = previous.y + (step.point.y - previous.y) * local;
+          return { x, y, dx: step.point.x - previous.x, dy: step.point.y - previous.y };
+        }
+        travelled += step.distance;
+      }
+      return { ...segment[segment.length - 1].point, dx: 1, dy: 0 };
+    }
+    return { ...points[points.length - 1], dx: 1, dy: 0 };
+  }
+
   function edgePath(from, to, edge) {
     const points = edgeControlPoints(from, to, edge);
     if (points.length > 2) return splinePath(points);
@@ -1307,7 +1361,7 @@
     return best && best.distance <= 32 ? best : null;
   }
 
-  function pinboardTrainPoint(train, blockMap) {
+  function pinboardTrainPoint(train, blockMap, edges) {
     const motion = train.motion || {};
     const from = blockMap[String(motion.from_block_id || motion.block_id || train.position || '').toLowerCase()];
     if (!from) return null;
@@ -1316,7 +1370,17 @@
     const end = to ? blockCenter(to) : start;
     const progress = to && motion.source === 'simulation' && Number.isFinite(Number(motion.position))
       ? Math.max(0, Math.min(0.98, Number(motion.position))) : 0;
-    return { x: start.x + (end.x - start.x) * progress, y: start.y + (end.y - start.y) * progress, dx: end.x - start.x, dy: end.y - start.y };
+    if (!to) return { x: start.x, y: start.y, dx: 1, dy: 0 };
+    const matching = (edges || []).find((edge) => {
+      const left = String(edge.from || '').toLowerCase(); const right = String(edge.to || '').toLowerCase();
+      return (left === String(from.id).toLowerCase() && right === String(to.id).toLowerCase())
+        || (left === String(to.id).toLowerCase() && right === String(from.id).toLowerCase());
+    });
+    if (!matching) return { x: start.x + (end.x - start.x) * progress, y: start.y + (end.y - start.y) * progress, dx: end.x - start.x, dy: end.y - start.y };
+    const forward = String(matching.from).toLowerCase() === String(from.id).toLowerCase();
+    const controls = Array.isArray(matching.control_points || matching.controlPoints) ? (matching.control_points || matching.controlPoints) : [];
+    const points = [start, ...(forward ? controls : [...controls].reverse()).map((point) => ({ x: Number(point.x), y: Number(point.y) })), end];
+    return splinePointAtProgress(points, progress);
   }
 
   function renderPinboard() {
@@ -1338,7 +1402,7 @@
       return '<g class="pinboard-spline-point" data-waypoint-id="' + escapeHtml(waypoint.id) + '" tabindex="0" role="button" aria-label="Spline control point ' + escapeHtml(waypoint.name || waypoint.id) + '"><circle cx="' + x + '" cy="' + y + '" r="6"></circle><text x="' + (x + 11) + '" y="' + (y - 9) + '">' + escapeHtml(waypoint.name || waypoint.id) + '</text><title>' + escapeHtml(waypoint.name || waypoint.id) + ' · X ' + x.toFixed(1) + ' · Y ' + y.toFixed(1) + '</title></g>';
     }).join('');
     const trainMarkup = app.state.trains.map((train) => {
-      const point = pinboardTrainPoint(train, blockMap);
+      const point = pinboardTrainPoint(train, blockMap, edges);
       if (!point) return '';
       const angle = Math.atan2(point.dy, point.dx) * 180 / Math.PI;
       const consist = Array.isArray(train.consist) && train.consist.length ? train.consist : [{ type: 'locomotive', name: train.name, length_mm: train.length_mm || 220 }];
