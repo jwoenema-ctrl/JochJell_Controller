@@ -607,6 +607,32 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_saved_route_crud_replans_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            database_path = f"{folder}/controller.sqlite3"
+            app = ControllerApplication.sample(database_path=database_path)
+            try:
+                added = app.command({"type": "add_route", "route": {"id": "yard-central", "name": "Yard to Central", "source_block_id": "B04", "target_block_id": "B02", "algorithm": "bfs"}})
+                saved = next(item for item in added["routes"] if item["id"] == "yard-central")
+                self.assertEqual(saved["node_ids"], ["B04", "B03", "B02"])
+                self.assertEqual(saved["algorithm"], "bfs")
+                app.command({"type": "update_route", "route_id": "yard-central", "route": {"name": "Yard to Central (A*)", "algorithm": "a_star"}})
+                app.command({"type": "apply_route", "route_id": "yard-central", "train_id": "t2"})
+                train = next(item for item in app.state()["trains"] if item["id"] == "t2")
+                self.assertEqual(train["route"], ["B04", "B03", "B02"])
+                self.assertEqual(train["destination_block_id"], "B02")
+                app.save_layout("default")
+            finally:
+                app.close()
+            restored = ControllerApplication.sample(database_path=database_path)
+            try:
+                route = next(item for item in restored.routes if item["id"] == "yard-central")
+                self.assertEqual(route["name"], "Yard to Central (A*)")
+                restored.command({"type": "remove_route", "route_id": "yard-central"})
+                self.assertNotIn("yard-central", [item["id"] for item in restored.routes])
+            finally:
+                restored.close()
+
     def test_train_profile_persists_explicit_destination_block(self) -> None:
         app = ControllerApplication.sample()
         try:

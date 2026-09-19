@@ -227,6 +227,26 @@
           <div class="systematic-view" id="systematic-view"></div>
         </section>
 
+        <section class="panel route-panel is-hidden" id="route-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">AUTOMATION PLANS</p><h2>Route plans</h2></div>
+            <button type="button" class="text-button" id="new-route">＋ New route</button>
+          </div>
+          <div class="route-editor" id="route-editor">
+            <div class="field-grid">
+              <div class="field"><label for="route-id">Route ID</label><input id="route-id" required maxlength="48" placeholder="yard-to-platform"></div>
+              <div class="field"><label for="route-name">Name</label><input id="route-name" required placeholder="Yard to platform"></div>
+              <div class="field"><label for="route-source">From node</label><select id="route-source"></select></div>
+              <div class="field"><label for="route-target">To node</label><select id="route-target"></select></div>
+              <div class="field"><label for="route-train">Apply to train</label><select id="route-train"></select></div>
+              <div class="field"><label for="route-algorithm">Planner</label><select id="route-algorithm"><option value="a_star">A* cost-aware</option><option value="bfs">Breadth-first</option></select></div>
+            </div>
+            <div class="button-row"><button type="button" class="button button-primary" id="save-route">Save route</button><button type="button" class="button button-soft" id="cancel-route">Clear</button><button type="button" class="button button-soft" id="apply-route">Apply to selected train</button></div>
+            <p class="settings-status" id="route-status" role="status" aria-live="polite">Create a named path from the current layout graph.</p>
+          </div>
+          <div class="route-list" id="route-list" aria-live="polite"></div>
+        </section>
+
         <section class="panel scan-panel is-hidden" id="scan-panel">
           <div class="panel-heading">
             <div><p class="eyebrow">PHOTO-SCAN WORKSPACE</p><h2>3D track viewer</h2></div>

@@ -21,8 +21,9 @@ def rename_references(value, old, new, key=""):
                "protects_block_id", "entry_block_id", "straight_block_id",
                "diverging_block_id", "aligned_block_id", "from", "to", "alternate",
                "source", "target", "from_block_id", "to_block_id", "source_id", "target_id",
-               "protects", "position"}
+               "source_block_id", "target_block_id", "protects", "position"}
     multiples = {"neighbor_ids", "neighborIds", "block_ids", "blockIds",
+                 "node_ids",
                  "connected_block_ids", "connected_node_ids", "connected", "route"}
     if isinstance(value, dict):
         return {k: rename_references(v, old, new, k) for k, v in value.items()}

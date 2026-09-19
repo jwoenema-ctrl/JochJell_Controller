@@ -19,6 +19,7 @@ from backend.core.models import (
     Platform,
     Point,
     PhotoScan,
+    RouteDefinition,
     Schedule,
     ScheduleStatus,
     ScheduleStop,
@@ -100,6 +101,7 @@ def snapshot_from_ui(
     turnouts: Iterable[Mapping[str, Any]],
     trains: Iterable[Mapping[str, Any]],
     schedules: Iterable[Mapping[str, Any]] = (),
+    routes: Iterable[Mapping[str, Any]] = (),
     edges: Iterable[Mapping[str, Any]] = (),
     stations: Iterable[Mapping[str, Any]] = (),
     signals: Iterable[Mapping[str, Any]] = (),
@@ -342,6 +344,27 @@ def snapshot_from_ui(
         if str(value.get("id", "")).strip()
     )
 
+    domain_routes: list[RouteDefinition] = []
+    for value in routes:
+        raw = dict(value)
+        route_id = str(raw.get("id", "")).strip()
+        name = str(raw.get("name", route_id)).strip()
+        source = _canonical_block_id(raw.get("source_block_id", raw.get("source", raw.get("from"))))
+        target = _canonical_block_id(raw.get("target_block_id", raw.get("target", raw.get("to"))))
+        raw_nodes = raw.get("node_ids", raw.get("blocks", raw.get("path", ())))
+        nodes = tuple(_canonical_block_id(item) for item in raw_nodes if _canonical_block_id(item))
+        if not route_id or not source or not target or not nodes:
+            continue
+        domain_routes.append(RouteDefinition(
+            route_id,
+            name or route_id,
+            source,
+            target,
+            nodes,
+            str(raw.get("algorithm", "a_star")),
+            bool(raw.get("enabled", True)),
+        ))
+
     return LayoutSnapshot(
         revision=max(0, int(revision)),
         blocks=tuple(domain_blocks),
@@ -353,6 +376,7 @@ def snapshot_from_ui(
         platforms=domain_platforms,
         trains=tuple(domain_trains),
         schedules=tuple(domain_schedules),
+        routes=tuple(domain_routes),
         scans=domain_scans,
         connection_limits=tuple(ConnectionSpeedLimit(
             _canonical_block_id(rule.get("from", rule.get("from_block_id"))),
@@ -514,6 +538,18 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
         }
         for scan in snapshot.scans
     ]
+    routes = [
+        {
+            "id": route.id,
+            "name": route.name,
+            "source_block_id": route.source_block_id,
+            "target_block_id": route.target_block_id,
+            "node_ids": list(route.node_ids),
+            "algorithm": route.algorithm,
+            "enabled": route.enabled,
+        }
+        for route in snapshot.routes
+    ]
     return {
         "blocks": blocks,
         "trains": trains,
@@ -523,6 +559,7 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
         "turntables": turntables,
         "stations": stations,
         "schedules": schedules,
+        "routes": routes,
         "platforms": platforms,
         "scans": scans,
         "connection_limits": [{"from": rule.from_block_id, "to": rule.to_block_id,

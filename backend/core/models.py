@@ -405,6 +405,38 @@ class Schedule:
 
 
 @dataclass(frozen=True, slots=True)
+class RouteDefinition:
+    """A named, reusable path through the layout graph."""
+
+    id: str
+    name: str
+    source_block_id: str
+    target_block_id: str
+    node_ids: tuple[str, ...] = ()
+    algorithm: str = "a_star"
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", _require_text(self.id, "id"))
+        object.__setattr__(self, "name", _require_text(self.name, "name"))
+        object.__setattr__(self, "source_block_id", _require_text(self.source_block_id, "source_block_id"))
+        object.__setattr__(self, "target_block_id", _require_text(self.target_block_id, "target_block_id"))
+        nodes = tuple(_require_text(item, "node_ids") for item in self.node_ids)
+        if not nodes:
+            raise ValueError("route must contain at least one graph node")
+        if nodes[0] != self.source_block_id or nodes[-1] != self.target_block_id:
+            raise ValueError("route node_ids must start at source_block_id and end at target_block_id")
+        if len(set(nodes)) != len(nodes):
+            raise ValueError("route node_ids must not contain duplicate graph nodes")
+        algorithm = str(self.algorithm).strip().lower()
+        if algorithm not in {"a_star", "bfs"}:
+            raise ValueError("route algorithm must be a_star or bfs")
+        object.__setattr__(self, "node_ids", nodes)
+        object.__setattr__(self, "algorithm", algorithm)
+        object.__setattr__(self, "enabled", bool(self.enabled))
+
+
+@dataclass(frozen=True, slots=True)
 class ConnectionSpeedLimit:
     """One directed connection, in scale km/h; overrides replace the default."""
 
@@ -451,6 +483,7 @@ class LayoutSnapshot:
     platforms: tuple[Platform, ...] = ()
     trains: tuple[Train, ...] = ()
     schedules: tuple[Schedule, ...] = ()
+    routes: tuple[RouteDefinition, ...] = ()
     scans: tuple[PhotoScan, ...] = ()
     connection_limits: tuple[ConnectionSpeedLimit, ...] = ()
 
@@ -467,6 +500,7 @@ class LayoutSnapshot:
             "platforms",
             "trains",
             "schedules",
+            "routes",
             "scans",
             "connection_limits",
         ):
@@ -493,6 +527,9 @@ class LayoutSnapshot:
             for train_id, _ in rule.train_speed_limits:
                 _require_reference(train_id, rule.id, "train", train_ids)
         graph_node_ids = block_ids | waypoint_ids | turntable_ids
+        for route in self.routes:
+            for node_id in route.node_ids:
+                _require_reference(node_id, f"route {route.id}.node_ids", "graph node", graph_node_ids)
         platform_by_id = {platform.id: platform for platform in self.platforms}
 
         def require_each(values: Iterable[str], field_name: str, target_name: str, target_ids: set[str]) -> None:

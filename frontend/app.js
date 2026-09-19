@@ -45,6 +45,10 @@
         { id: 'p1', name: 'Platform 1', blockIds: ['b01', 'b02', 'b03'] },
         { id: 'p2', name: 'Platform 2', blockIds: ['b08', 'b09'] },
         { id: 'p3', name: 'Platform 3', blockIds: ['b06', 'b07'] }
+      ],
+      routes: [
+        { id: 'r1', name: 'West approach to Central', source_block_id: 'B01', target_block_id: 'B02', node_ids: ['B01', 'B02'], algorithm: 'a_star', enabled: true },
+        { id: 'r2', name: 'East platform to Yard', source_block_id: 'B03', target_block_id: 'B04', node_ids: ['B03', 'B04'], algorithm: 'a_star', enabled: true }
       ]
     },
     trains: [
@@ -87,6 +91,8 @@
     consistDraft: null,
     editingBlockId: null,
     editingScheduleId: null,
+    editingRouteId: null,
+    routeEditorDirty: false,
     editingTrainData: null,
     scanViewer: null,
     selectedScanId: 'sample-yard',
@@ -306,6 +312,8 @@
     if (Array.isArray(value.turntables)) app.state.layout.turntables = value.turntables;
     if (Array.isArray(value.stations)) app.state.layout.stations = value.stations;
     if (Array.isArray(value.platforms)) app.state.layout.platforms = value.platforms;
+    if (Array.isArray(value.routes)) app.state.routes = value.routes;
+    if (value.layout && Array.isArray(value.layout.routes)) app.state.routes = value.layout.routes;
     if (Array.isArray(value.trains)) {
       const previous = selectedTrain();
       const next = previous && value.trains.find((train) => train.id === previous.id);
@@ -391,7 +399,10 @@
     results.forEach((result, index) => {
       if (result.status !== 'fulfilled') return;
       successCount += 1;
-      if (index === 1) app.state.layout = { ...app.state.layout, ...unwrap(result.value) };
+      if (index === 1) {
+        app.state.layout = { ...app.state.layout, ...unwrap(result.value) };
+        if (Array.isArray(app.state.layout.routes)) app.state.routes = app.state.layout.routes;
+      }
       else if (index === 2) app.state.trains = Array.isArray(result.value) ? result.value : (unwrap(result.value).trains || app.state.trains);
       else if (index === 3) mergeTrainDatabaseRecords(unwrap(result.value).trains || []);
       else mergePayload(result.value);
@@ -853,6 +864,7 @@
     renderTrainList();
     renderEditor();
     renderSchedules();
+    renderRoutes();
     renderAssembler();
     renderCalibration();
     renderInventory();
@@ -1914,6 +1926,119 @@
     }));
   }
 
+  function routeGraphNodes() {
+    const sources = [
+      ...(app.state.layout.blocks || []),
+      ...(app.state.layout.waypoints || []),
+      ...(app.state.layout.turntables || [])
+    ];
+    const seen = new Set();
+    return sources.reduce((items, item) => {
+      const id = String(item.id || '').trim().toUpperCase();
+      if (!id || seen.has(id)) return items;
+      seen.add(id);
+      items.push({ value: id, label: `${item.name || id} · ${id}` });
+      return items;
+    }, []);
+  }
+
+  function clearRouteEditor() {
+    app.editingRouteId = null;
+    app.routeEditorDirty = false;
+    $('#route-id').value = '';
+    $('#route-id').disabled = false;
+    $('#route-name').value = '';
+    $('#route-algorithm').value = 'a_star';
+    const nodes = routeGraphNodes();
+    fillScheduleSelect($('#route-source'), nodes, nodes[0]?.value || '', 'No graph nodes configured');
+    fillScheduleSelect($('#route-target'), nodes, nodes[1]?.value || nodes[0]?.value || '', 'No graph nodes configured');
+    $('#route-status').textContent = 'Create a named path from the current layout graph.';
+  }
+
+  function openRouteEditor(route) {
+    const current = route || {};
+    app.editingRouteId = current.id || null;
+    app.routeEditorDirty = false;
+    $('#route-id').value = current.id || '';
+    $('#route-id').disabled = Boolean(current.id);
+    $('#route-name').value = current.name || '';
+    const nodes = routeGraphNodes();
+    fillScheduleSelect($('#route-source'), nodes, current.source_block_id || current.source || nodes[0]?.value || '', 'No graph nodes configured');
+    fillScheduleSelect($('#route-target'), nodes, current.target_block_id || current.target || nodes[1]?.value || nodes[0]?.value || '', 'No graph nodes configured');
+    $('#route-algorithm').value = current.algorithm || 'a_star';
+    $('#route-status').textContent = current.id ? `Editing ${current.name || current.id}.` : 'Create a named path from the current layout graph.';
+  }
+
+  function renderRoutes() {
+    const list = $('#route-list');
+    if (!list) return;
+    const routes = Array.isArray(app.state.routes) ? app.state.routes : [];
+    const nodes = routeGraphNodes();
+    fillScheduleSelect($('#route-source'), nodes, $('#route-source').value, 'No graph nodes configured');
+    fillScheduleSelect($('#route-target'), nodes, $('#route-target').value, 'No graph nodes configured');
+    const trains = (app.state.trains || []).map((train) => ({ value: train.id, label: `${train.name || train.id} · #${train.number || '—'}` }));
+    fillScheduleSelect($('#route-train'), trains, app.selectedTrainId, 'No trains configured');
+    if (!app.routeEditorDirty && !app.editingRouteId && !$('#route-name').value) clearRouteEditor();
+    list.innerHTML = routes.length ? routes.map((route) => {
+      const path = Array.isArray(route.node_ids) ? route.node_ids.join(' → ') : `${route.source_block_id} → ${route.target_block_id}`;
+      return `<div class="route-row" data-route-id="${escapeHtml(route.id)}"><span class="route-row-main"><strong>${escapeHtml(route.name || route.id)}</strong><small>${escapeHtml(route.id)} · ${escapeHtml(path)}</small></span><span class="route-row-meta">${escapeHtml(route.algorithm || 'a_star')}${route.enabled === false ? ' · disabled' : ''}</span><span class="route-row-actions"><button type="button" class="icon-button small" data-route-action="edit" title="Edit route">✎</button><button type="button" class="icon-button small" data-route-action="delete" title="Delete route">×</button></span></div>`;
+    }).join('') : '<div class="empty-state">No saved route plans. Create one from the graph nodes above.</div>';
+  }
+
+  async function saveRouteEditor() {
+    const id = $('#route-id').value.trim();
+    const name = $('#route-name').value.trim();
+    const source = $('#route-source').value;
+    const target = $('#route-target').value;
+    if (!id || !name || !source || !target) {
+      $('#route-status').textContent = 'Route ID, name, source, and target are required.';
+      showToast('Complete the route fields first.', 'warning');
+      return;
+    }
+    if (source === target) {
+      $('#route-status').textContent = 'Choose two different graph nodes.';
+      showToast('Route source and target must differ.', 'warning');
+      return;
+    }
+    const route = { id, name, source_block_id: source, target_block_id: target, algorithm: $('#route-algorithm').value, enabled: true };
+    const editing = app.editingRouteId;
+    if (editing) {
+      const existing = app.state.routes.find((item) => item.id === editing);
+      if (existing) Object.assign(existing, route, { id: editing });
+      await sendCommand({ type: 'update_route', route_id: editing, route });
+      $('#route-status').textContent = `${name} updated.`;
+      showToast(`${name} updated`, 'success');
+    } else {
+      app.state.routes.push(route);
+      await sendCommand({ type: 'add_route', route });
+      $('#route-status').textContent = `${name} saved.`;
+      showToast(`${name} saved`, 'success');
+    }
+    app.routeEditorDirty = false;
+    renderRoutes();
+  }
+
+  async function deleteRoute(routeId) {
+    const route = app.state.routes.find((item) => item.id === routeId);
+    if (!route || !window.confirm(`Delete ${route.name || route.id}?`)) return;
+    app.state.routes = app.state.routes.filter((item) => item.id !== routeId);
+    if (app.editingRouteId === routeId) clearRouteEditor();
+    renderRoutes();
+    await sendCommand({ type: 'remove_route', route_id: routeId });
+    showToast(`${route.name || route.id} deleted`, 'success');
+  }
+
+  async function applySelectedRoute() {
+    const routeId = app.editingRouteId || $('#route-list .route-row')?.dataset.routeId;
+    const trainId = $('#route-train').value || app.selectedTrainId;
+    if (!routeId || !trainId) {
+      showToast('Choose a route and train first.', 'warning');
+      return;
+    }
+    await sendCommand({ type: 'apply_route', route_id: routeId, train_id: trainId });
+    $('#route-status').textContent = `Route applied to ${trainId}.`;
+  }
+
   function fillScheduleSelect(select, options, selected, emptyLabel) {
     if (!select) return;
     const values = options.length ? options : [{ value: '', label: emptyLabel }];
@@ -2232,6 +2357,7 @@
     $('#connection-limit-editor').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
     $$('.map-legend .editor-action').forEach((button) => button.classList.toggle('is-hidden', page !== 'layout'));
     $('#scan-panel').classList.toggle('is-hidden', page !== 'scans');
+    $('#route-panel').classList.toggle('is-hidden', page !== 'layout');
     $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     const trainSection = page === 'trains' ? app.trainSection : null;
     $('#train-panel').classList.toggle('is-hidden', page === 'trains' ? !['overview', 'locomotives'].includes(trainSection) : page !== 'dispatch');
@@ -2796,6 +2922,20 @@
     $('#add-schedule').addEventListener('click', () => {
       openScheduleEditor();
     });
+    $('#new-route').addEventListener('click', clearRouteEditor);
+    $('#save-route').addEventListener('click', saveRouteEditor);
+    $('#cancel-route').addEventListener('click', clearRouteEditor);
+    $('#apply-route').addEventListener('click', applySelectedRoute);
+    ['#route-id', '#route-name', '#route-source', '#route-target', '#route-algorithm'].forEach((selector) => $(selector).addEventListener('input', () => { app.routeEditorDirty = true; }));
+    $('#route-list').addEventListener('click', (event) => {
+      const row = event.target.closest('[data-route-id]');
+      const action = event.target.closest('[data-route-action]')?.dataset.routeAction;
+      if (!row || !action) return;
+      const route = app.state.routes.find((item) => item.id === row.dataset.routeId);
+      if (!route) return;
+      if (action === 'edit') { openRouteEditor(route); renderRoutes(); }
+      if (action === 'delete') deleteRoute(route.id);
+    });
     $('#simulate-schedule').addEventListener('click', simulateNextScheduleEvent);
     $('#schedule-editor-form').addEventListener('submit', saveScheduleEditor);
     $('#cancel-schedule-editor').addEventListener('click', () => { app.editingScheduleId = null; $('#schedule-editor').close(); });
@@ -2830,6 +2970,7 @@
     style.textContent = '.is-collapsed .editor-tabs, .is-collapsed .editor-content { display: none; } .is-collapsed { min-height: 0 !important; } .empty-state { padding: 24px 18px; color: var(--faint); font-size: 10px; } #sync-ribbon[data-tone="warning"] .ribbon-icon { color: var(--yellow); } #sync-ribbon[data-tone="success"] .ribbon-icon { color: var(--green); } .systematic-legend { display: flex; justify-content: space-between; gap: 12px; padding: 0 18px 7px; color: var(--faint); font-size: 9px; } .systematic-legend b { color: var(--cyan); font-weight: 600; } .systematic-track { overflow-x: auto; } .systematic-block { flex: 1 1 0; min-width: 52px; padding: 0 5px; white-space: nowrap; } .systematic-block.is-selected { border-color: var(--blue-bright); box-shadow: 0 0 0 1px rgba(92,157,255,.25); color: var(--text); } .systematic-link { position: relative; z-index: 2; flex: 0 0 17px; color: var(--cyan); font-size: 12px; line-height: 1; text-align: center; } .systematic-link.is-gap { color: var(--faint); opacity: .65; } .systematic-status strong.is-occupied { color: var(--orange); } .systematic-status strong.is-route { color: var(--violet); } .rolling-stock-label { display: block; margin: 8px 18px 0; color: var(--faint); font-size: 9px; } .rolling-stock-select { width: calc(100% - 36px); min-height: 28px; margin: 4px 18px 0; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font-size: 10px; } #consist-list .consist-item { grid-template-columns: 25px minmax(0, 1fr) auto auto; } .consist-position { color: var(--faint); font-size: 9px; white-space: nowrap; } .consist-actions { display: inline-flex; gap: 3px; } .consist-actions .icon-button { width: 22px; height: 22px; font-size: 13px; } .consist-actions .icon-button:disabled { cursor: default; opacity: .3; }';
     style.textContent += ' .function-control-panel { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); } .function-control-panel .record-section-heading { padding: 0 0 8px; } .function-toggle-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; } .function-toggle { min-height: 48px; padding: 6px; border: 1px solid var(--line); border-radius: 7px; background: #0d192a; color: var(--text); text-align: left; cursor: pointer; } .function-toggle:hover { border-color: var(--blue-bright); } .function-toggle.is-on { border-color: var(--cyan); background: rgba(0, 198, 217, .13); box-shadow: inset 0 0 0 1px rgba(0, 198, 217, .16); } .function-toggle:disabled { opacity: .35; cursor: not-allowed; } .function-toggle strong, .function-toggle span, .function-toggle small { display: block; } .function-toggle strong { color: var(--cyan); font-size: 10px; } .function-toggle span { overflow: hidden; margin-top: 2px; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; } .function-toggle small { margin-top: 4px; color: var(--faint); font-size: 8px; letter-spacing: .08em; } .function-toggle.is-on small { color: var(--cyan); } .function-control-panel.is-compact { margin: 12px 18px 0; } .function-control-panel.is-compact .record-section-heading { display: block; } .function-control-panel.is-compact .settings-help { display: block; margin-top: 4px; }';
     style.textContent += ' .pinboard-layer { font-family: inherit; } .pinboard-rail { fill: none; stroke: rgba(115, 148, 184, .62); stroke-width: 8; stroke-linecap: round; } .pinboard-rail:hover { stroke: var(--cyan); } .pinboard-node { cursor: pointer; } .pinboard-node circle { fill: #10233a; stroke: var(--blue-bright); stroke-width: 2; } .pinboard-node text { fill: var(--text); font-size: 11px; font-weight: 600; } .pinboard-node.is-selected circle { fill: var(--cyan); stroke: #fff; } .pinboard-node.is-selected text { fill: var(--cyan); } .pinboard-train { cursor: grab; filter: drop-shadow(0 3px 4px rgba(0,0,0,.32)); } .pinboard-train:active { cursor: grabbing; } .pinboard-vehicle { stroke: #08111e; stroke-width: 1.5; fill: var(--orange); } .pinboard-vehicle.is-locomotive { fill: var(--cyan); } .pinboard-train.is-selected .pinboard-vehicle { stroke: #fff; stroke-width: 2; } .pinboard-direction-arrow { fill: var(--green); stroke: #07111e; stroke-width: 1; } .pinboard-train-label { fill: var(--text); font-size: 10px; font-weight: 700; paint-order: stroke; stroke: #09111f; stroke-width: 3; stroke-linejoin: round; } .calibration-form, .calibration-record { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 18px; } .calibration-record { grid-template-columns: 1fr 1.5fr auto; margin-top: 10px; align-items: end; } .calibration-form label, .calibration-record label { display: grid; gap: 4px; color: var(--faint); font-size: 9px; } .calibration-form input, .calibration-form select, .calibration-record input { min-width: 0; min-height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font: inherit; } .calibration-panel > .settings-help, .calibration-panel > .settings-status { margin-left: 18px; margin-right: 18px; } .calibration-actions { padding: 0 18px; margin-top: 10px; } .calibration-history { margin: 12px 18px 0; border-top: 1px solid var(--line); padding-top: 8px; } .calibration-history > small { color: var(--faint); } .calibration-history > div { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding-top: 5px; color: var(--faint); font-size: 9px; } .calibration-history strong { color: var(--cyan); }';
+    style.textContent += ' .route-editor { padding: 0 18px 14px; border-bottom: 1px solid var(--line); } .route-editor .field-grid { padding: 0; } .route-editor .button-row { padding: 10px 0 0; } .route-panel .settings-status { margin: 9px 0 0; } .route-list { padding: 0 18px 12px; } .route-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); } .route-row-main, .route-row-main strong, .route-row-main small { display: block; min-width: 0; } .route-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .route-row-main small, .route-row-meta { color: var(--faint); font-size: 9px; } .route-row-meta { white-space: nowrap; } .route-row-actions { display: inline-flex; gap: 4px; }';
     document.head.appendChild(style);
   }
 

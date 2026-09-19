@@ -19,6 +19,7 @@ from backend.core.models import (
     Platform,
     PhotoScan,
     Point,
+    RouteDefinition,
     Schedule,
     ScheduleStatus,
     ScheduleStop,
@@ -113,6 +114,8 @@ def _build_entity(entity_type: type[_T], value: Any) -> _T:
     elif entity_type is Schedule:
         data["stops"] = tuple(_build_entity(ScheduleStop, item) for item in data.get("stops", ()))
         data["status"] = ScheduleStatus(data.get("status", ScheduleStatus.PLANNED.value))
+    elif entity_type is RouteDefinition:
+        data["node_ids"] = _tuple(data.get("node_ids", data.get("blocks", data.get("path", ()))))
     return entity_type(**data)
 
 
@@ -132,6 +135,7 @@ def snapshot_from_dict(value: Mapping[str, Any]) -> LayoutSnapshot:
         platforms=tuple(_build_entity(Platform, item) for item in value.get("platforms", ())),
         trains=tuple(_build_entity(Train, item) for item in value.get("trains", ())),
         schedules=tuple(_build_entity(Schedule, item) for item in value.get("schedules", ())),
+        routes=tuple(_build_entity(RouteDefinition, item) for item in value.get("routes", ())),
         scans=tuple(_build_entity(PhotoScan, item) for item in value.get("scans", ())),
         connection_limits=tuple(_build_entity(ConnectionSpeedLimit, item) for item in value.get("connection_limits", ())),
     )

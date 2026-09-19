@@ -10,6 +10,7 @@ from backend.core.models import (
     Platform,
     PhotoScan,
     Point,
+    RouteDefinition,
     Schedule,
     ScheduleStop,
     Signal,
@@ -40,6 +41,7 @@ class LayoutRepositoryTests(unittest.TestCase):
             platforms=(Platform("P1", "Platform 1", "ST1", "B2", 1800),),
             trains=(Train("TR1", "Test consist", TrainModelInfo("Roco", "1234", "BR 218"), decoder_address=101, length_mm=1200, mass_g=420000),),
             schedules=(Schedule("SC1", "Morning", "TR1", (ScheduleStop("ST1", "P1", 0, 60),)),),
+            routes=(RouteDefinition("R1", "West to East", "B1", "B2", ("B1", "B2"), "a_star"),),
             scans=(PhotoScan("SCAN1", "Yard scan", "Front view", "scans/yard.jpg", Point(0.25, 0.75)),),
         )
         with SQLiteLayoutRepository() as repository:

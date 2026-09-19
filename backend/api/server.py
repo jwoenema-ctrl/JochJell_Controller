@@ -103,6 +103,7 @@ class ControllerApplication:
     turntables: list[dict[str, Any]] = field(default_factory=list)
     platforms: list[dict[str, Any]] = field(default_factory=list)
     schedules: list[dict[str, Any]] = field(default_factory=list)
+    routes: list[dict[str, Any]] = field(default_factory=list)
     feedback_occupancy: dict[str, tuple[str, ...]] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
     scans: list[dict[str, Any]] = field(default_factory=lambda: [
@@ -241,6 +242,10 @@ class ControllerApplication:
             schedules=[
                 {"id": "s1", "time": "10:45", "service": "BR 218 + freight", "number": "101", "route": "West approach  →  Central station", "platform": "P01", "state": "On time"},
                 {"id": "s2", "time": "10:48", "service": "ICE 3", "number": "3", "station_id": "ST02", "route": "East platform  →  Central station", "platform": "P02", "state": "Ready"},
+            ],
+            routes=[
+                {"id": "r1", "name": "West approach to Central", "source_block_id": "B01", "target_block_id": "B02", "node_ids": ["B01", "B02"], "algorithm": "a_star", "enabled": True},
+                {"id": "r2", "name": "East platform to Yard", "source_block_id": "B03", "target_block_id": "B04", "node_ids": ["B03", "B04"], "algorithm": "a_star", "enabled": True},
             ],
             database_path=database_path,
             z21_host=z21_host,
@@ -543,6 +548,7 @@ class ControllerApplication:
             turnouts=self.turnouts,
             trains=self.trains,
             schedules=self.schedules,
+            routes=self.routes,
             edges=self._topology_edges(),
             stations=self.stations,
             signals=self.signals,
@@ -1558,6 +1564,7 @@ class ControllerApplication:
                 "signals": list(self.signals),
                 "waypoints": list(self.waypoints),
                 "turntables": list(self.turntables),
+                "routes": deepcopy(self.routes),
                 "platforms": list(self.platforms) or [
                     {"id": "p1", "name": "Central station", "blockIds": ["b01", "b02"]},
                     {"id": "p2", "name": "East platform", "blockIds": ["b03"]},
@@ -1567,6 +1574,7 @@ class ControllerApplication:
             "trains": self._ui_trains(),
             "trainDatabase": self.train_database(),
             "schedules": list(self.schedules),
+            "routes": deepcopy(self.routes),
             "blocks": self._ui_blocks(),
             "turnouts": self._ui_turnouts(),
             "events": snapshot["events"],
@@ -1894,6 +1902,7 @@ class ControllerApplication:
         self.turntables = projected.get("turntables", [])
         self.platforms = projected.get("platforms", [])
         self.schedules = projected.get("schedules", [])
+        self.routes = projected.get("routes", [])
         self.scans = projected.get("scans", self.scans)
         self.connection_limits = projected.get("connection_limits", [])
         if self.z21_host:
@@ -2038,6 +2047,7 @@ class ControllerApplication:
                 turnouts=self.turnouts,
                 trains=self.trains,
                 schedules=self.schedules,
+                routes=self.routes,
                 edges=self._topology_edges(),
                 stations=collections.get("stations", self.stations),
                 signals=collections.get("signals", self.signals),
@@ -2114,6 +2124,42 @@ class ControllerApplication:
         self.events.append({"type": f"{asset_type}_{'removed' if operation == 'remove' else 'added' if operation == 'add' else 'updated'}", f"{asset_type}_id": selected_id})
         return True
 
+    def _route_path(self, source: Any, target: Any, algorithm: Any = "a_star", requested: Any = None) -> tuple[list[str], str]:
+        """Validate a saved route path or calculate one through the live graph."""
+
+        if self.runtime is None:
+            raise ValueError("runtime is not available")
+        graph = self.runtime.layout.graph()
+        source_id = str(source or "").strip().upper()
+        target_id = str(target or "").strip().upper()
+        if not source_id or not target_id:
+            raise ValueError("route source and target are required")
+        if graph.node(source_id) is None or graph.node(target_id) is None:
+            raise ValueError("route source and target must be graph nodes")
+        selected = str(algorithm or "a_star").strip().lower()
+        if selected not in {RouteAlgorithm.A_STAR.value, RouteAlgorithm.BFS.value}:
+            raise ValueError("route algorithm must be a_star or bfs")
+        if requested is not None:
+            if not isinstance(requested, (list, tuple)):
+                raise ValueError("route node_ids must be a list")
+            path = tuple(str(item).strip().upper() for item in requested if str(item).strip())
+            if not path or path[0] != source_id or path[-1] != target_id:
+                raise ValueError("route node_ids must start at source and end at target")
+            if any(graph.node(node_id) is None for node_id in path):
+                raise ValueError("route node_ids must reference graph nodes")
+            if len(set(path)) != len(path):
+                raise ValueError("route node_ids must not repeat graph nodes")
+            if any(not any(edge.target_id == right for edge in graph.neighbors(left)) for left, right in zip(path, path[1:])):
+                raise ValueError("route node_ids must follow connected track edges")
+            return list(path), selected
+        route = find_route(graph, source_id, target_id, algorithm=RouteAlgorithm(selected))
+        if route is None:
+            fallback = RouteAlgorithm.BFS if selected == RouteAlgorithm.A_STAR.value else RouteAlgorithm.A_STAR
+            route = find_route(graph, source_id, target_id, algorithm=fallback)
+        if route is None:
+            raise ValueError(f"No route from {source_id} to {target_id}")
+        return list(route.node_ids), route.algorithm.value
+
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             kind = str(payload.get("type", "")).lower()
@@ -2145,7 +2191,7 @@ class ControllerApplication:
                             raise ValueError("train_speed_limits must be an object")
                         rule["train_speed_limits"] = {self._canonical_train_id(key): value for key, value in payload["train_speed_limits"].items()}
                 candidate = snapshot_from_ui(**{key: getattr(self, key) for key in
-                    ("blocks", "turnouts", "trains", "schedules", "stations", "signals", "waypoints", "turntables", "platforms", "scans")},
+                    ("blocks", "turnouts", "trains", "schedules", "routes", "stations", "signals", "waypoints", "turntables", "platforms", "scans")},
                     edges=self._topology_edges(), connection_limits=rows)
                 self.connection_limits = snapshot_to_ui(candidate)["connection_limits"]
                 self.runtime.layout.replace(candidate)
@@ -2731,7 +2777,7 @@ class ControllerApplication:
                     if any(str(item["id"]).upper() == new_id for item in self.blocks):
                         raise ValueError("Block ID already exists")
                     collections = ("blocks", "turnouts", "trains", "stations", "signals",
-                                   "waypoints", "turntables", "platforms", "schedules", "scans", "connection_limits")
+                                   "waypoints", "turntables", "platforms", "schedules", "routes", "scans", "connection_limits")
                     updated = {key: rename_references(getattr(self, key), block_id, new_id)
                                for key in collections}
                     for item in updated["blocks"]:
@@ -2828,6 +2874,60 @@ class ControllerApplication:
                 block["y"] = max(0, int(payload.get("y", block.get("y", 0))))
                 self._sync_runtime_from_ui()
                 self.events.append({"type": "block_moved", "block_id": block_id, "x": block["x"], "y": block["y"]})
+            elif kind == "add_route":
+                route = dict(payload.get("route", {}))
+                route_id = str(route.get("id", "")).strip()
+                if not route_id or any(item.get("id") == route_id for item in self.routes):
+                    raise ValueError("route ID is required and must be unique")
+                source = str(route.get("source_block_id", route.get("source", ""))).strip().upper()
+                target = str(route.get("target_block_id", route.get("target", ""))).strip().upper()
+                path, algorithm = self._route_path(source, target, route.get("algorithm", "a_star"), route.get("node_ids", route.get("path")))
+                saved = {"id": route_id, "name": str(route.get("name", route_id)).strip() or route_id,
+                         "source_block_id": source, "target_block_id": target, "node_ids": path,
+                         "algorithm": algorithm, "enabled": bool(route.get("enabled", True))}
+                self.routes.append(saved)
+                self._sync_runtime_from_ui()
+                self.events.append({"type": "route_added", "route_id": route_id, "route": deepcopy(saved)})
+            elif kind == "update_route":
+                route_id = str(payload.get("route_id", payload.get("id", ""))).strip()
+                route = next((item for item in self.routes if item.get("id") == route_id), None)
+                if route is None:
+                    raise ValueError(f"Unknown route: {route_id}")
+                updates = dict(payload.get("route", {}))
+                source = str(updates.get("source_block_id", route.get("source_block_id", ""))).strip().upper()
+                target = str(updates.get("target_block_id", route.get("target_block_id", ""))).strip().upper()
+                path_requested = updates.get("node_ids", updates.get("path")) if any(key in updates for key in ("node_ids", "path", "source_block_id", "target_block_id", "source", "target")) else route.get("node_ids")
+                path, algorithm = self._route_path(source, target, updates.get("algorithm", route.get("algorithm", "a_star")), path_requested if any(key in updates for key in ("node_ids", "path")) else None)
+                route.update({"name": str(updates.get("name", route.get("name", route_id))).strip() or route_id,
+                              "source_block_id": source, "target_block_id": target, "node_ids": path,
+                              "algorithm": algorithm, "enabled": bool(updates.get("enabled", route.get("enabled", True)))})
+                self._sync_runtime_from_ui()
+                self.events.append({"type": "route_updated", "route_id": route_id, "route": deepcopy(route)})
+            elif kind == "remove_route":
+                route_id = str(payload.get("route_id", payload.get("id", ""))).strip()
+                before = len(self.routes)
+                self.routes = [item for item in self.routes if item.get("id") != route_id]
+                if len(self.routes) == before:
+                    raise ValueError(f"Unknown route: {route_id}")
+                self._sync_runtime_from_ui()
+                self.events.append({"type": "route_removed", "route_id": route_id})
+            elif kind == "apply_route":
+                route_id = str(payload.get("route_id", "")).strip()
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                route = next((item for item in self.routes if item.get("id") == route_id), None)
+                train = next((item for item in self.trains if item.get("id") == train_id), None)
+                if route is None or train is None or self.runtime is None:
+                    raise ValueError("known route, train, and runtime are required")
+                if not route.get("enabled", True):
+                    raise ValueError("cannot apply a disabled route")
+                path = tuple(str(item).upper() for item in route.get("node_ids", ()))
+                self.runtime.route_updater.set_route(train_id, path)
+                if hasattr(self.runtime.track, "set_train_route"):
+                    self.runtime.track.set_train_route(train_id, path)
+                train["destination_block_id"] = path[-1]
+                train["route"] = list(path)
+                self._publish_domain_event(RouteChanged(train_id=train_id, route=path))
+                self.events.append({"type": "route_applied", "route_id": route_id, "train_id": train_id, "route": list(path)})
             elif kind == "add_schedule":
                 schedule = dict(payload.get("schedule", {}))
                 schedule_id = str(schedule.get("id", "")).strip()

@@ -161,6 +161,21 @@ async function shot(page, name) {
 
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator('.mode-nav').getByRole('button', { name: 'Automation', exact: true }).click();
+  assert.equal(await page.locator('#route-panel').isVisible(), true, 'Automation should expose saved route plans');
+  await page.locator('#new-route').click();
+  await page.locator('#route-id').fill('smoke-route');
+  await page.locator('#route-name').fill('Smoke route');
+  await page.locator('#route-source').selectOption('B01');
+  await page.locator('#route-target').selectOption('B04');
+  await page.locator('#save-route').click();
+  await page.waitForFunction(() => document.querySelector('#route-list').textContent.includes('Smoke route'));
+  await page.locator('#route-list [data-route-id="smoke-route"] [data-route-action="edit"]').click();
+  await page.locator('#route-name').fill('Smoke route updated');
+  await page.locator('#save-route').click();
+  await page.waitForFunction(() => document.querySelector('#route-list').textContent.includes('Smoke route updated'));
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#route-list [data-route-id="smoke-route"] [data-route-action="delete"]').click();
+  await page.waitForFunction(() => !document.querySelector('#route-list').textContent.includes('Smoke route updated'));
   await page.getByRole('button', { name: 'Edit layout', exact: true }).click();
   assert.equal(await page.locator('#layout-info-panel').isVisible(), true);
   assert.match(await page.locator('#layout-info-metrics').textContent(), /Not measured in simulation/);
