@@ -100,6 +100,7 @@
     layoutEditing: false,
     layoutDrag: null,
     pendingBlockPlacementId: null,
+    pendingWaypointPlacementId: null,
     nextConsistItemNumber: 1,
     layoutAssetEditing: null,
     pinboardCursor: null
@@ -1331,6 +1332,10 @@
       const selected = block.id === app.selectedBlockId ? ' is-selected' : '';
       return '<g class="pinboard-node' + selected + '" data-block-id="' + escapeHtml(block.id) + '" tabindex="0" role="button" aria-label="Track node ' + escapeHtml(block.name || block.id) + '"><circle cx="' + point.x + '" cy="' + point.y + '" r="9"></circle><text x="' + (point.x + 14) + '" y="' + (point.y + 4) + '">' + escapeHtml(block.name || block.id) + '</text><title>' + escapeHtml(block.name || block.id) + ' · X ' + point.x.toFixed(1) + ' · Y ' + point.y.toFixed(1) + '</title></g>';
     }).join('');
+    const splinePointMarkup = (layout.waypoints || []).map((waypoint) => {
+      const x = Number(waypoint.x || 0); const y = Number(waypoint.y || 0);
+      return '<g class="pinboard-spline-point" data-waypoint-id="' + escapeHtml(waypoint.id) + '" tabindex="0" role="button" aria-label="Spline control point ' + escapeHtml(waypoint.name || waypoint.id) + '"><circle cx="' + x + '" cy="' + y + '" r="6"></circle><text x="' + (x + 11) + '" y="' + (y - 9) + '">' + escapeHtml(waypoint.name || waypoint.id) + '</text><title>' + escapeHtml(waypoint.name || waypoint.id) + ' · X ' + x.toFixed(1) + ' · Y ' + y.toFixed(1) + '</title></g>';
+    }).join('');
     const trainMarkup = app.state.trains.map((train) => {
       const point = pinboardTrainPoint(train, blockMap);
       if (!point) return '';
@@ -1347,7 +1352,7 @@
       return '<g class="pinboard-train' + (train.id === app.selectedTrainId ? ' is-selected' : '') + '" data-pinboard-train-id="' + escapeHtml(train.id) + '" transform="translate(' + point.x + ' ' + point.y + ') rotate(' + angle + ')" tabindex="0" role="button" aria-label="Train ' + label + '">' + vehicles + '<path class="pinboard-direction-arrow" d="M 7 -5 L 17 0 L 7 5 Z"></path><text class="pinboard-train-label" transform="rotate(' + (-angle) + ')" x="10" y="-13">' + label + '</text></g>';
     }).join('');
     $('#layout-svg').setAttribute('viewBox', '0 0 980 650');
-    $('#layout-svg').innerHTML = '<g class="pinboard-layer">' + edgeMarkup + nodeMarkup + trainMarkup + '</g>';
+    $('#layout-svg').innerHTML = '<g class="pinboard-layer">' + edgeMarkup + nodeMarkup + splinePointMarkup + trainMarkup + '</g>';
     const stageMode = $('#map-stage-mode');
     if (stageMode) stageMode.textContent = '2D PINBOARD';
     $('#graph-motion-note').textContent = 'Pinboard view · drag a train marker to issue a coordinate target. Hover or move the pointer to read track coordinates.';
@@ -1363,8 +1368,21 @@
       if (display) display.textContent = 'Move over the board to read coordinates';
     };
     stage.onclick = (event) => {
-      if (!app.pendingBlockPlacementId || !app.layoutEditing || event.target.closest('.pinboard-node, .pinboard-train')) return;
+      if (!app.layoutEditing || event.target.closest('.pinboard-node, .pinboard-train, .pinboard-spline-point')) return;
       const point = pinboardPointFromEvent(event);
+      if (app.pendingWaypointPlacementId) {
+        const waypoint = (app.state.layout.waypoints || []).find((item) => item.id === app.pendingWaypointPlacementId);
+        if (!waypoint) { app.pendingWaypointPlacementId = null; return; }
+        waypoint.x = Math.max(0, Math.round(point.x));
+        waypoint.y = Math.max(0, Math.round(point.y));
+        const waypointId = waypoint.id;
+        app.pendingWaypointPlacementId = null;
+        renderGraph();
+        sendCommand({ type: 'update_waypoint', waypoint_id: waypointId, waypoint: { x: waypoint.x, y: waypoint.y } });
+        showToast(`${waypointId} placed as a spline control point.`, 'success');
+        return;
+      }
+      if (!app.pendingBlockPlacementId) return;
       const block = app.state.layout.blocks.find((item) => item.id === app.pendingBlockPlacementId);
       if (!block) { app.pendingBlockPlacementId = null; return; }
       block.x = Math.max(0, Math.round(point.x - Number(block.width || 126) / 2));
@@ -2492,6 +2510,39 @@
     } catch (error) { showToast(error.message, 'warning'); }
   }
 
+  async function addSplinePoint() {
+    if (app.workspace !== 'layout' || app.layoutView !== 'pinboard' || !app.layoutEditing) {
+      showToast('Switch to pinboard edit mode before adding a spline point.', 'warning');
+      return;
+    }
+    const from = String($('#connection-from').value || '').trim().toUpperCase();
+    const to = String($('#connection-to').value || '').trim().toUpperCase();
+    if (!from || !to || from === to) {
+      showToast('Choose two different connected nodes first.', 'warning');
+      return;
+    }
+    const connections = app.state.layout.connections || [];
+    const connected = connections.some((edge) => {
+      const left = String(edge.from || '').toUpperCase();
+      const right = String(edge.to || '').toUpperCase();
+      return (left === from && right === to) || (left === to && right === from);
+    });
+    if (!connected) {
+      showToast('Spline points must be placed on an existing track connection.', 'warning');
+      return;
+    }
+    const used = new Set((app.state.layout.waypoints || []).map((item) => String(item.id || '').toUpperCase()));
+    let sequence = (app.state.layout.waypoints || []).length + 1;
+    let id = `WP${String(sequence).padStart(2, '0')}`;
+    while (used.has(id)) id = `WP${String(++sequence).padStart(2, '0')}`;
+    const response = await sendCommand({ type: 'add_waypoint', waypoint: { id, name: 'Spline point', connected_node_ids: [from, to], x: 0, y: 0 } });
+    if (response) {
+      app.pendingWaypointPlacementId = id;
+      renderAll();
+      showToast('Spline point added. Click the pinboard to place the corner.', 'success');
+    }
+  }
+
   function svgPoint(event) {
     const svg = $('#layout-svg');
     const point = svg.createSVGPoint();
@@ -2849,6 +2900,7 @@
     $('#use-local-scan').addEventListener('click', () => $('#scan-file').click());
     $('#scan-file').addEventListener('change', useLocalScan);
     $('#add-layout-block').addEventListener('click', addLayoutBlock);
+    $('#add-spline-point').addEventListener('click', addSplinePoint);
     $('#edit-selected-block').addEventListener('click', () => openBlockEditor());
     $('#block-editor-form').addEventListener('submit', saveBlockEditor);
     $('#cancel-block-editor').addEventListener('click', () => { app.editingBlockId = null; $('#block-editor').close(); });
@@ -2987,7 +3039,7 @@
     style.textContent = '.is-collapsed .editor-tabs, .is-collapsed .editor-content { display: none; } .is-collapsed { min-height: 0 !important; } .empty-state { padding: 24px 18px; color: var(--faint); font-size: 10px; } #sync-ribbon[data-tone="warning"] .ribbon-icon { color: var(--yellow); } #sync-ribbon[data-tone="success"] .ribbon-icon { color: var(--green); } .systematic-legend { display: flex; justify-content: space-between; gap: 12px; padding: 0 18px 7px; color: var(--faint); font-size: 9px; } .systematic-legend b { color: var(--cyan); font-weight: 600; } .systematic-track { overflow-x: auto; } .systematic-block { flex: 1 1 0; min-width: 52px; padding: 0 5px; white-space: nowrap; } .systematic-block.is-selected { border-color: var(--blue-bright); box-shadow: 0 0 0 1px rgba(92,157,255,.25); color: var(--text); } .systematic-link { position: relative; z-index: 2; flex: 0 0 17px; color: var(--cyan); font-size: 12px; line-height: 1; text-align: center; } .systematic-link.is-gap { color: var(--faint); opacity: .65; } .systematic-status strong.is-occupied { color: var(--orange); } .systematic-status strong.is-route { color: var(--violet); } .rolling-stock-label { display: block; margin: 8px 18px 0; color: var(--faint); font-size: 9px; } .rolling-stock-select { width: calc(100% - 36px); min-height: 28px; margin: 4px 18px 0; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font-size: 10px; } #consist-list .consist-item { grid-template-columns: 25px minmax(0, 1fr) auto auto; } .consist-position { color: var(--faint); font-size: 9px; white-space: nowrap; } .consist-actions { display: inline-flex; gap: 3px; } .consist-actions .icon-button { width: 22px; height: 22px; font-size: 13px; } .consist-actions .icon-button:disabled { cursor: default; opacity: .3; }';
     style.textContent += ' .function-control-panel { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); } .function-control-panel .record-section-heading { padding: 0 0 8px; } .function-toggle-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; } .function-toggle { min-height: 48px; padding: 6px; border: 1px solid var(--line); border-radius: 7px; background: #0d192a; color: var(--text); text-align: left; cursor: pointer; } .function-toggle:hover { border-color: var(--blue-bright); } .function-toggle.is-on { border-color: var(--cyan); background: rgba(0, 198, 217, .13); box-shadow: inset 0 0 0 1px rgba(0, 198, 217, .16); } .function-toggle:disabled { opacity: .35; cursor: not-allowed; } .function-toggle strong, .function-toggle span, .function-toggle small { display: block; } .function-toggle strong { color: var(--cyan); font-size: 10px; } .function-toggle span { overflow: hidden; margin-top: 2px; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; } .function-toggle small { margin-top: 4px; color: var(--faint); font-size: 8px; letter-spacing: .08em; } .function-toggle.is-on small { color: var(--cyan); } .function-control-panel.is-compact { margin: 12px 18px 0; } .function-control-panel.is-compact .record-section-heading { display: block; } .function-control-panel.is-compact .settings-help { display: block; margin-top: 4px; }';
     style.textContent += ' .pinboard-layer { font-family: inherit; } .pinboard-rail { fill: none; stroke: rgba(115, 148, 184, .62); stroke-width: 8; stroke-linecap: round; } .pinboard-rail:hover { stroke: var(--cyan); } .pinboard-node { cursor: pointer; } .pinboard-node circle { fill: #10233a; stroke: var(--blue-bright); stroke-width: 2; } .pinboard-node text { fill: var(--text); font-size: 11px; font-weight: 600; } .pinboard-node.is-selected circle { fill: var(--cyan); stroke: #fff; } .pinboard-node.is-selected text { fill: var(--cyan); } .pinboard-train { cursor: grab; filter: drop-shadow(0 3px 4px rgba(0,0,0,.32)); } .pinboard-train:active { cursor: grabbing; } .pinboard-vehicle { stroke: #08111e; stroke-width: 1.5; fill: var(--orange); } .pinboard-vehicle.is-locomotive { fill: var(--cyan); } .pinboard-train.is-selected .pinboard-vehicle { stroke: #fff; stroke-width: 2; } .pinboard-direction-arrow { fill: var(--green); stroke: #07111e; stroke-width: 1; } .pinboard-train-label { fill: var(--text); font-size: 10px; font-weight: 700; paint-order: stroke; stroke: #09111f; stroke-width: 3; stroke-linejoin: round; } .calibration-form, .calibration-record { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 18px; } .calibration-record { grid-template-columns: 1fr 1.5fr auto; margin-top: 10px; align-items: end; } .calibration-form label, .calibration-record label { display: grid; gap: 4px; color: var(--faint); font-size: 9px; } .calibration-form input, .calibration-form select, .calibration-record input { min-width: 0; min-height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font: inherit; } .calibration-panel > .settings-help, .calibration-panel > .settings-status { margin-left: 18px; margin-right: 18px; } .calibration-actions { padding: 0 18px; margin-top: 10px; } .calibration-history { margin: 12px 18px 0; border-top: 1px solid var(--line); padding-top: 8px; } .calibration-history > small { color: var(--faint); } .calibration-history > div { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding-top: 5px; color: var(--faint); font-size: 9px; } .calibration-history strong { color: var(--cyan); }';
-    style.textContent += ' .route-editor { padding: 0 18px 14px; border-bottom: 1px solid var(--line); } .route-editor .field-grid { padding: 0; } .route-editor .button-row { padding: 10px 0 0; } .route-panel .settings-status { margin: 9px 0 0; } .route-list { padding: 0 18px 12px; } .route-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); } .route-row-main, .route-row-main strong, .route-row-main small { display: block; min-width: 0; } .route-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .route-row-main small, .route-row-meta { color: var(--faint); font-size: 9px; } .route-row-meta { white-space: nowrap; } .route-row-actions { display: inline-flex; gap: 4px; }';
+    style.textContent += ' .route-editor { padding: 0 18px 14px; border-bottom: 1px solid var(--line); } .route-editor .field-grid { padding: 0; } .route-editor .button-row { padding: 10px 0 0; } .route-panel .settings-status { margin: 9px 0 0; } .route-list { padding: 0 18px 12px; } .route-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); } .route-row-main, .route-row-main strong, .route-row-main small { display: block; min-width: 0; } .route-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .route-row-main small, .route-row-meta { color: var(--faint); font-size: 9px; } .route-row-meta { white-space: nowrap; } .route-row-actions { display: inline-flex; gap: 4px; } .pinboard-spline-point { cursor: grab; } .pinboard-spline-point circle { fill: var(--violet); stroke: #fff; stroke-width: 1.5; } .pinboard-spline-point text { fill: var(--violet); font-size: 9px; font-weight: 700; paint-order: stroke; stroke: #09111f; stroke-width: 3; }';
     document.head.appendChild(style);
   }
 

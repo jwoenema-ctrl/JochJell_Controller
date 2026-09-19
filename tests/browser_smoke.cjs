@@ -192,6 +192,16 @@ async function shot(page, name) {
     const block = state.layout.blocks.find(item => item.id === 'b05');
     return block && Number(block.x) > 0 && Number(block.y) > 0 && (Number(block.x) !== 702 || Number(block.y) !== 224);
   });
+  await page.locator('#connection-from').selectOption('b02');
+  await page.locator('#connection-to').selectOption('b03');
+  await page.locator('#add-spline-point').click();
+  await page.waitForFunction(() => document.querySelector('#layout-svg [data-waypoint-id="WP02"]') !== null);
+  await page.mouse.click(pinboardBounds.x + pinboardBounds.width * 0.52, pinboardBounds.y + pinboardBounds.height * 0.58);
+  await page.waitForFunction(async () => {
+    const state = await fetch('/api/state').then(response => response.json());
+    const waypoint = state.layout.waypoints.find(item => item.id === 'WP02');
+    return waypoint && Number(waypoint.y) > 0;
+  });
   await page.getByRole('button', { name: 'Node graph', exact: true }).click();
   await page.locator('#layout-power-toggle').click();
   await page.waitForFunction(() => document.querySelector('#layout-power-toggle').textContent === 'Power on');
