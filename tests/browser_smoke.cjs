@@ -181,8 +181,18 @@ async function shot(page, name) {
   await page.getByRole('button', { name: 'Edit layout', exact: true }).click();
   assert.equal(await page.locator('#layout-info-panel').isVisible(), true);
   assert.match(await page.locator('#layout-info-metrics').textContent(), /Not measured in simulation/);
+  await page.getByRole('button', { name: '2D pinboard', exact: true }).click();
+  assert.equal(await page.locator('#graph-editor-tools').isVisible(), true, 'Pinboard editing should expose graph connections');
   await page.locator('#add-layout-block').click();
   await page.waitForFunction(() => document.querySelector('#block-count').textContent === '5');
+  const pinboardBounds = await page.locator('#map-stage').boundingBox();
+  await page.mouse.click(pinboardBounds.x + pinboardBounds.width * 0.78, pinboardBounds.y + pinboardBounds.height * 0.72);
+  await page.waitForFunction(async () => {
+    const state = await fetch('/api/state').then(response => response.json());
+    const block = state.layout.blocks.find(item => item.id === 'b05');
+    return block && Number(block.x) > 0 && Number(block.y) > 0 && (Number(block.x) !== 702 || Number(block.y) !== 224);
+  });
+  await page.getByRole('button', { name: 'Node graph', exact: true }).click();
   await page.locator('#layout-power-toggle').click();
   await page.waitForFunction(() => document.querySelector('#layout-power-toggle').textContent === 'Power on');
   await page.locator('#edit-selected-block').click();

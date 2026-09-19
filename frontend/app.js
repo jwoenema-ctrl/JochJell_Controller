@@ -99,6 +99,7 @@
     scanObjectUrls: {},
     layoutEditing: false,
     layoutDrag: null,
+    pendingBlockPlacementId: null,
     nextConsistItemNumber: 1,
     layoutAssetEditing: null,
     pinboardCursor: null
@@ -1361,6 +1362,19 @@
       const display = $('#pinboard-coordinate');
       if (display) display.textContent = 'Move over the board to read coordinates';
     };
+    stage.onclick = (event) => {
+      if (!app.pendingBlockPlacementId || !app.layoutEditing || event.target.closest('.pinboard-node, .pinboard-train')) return;
+      const point = pinboardPointFromEvent(event);
+      const block = app.state.layout.blocks.find((item) => item.id === app.pendingBlockPlacementId);
+      if (!block) { app.pendingBlockPlacementId = null; return; }
+      block.x = Math.max(0, Math.round(point.x - Number(block.width || 126) / 2));
+      block.y = Math.max(0, Math.round(point.y - Number(block.height || 56) / 2));
+      const blockId = block.id;
+      app.pendingBlockPlacementId = null;
+      renderGraph();
+      sendCommand({ type: 'move_block', block_id: blockId, x: block.x, y: block.y });
+      showToast(`${blockId} placed on the pinboard.`, 'success');
+    };
     $$('[data-block-id]', $('#layout-svg')).forEach((node) => {
       node.addEventListener('click', () => selectBlock(node.dataset.blockId));
       node.addEventListener('pointerdown', (event) => beginBlockDrag(event, node.dataset.blockId));
@@ -2353,9 +2367,10 @@
     $('#layout-panel').classList.toggle('systematic-only', app.layoutView === 'systematic');
     $('#map-stage').classList.toggle('is-hidden', app.layoutView === 'systematic');
     $('.map-summary').classList.toggle('is-hidden', app.layoutView === 'systematic');
-    $('#graph-editor-tools').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
+    $('#graph-editor-tools').classList.toggle('is-hidden', page !== 'layout' || !app.layoutEditing || !['editor', 'pinboard'].includes(app.layoutView));
     $('#connection-limit-editor').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
     $$('.map-legend .editor-action').forEach((button) => button.classList.toggle('is-hidden', page !== 'layout'));
+    $('#add-layout-block').textContent = app.layoutView === 'pinboard' ? '＋ Place node' : '＋ Block';
     $('#scan-panel').classList.toggle('is-hidden', !['layout', 'scans'].includes(page));
     $('#route-panel').classList.toggle('is-hidden', page !== 'layout');
     $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
@@ -2471,8 +2486,9 @@
       mergePayload(response);
       const added = app.state.layout.blocks.find(item => !previousIds.has(item.id));
       if (added) app.selectedBlockId = added.id;
+      if (added && app.layoutView === 'pinboard') app.pendingBlockPlacementId = added.id;
       renderAll();
-      showToast('Block added. Save layout to keep your changes.', 'success');
+      showToast(app.layoutView === 'pinboard' ? 'New node added. Click the pinboard to place it.' : 'Block added. Save layout to keep your changes.', 'success');
     } catch (error) { showToast(error.message, 'warning'); }
   }
 
@@ -2856,7 +2872,8 @@
     $$('.toolbar-tab').forEach((button) => button.addEventListener('click', () => {
       if (button.dataset.layoutView === 'editor' && app.workspace !== 'layout') { navigateWorkspace('layout'); return; }
       app.layoutView = button.dataset.layoutView;
-      app.layoutEditing = app.workspace === 'layout' && app.layoutView === 'editor';
+      if (app.workspace !== 'layout') app.layoutEditing = false;
+      else if (app.layoutView === 'editor') app.layoutEditing = true;
       renderGraph(); updateWorkspaceVisibility();
     }));
     $$('.editor-tab').forEach((button) => button.addEventListener('click', () => { app.editorTab = button.dataset.editorTab; renderEditor(); }));
