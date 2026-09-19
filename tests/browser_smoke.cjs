@@ -104,18 +104,18 @@ async function shot(page, name) {
   assert.ok(host.height >= 250 && host.height <= 600, `Unbounded viewport height ${host.height}`);
   assert.equal(await page.locator('#layout-panel').isVisible(), false, 'Scans should not show the dispatch panels');
   await shot(page, 'scans-desktop');
-  for (const name of ['Dispatch', 'Layout editor', 'Trains', 'Timetable', '3D scans']) {
+  for (const name of ['Home', 'Automation', 'Trains', 'Settings']) {
     await page.locator('.mode-nav').getByRole('button', { name, exact: true }).click();
     assert.equal(await page.locator('#settings-page').isVisible(), false);
   }
-  await page.locator('.mode-nav').getByRole('button', { name: 'Layout editor', exact: true }).click();
+  await page.locator('.mode-nav').getByRole('button', { name: 'Automation', exact: true }).click();
   await page.getByRole('button', { name: 'Systematic track', exact: true }).click();
   assert.equal(await page.locator('#systematic-panel').isVisible(), true);
   await page.getByRole('button', { name: 'Node graph', exact: true }).click();
   assert.equal(await page.locator('#map-stage').isVisible(), true);
-  await page.locator('.mode-nav').getByRole('button', { name: 'Dispatch', exact: true }).click();
+  await page.locator('.mode-nav').getByRole('button', { name: 'Home', exact: true }).click();
   await shot(page, 'dispatch-desktop');
-  assert.equal(await page.locator('#layout-panel').evaluate(node => node.classList.contains('is-editing')), false, 'Dispatch must not leave layout dragging enabled');
+  assert.equal(await page.locator('#layout-panel').evaluate(node => node.classList.contains('is-editing')), false, 'Home must not leave layout dragging enabled');
   const graphBounds = await page.locator('#map-stage').boundingBox();
   for (const block of await page.locator('#layout-svg .block-node rect').all()) {
     const bounds = await block.boundingBox();
@@ -127,20 +127,21 @@ async function shot(page, name) {
   await shot(page, 'trains-desktop');
   await page.locator('.mode-nav').getByRole('button', { name: 'Settings', exact: true }).click();
   await page.locator('#setting-theme').selectOption('light');
-  await page.locator('.mode-nav').getByRole('button', { name: 'Dispatch', exact: true }).click();
+  await page.locator('.mode-nav').getByRole('button', { name: 'Home', exact: true }).click();
   await shot(page, 'dispatch-light');
   await page.locator('.mode-nav').getByRole('button', { name: 'Settings', exact: true }).click();
   await page.locator('#settings-discard').click();
   await page.setViewportSize({ width: 390, height: 844 });
-  for (const name of ['Settings', '3D scans', 'Dispatch', 'Trains', 'Timetable', 'Layout editor']) {
+  for (const name of ['Settings', 'Home', 'Trains', 'Automation']) {
     await page.locator('.mode-nav').getByRole('button', { name, exact: true }).click();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     assert.ok(overflow <= 2, `${name} page overflows mobile viewport by ${overflow}px`);
-    if (['Settings', '3D scans'].includes(name)) await shot(page, name === 'Settings' ? 'settings-mobile' : 'scans-mobile');
+    if (name === 'Settings') await shot(page, 'settings-mobile');
   }
 
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.locator('.mode-nav').getByRole('button', { name: 'Layout editor', exact: true }).click();
+  await page.locator('.mode-nav').getByRole('button', { name: 'Automation', exact: true }).click();
+  await page.getByRole('button', { name: 'Edit layout', exact: true }).click();
   assert.equal(await page.locator('#layout-info-panel').isVisible(), true);
   assert.match(await page.locator('#layout-info-metrics').textContent(), /Not measured in simulation/);
   await page.locator('#add-layout-block').click();
