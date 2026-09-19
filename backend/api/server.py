@@ -138,6 +138,11 @@ class ControllerApplication:
     _scheduler_remainder_seconds: float = field(default=0.0, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _presence_state: dict[str, Any] = field(default_factory=lambda: {"results": [], "summary": {"total": 0, "detected": 0, "unknown": 0, "errors": 0}}, init=False, repr=False)
+    _programming_state: dict[str, Any] = field(default_factory=lambda: {
+        "last_request": None,
+        "supported": False,
+        "detail": "Decoder CV programming is validation-only until the Z21 programming transport is enabled.",
+    }, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compose the domain runtime once and mirror the initial UI fixture into it."""
@@ -868,6 +873,79 @@ class ControllerApplication:
     def train_presence_state(self) -> dict[str, Any]:
         return deepcopy(self._presence_state)
 
+    def rolling_stock_inventory(self) -> dict[str, Any]:
+        """Return a fleet-wide rolling-stock inventory derived from saved consists."""
+        grouped: dict[str, dict[str, Any]] = {}
+        total = 0
+        for train in self.trains:
+            database = train.get("database") if isinstance(train.get("database"), dict) else {}
+            consist = train.get("rolling_stock") or database.get("rolling_stock") or train.get("consist") or ()
+            for item in consist:
+                if not isinstance(item, dict):
+                    continue
+                vehicle_id = str(item.get("catalogue_id") or item.get("rolling_stock_id") or item.get("id") or item.get("name") or "vehicle").strip()
+                vehicle_type = str(item.get("vehicle_type") or item.get("type") or "rolling stock").strip().lower()
+                key = f"{vehicle_type}:{vehicle_id.lower()}"
+                row = grouped.setdefault(key, {
+                    "id": vehicle_id,
+                    "name": str(item.get("name") or vehicle_id),
+                    "vehicle_type": vehicle_type,
+                    "manufacturer": str(item.get("manufacturer") or ""),
+                    "model": str(item.get("model") or item.get("model_number") or ""),
+                    "count": 0,
+                    "train_ids": [],
+                    "length_mm": item.get("length_mm"),
+                    "mass_g": item.get("mass_g"),
+                })
+                row["count"] += 1
+                train_id = str(train.get("id", ""))
+                if train_id and train_id not in row["train_ids"]:
+                    row["train_ids"].append(train_id)
+                total += 1
+        rows = sorted(grouped.values(), key=lambda row: (row["vehicle_type"], row["name"].lower(), row["id"]))
+        return {"total": total, "distinct": len(rows), "items": rows}
+
+    def programming_state(self) -> dict[str, Any]:
+        return deepcopy(self._programming_state)
+
+    def request_decoder_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate a programming request without issuing an unsupported CV write."""
+        train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+        train = next((item for item in self.trains if item.get("id") == train_id), None)
+        if train is None:
+            raise ValueError(f"Unknown train: {train_id}")
+        target = str(payload.get("target", "main")).strip().lower()
+        if target not in {"main", "programming_track"}:
+            raise ValueError("target must be main or programming_track")
+        address_value = payload.get("address", train.get("address", train.get("number")))
+        try:
+            address = int(address_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DCC address must be an integer") from exc
+        if address < 1 or address > 9999:
+            raise ValueError("DCC address must be between 1 and 9999")
+        try:
+            cv = int(payload.get("cv"))
+            value = int(payload.get("value"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("CV and value must be integers") from exc
+        if cv < 1 or cv > 1024:
+            raise ValueError("CV must be between 1 and 1024")
+        if value < 0 or value > 255:
+            raise ValueError("CV value must be between 0 and 255")
+        request = {
+            "train_id": train_id,
+            "address": address,
+            "cv": cv,
+            "value": value,
+            "target": target,
+            "operation": "write",
+            "status": "validated",
+        }
+        self._programming_state["last_request"] = request
+        self.events.append({"type": "decoder_programming_validated", "request": request})
+        return self.programming_state()
+
     def scan_train_presence(self) -> dict[str, Any]:
         if self.runtime is None:
             raise ValueError("runtime is not available")
@@ -1159,6 +1237,8 @@ class ControllerApplication:
             "layout_info": self.layout_info(),
             "calibration": self.calibration_state(),
             "presence": self.train_presence_state(),
+            "rollingStockInventory": self.rolling_stock_inventory(),
+            "programming": self.programming_state(),
             "feedback": snapshot["feedback"],
             "layout": {
                 "name": self.layout_name,
@@ -1740,6 +1820,8 @@ class ControllerApplication:
                 self.events.append({"type": "calibration_started", "run_id": run.run_id, "train_id": train_id})
             elif kind in {"scan_train_presence", "ping_train_addresses", "detect_trains"}:
                 self.scan_train_presence()
+            elif kind in {"program_decoder", "program_cv", "request_programming"}:
+                self.request_decoder_programming(payload)
             elif kind in {"cancel_calibration", "stop_calibration"}:
                 if self.runtime is None:
                     raise ValueError("runtime is not available")
@@ -2474,6 +2556,10 @@ class ControllerHandler(BaseHTTPRequestHandler):
             return self._send_json(self.application.calibration_state())
         if parsed.path == "/api/presence":
             return self._send_json(self.application.train_presence_state())
+        if parsed.path == "/api/rolling-stock":
+            return self._send_json(self.application.rolling_stock_inventory())
+        if parsed.path == "/api/programming":
+            return self._send_json(self.application.programming_state())
         if parsed.path == "/api/train-catalogue":
             query = parse_qs(parsed.query)
             format_name = query.get("format", ["json"])[0]

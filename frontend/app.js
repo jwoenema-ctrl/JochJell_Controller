@@ -87,6 +87,7 @@
     selectedBlockId: 'b04',
     controlMode: 'manual',
     workspace: 'dispatch',
+    trainSection: 'overview',
     layoutView: 'graph',
     editorTab: 'datasheet',
     simRate: 1,
@@ -313,6 +314,8 @@
     if (value.mode) app.state.mode = value.mode;
     if (value.calibration) app.state.calibration = value.calibration;
     if (value.presence) app.state.presence = value.presence;
+    if (value.rollingStockInventory) app.state.rollingStockInventory = value.rollingStockInventory;
+    if (value.programming) app.state.programming = value.programming;
   }
 
   function mergeTrainDatabaseRecords(records) {
@@ -415,6 +418,8 @@
       app.state.connection = lastConnection;
       renderTrainList();
       renderSchedules();
+      renderInventory();
+      renderProgramming();
       updateSync('Controller state refreshed', 'success');
     } else {
       app.state.layout_info = null;
@@ -826,6 +831,8 @@
     renderSchedules();
     renderAssembler();
     renderCalibration();
+    renderInventory();
+    renderProgramming();
     renderStats();
     renderConnectionEditor();
     renderLayoutAssetInspector();
@@ -852,6 +859,58 @@
     $('#calibration-history').innerHTML = history.length
       ? '<small>Recent measurements</small>' + history.slice(0, 4).map((item) => '<div><span>' + escapeHtml(item.train_id) + '</span><strong>' + escapeHtml(String(item.measured_distance_mm)) + ' mm</strong><small>' + escapeHtml(String(item.speed_kmh)) + ' km/h · ' + escapeHtml(String(item.duration_ms)) + ' ms</small></div>').join('')
       : '<small>No stored measurements for this controller yet.</small>';
+  }
+
+  function renderInventory() {
+    const host = $('#inventory-list');
+    if (!host) return;
+    const fallback = [];
+    (app.state.trains || []).forEach((train) => (train.consist || []).forEach((item) => fallback.push({
+      id: item.catalogue_id || item.id || item.name || 'vehicle',
+      name: item.name || item.type || 'Rolling stock',
+      vehicle_type: item.vehicle_type || item.type || 'rolling stock',
+      count: 1,
+      train_ids: [train.id],
+    })));
+    const inventory = app.state.rollingStockInventory || {};
+    const items = Array.isArray(inventory.items) && inventory.items.length ? inventory.items : fallback;
+    const total = inventory.total != null ? inventory.total : items.reduce((sum, item) => sum + Number(item.count || 0), 0);
+    $('#inventory-summary').textContent = `${total} vehicle${total === 1 ? '' : 's'}`;
+    host.innerHTML = items.length ? items.map((item) => `<div class="inventory-row"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}</small></span><span class="inventory-type">${escapeHtml(item.vehicle_type || 'rolling stock')}</span><span class="inventory-count">×${escapeHtml(item.count || 0)}</span></div>`).join('') : '<div class="empty-state">No rolling stock is assigned to a saved consist yet.</div>';
+  }
+
+  function renderProgramming() {
+    const select = $('#programming-train-select');
+    if (!select) return;
+    const trains = app.state.trains || [];
+    select.innerHTML = trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || `Train ${train.number || train.id}`)} · #${escapeHtml(train.number || '—')}</option>`).join('');
+    if (trains.some((train) => train.id === app.selectedTrainId)) select.value = app.selectedTrainId;
+    const train = trains.find((item) => item.id === select.value) || selectedTrain();
+    if (train && $('#programming-address')) $('#programming-address').value = train.address || train.number || '';
+    const state = app.state.programming || {};
+    const last = state.last_request;
+    $('#programming-state').textContent = state.supported ? 'Ready' : 'Validation only';
+    $('#programming-status').textContent = last
+      ? `Validated CV${last.cv}=${last.value} for #${last.address} on ${last.target === 'programming_track' ? 'programming track' : 'main track'}; no decoder write was sent.`
+      : state.detail || 'No programming request validated.';
+  }
+
+  async function validateProgramming() {
+    const trainId = $('#programming-train-select').value;
+    if (!trainId) return;
+    const command = {
+      type: 'program_decoder',
+      train_id: trainId,
+      address: Number($('#programming-address').value),
+      target: $('#programming-target').value,
+      cv: Number($('#programming-cv').value),
+      value: Number($('#programming-value').value),
+    };
+    if (![command.address, command.cv, command.value].every(Number.isFinite)) {
+      showToast('Enter a valid DCC address, CV, and value.', 'warning');
+      return;
+    }
+    await sendCommand(command);
   }
 
   async function startCalibration() {
@@ -2005,11 +2064,22 @@
     $$('.map-legend .editor-action').forEach((button) => button.classList.toggle('is-hidden', page !== 'layout'));
     $('#scan-panel').classList.toggle('is-hidden', page !== 'scans');
     $('.lower-grid').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
+    const trainSection = page === 'trains' ? app.trainSection : null;
+    $('#train-panel').classList.toggle('is-hidden', page === 'trains' ? trainSection !== 'overview' : page !== 'dispatch');
+    // Keep the selected train editor available on the default overview for
+    // existing workflows; the Locomotives tab simply focuses the same module.
     $('#train-editor-panel').classList.toggle('is-hidden', page !== 'trains');
     $('.bottom-grid').classList.toggle('is-hidden', !['dispatch', 'layout', 'trains', 'timetable'].includes(page));
     $('#timetable-panel').classList.toggle('is-hidden', !['dispatch', 'layout', 'timetable'].includes(page));
-    $('#calibration-panel').classList.toggle('is-hidden', page !== 'trains');
-    $('#assembler-panel').classList.toggle('is-hidden', page !== 'trains');
+    $('#rolling-stock-panel').classList.toggle('is-hidden', page !== 'trains' || trainSection !== 'rolling-stock');
+    $('#programming-panel').classList.toggle('is-hidden', page !== 'trains' || trainSection !== 'programming');
+    $('#calibration-panel').classList.toggle('is-hidden', page !== 'trains' || trainSection !== 'programming');
+    $('#assembler-panel').classList.toggle('is-hidden', page !== 'trains' || trainSection !== 'assembler');
+    $$('.trains-subnav-link').forEach((link) => {
+      const active = page === 'trains' && link.dataset.trainSection === trainSection;
+      link.classList.toggle('is-active', active);
+      if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
+    });
     $('#fit-layout').classList.toggle('is-hidden', !trackPage);
     $('.search-box').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     const titles = { dispatch: 'Home', layout: 'Automation', trains: 'Your trains', timetable: 'Timetable', scans: '3D workspace' };
@@ -2412,6 +2482,14 @@
       openBlockEditor();
     });
     $$('.mode-tab').forEach((button) => button.addEventListener('click', () => navigateWorkspace(button.dataset.workspace)));
+    $$('.trains-subnav-link').forEach((link) => link.addEventListener('click', (event) => {
+      event.preventDefault();
+      app.trainSection = link.dataset.trainSection || 'overview';
+      if (app.workspace !== 'trains') navigateWorkspace('trains');
+      else updateWorkspaceVisibility();
+      const target = document.querySelector(link.getAttribute('href'));
+      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }));
     $('#app-settings-form').addEventListener('submit', saveAppSettings);
     $('#app-settings-form').addEventListener('input', () => { app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; renderWlanPresentation(app.settingsRuntime); updateNativeControls(); });
     $('#setting-theme').addEventListener('change', (event) => applyTheme(event.target.value));
@@ -2490,7 +2568,9 @@
     $('#speed-slider').addEventListener('change', flushSpeedDraft);
     $('#speed-slider').addEventListener('pointerup', flushSpeedDraft);
     $('#speed-slider').addEventListener('pointercancel', cancelSpeedDraft);
-    $('#calibration-train-select').addEventListener('change', (event) => { app.selectedTrainId = event.target.value; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); renderCalibration(); });
+    $('#calibration-train-select').addEventListener('change', (event) => { app.selectedTrainId = event.target.value; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); renderCalibration(); renderProgramming(); });
+    $('#programming-train-select').addEventListener('change', (event) => { app.selectedTrainId = event.target.value; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); renderCalibration(); renderProgramming(); });
+    $('#validate-programming').addEventListener('click', validateProgramming);
     $('#start-calibration').addEventListener('click', startCalibration);
     $('#cancel-calibration').addEventListener('click', () => sendCommand({ type: 'cancel_calibration' }));
     $('#record-calibration').addEventListener('click', recordCalibration);

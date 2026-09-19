@@ -159,6 +159,13 @@
           </div>
         </div>
 
+        <nav class="trains-subnav" aria-label="Trains sections">
+          <a class="trains-subnav-link is-active" data-train-section="overview" href="#train-panel" aria-current="page">Overview</a>
+          <a class="trains-subnav-link" data-train-section="locomotives" href="#train-editor-panel">Locomotives</a>
+          <a class="trains-subnav-link" data-train-section="rolling-stock" href="#rolling-stock-panel">Rolling stock</a>
+          <a class="trains-subnav-link" data-train-section="programming" href="#programming-panel">Programming</a>
+          <a class="trains-subnav-link" data-train-section="assembler" href="#assembler-panel">Assembler</a>
+        </nav>
         <section class="panel layout-info" id="layout-info-panel" aria-labelledby="layout-info-title">
           <div class="layout-info-heading"><h3 id="layout-info-title">Layout information</h3><button type="button" class="button button-soft" id="layout-power-toggle">Power off</button></div>
           <div id="layout-info-metrics" class="layout-info-metrics"></div>
@@ -254,6 +261,29 @@
         </div>
 
         <div class="bottom-grid">
+          <section class="panel rolling-stock-panel" id="rolling-stock-panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">FLEET INVENTORY</p><h2>Rolling stock</h2></div>
+              <span class="tiny-status" id="inventory-summary">0 vehicles</span>
+            </div>
+            <div class="inventory-list" id="inventory-list"></div>
+          </section>
+          <section class="panel programming-panel" id="programming-panel">
+            <div class="panel-heading">
+              <div><p class="eyebrow">DCC PROGRAMMING</p><h2>Decoder programming</h2></div>
+              <span class="tiny-status" id="programming-state">Validation only</span>
+            </div>
+            <div class="programming-form">
+              <label>Train<select id="programming-train-select" aria-label="Train to program"></select></label>
+              <label>DCC address<input id="programming-address" type="number" min="1" max="9999" step="1"></label>
+              <label>Target<select id="programming-target"><option value="main">Main track</option><option value="programming_track">Programming track</option></select></label>
+              <label>CV<input id="programming-cv" type="number" min="1" max="1024" step="1" value="29"></label>
+              <label>Value<input id="programming-value" type="number" min="0" max="255" step="1" value="0"></label>
+            </div>
+            <div class="button-row programming-actions"><button type="button" class="button button-primary" id="validate-programming">Validate request</button></div>
+            <p class="settings-help">This prepares and validates a CV write request. It does not write to the decoder until the Z21 programming transport is enabled.</p>
+            <p class="settings-status" id="programming-status" role="status">No programming request validated.</p>
+          </section>
           <section class="panel calibration-panel" id="calibration-panel">
             <div class="panel-heading">
               <div><p class="eyebrow">MOTION CALIBRATION</p><h2>Calibrate selected train</h2></div>
