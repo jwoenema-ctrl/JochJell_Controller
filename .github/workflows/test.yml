@@ -18,7 +18,21 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run unittest suite
-        run: python -m unittest discover -s tests -q
+        shell: bash
+        run: |
+          set +e
+          python -m unittest discover -s tests -q 2>&1 | tee unittest.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "## unittest failure" >> "$GITHUB_STEP_SUMMARY"
+            cat unittest.log >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do
+              case "$line" in
+                *FAIL*|*ERROR*|*Traceback*|*AssertionError*) echo "::error file=tests,line=1::$line" ;;
+              esac
+            done < unittest.log
+            exit "$status"
+          fi
       - name: Check frontend JavaScript
         run: |
           node --check frontend/app.js
