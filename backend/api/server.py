@@ -2102,6 +2102,27 @@ class ControllerApplication:
                     item["address"] = None
             if defaults and not item.get("connected_block_ids"):
                 raise ValueError("turntable requires connected_block_ids")
+        elif asset_type == "turnout":
+            if defaults or "name" in item:
+                item["name"] = str(item.get("name", display_id)).strip() or display_id
+            for canonical, aliases in (
+                ("from", ("from", "entry_block_id", "entry")),
+                ("to", ("to", "straight_block_id", "straight")),
+                ("alternate", ("alternate", "diverging_block_id", "diverging")),
+            ):
+                value = self._first_layout_value(item, *aliases, default=None)
+                if value is not None or defaults:
+                    item[canonical] = str(value).strip().upper() if value not in (None, "") else ""
+                for alias in aliases:
+                    if alias != canonical:
+                        item.pop(alias, None)
+            if defaults or "state" in item:
+                item["state"] = str(item.get("state", "straight")).strip().lower() or "straight"
+            if defaults or "address" in item:
+                if item.get("address") in (None, ""):
+                    item["address"] = None
+            if defaults and not all(item.get(field) for field in ("from", "to", "alternate")):
+                raise ValueError("turnout requires from, to, and alternate block IDs")
         elif asset_type == "platform":
             if defaults or "name" in item:
                 item["name"] = str(item.get("name", display_id)).strip() or display_id
@@ -2131,7 +2152,7 @@ class ControllerApplication:
         try:
             snapshot = snapshot_from_ui(
                 blocks=self.blocks,
-                turnouts=self.turnouts,
+                turnouts=collections.get("turnouts", self.turnouts),
                 trains=self.trains,
                 schedules=self.schedules,
                 routes=self.routes,
@@ -2163,7 +2184,7 @@ class ControllerApplication:
         """Handle CRUD for one of the five editable layout asset collections."""
 
         parts = kind.split("_", 1)
-        if len(parts) != 2 or parts[0] not in {"add", "update", "remove", "delete"} or parts[1] not in {"station", "signal", "waypoint", "turntable", "platform"}:
+        if len(parts) != 2 or parts[0] not in {"add", "update", "remove", "delete"} or parts[1] not in {"station", "signal", "waypoint", "turnout", "turntable", "platform"}:
             return False
         operation = "remove" if parts[0] == "delete" else parts[0]
         asset_type = parts[1]
@@ -2350,6 +2371,60 @@ class ControllerApplication:
                 self.events.append({"type": "recording_stopped", "train_id": plan.train_id, "action_count": plan.action_count})
             elif kind in {"play_recording", "playback_recording"}:
                 self.play_recording(payload)
+            elif kind in {"place_train_on_track", "place_train"}:
+                if not self.simulation_mode:
+                    raise ValueError("placing a train on a coordinate is available in simulation only")
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((item for item in self.trains if item.get("id") == train_id), None)
+                if train is None:
+                    raise ValueError(f"Unknown train: {train_id}")
+                if self.runtime is None or not hasattr(self.runtime.track, "place_train"):
+                    raise ValueError("simulation track placement is unavailable")
+                try:
+                    x, y = float(payload.get("x")), float(payload.get("y"))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("x and y coordinates are required") from exc
+                coordinate = nearest_track_coordinate(self.blocks, self._topology_edges(), x, y)
+                if coordinate is None:
+                    raise ValueError("coordinate is not on a configured track segment")
+                occupied = {
+                    str(motion.block_id).upper(): motion.train_id
+                    for motion in self.runtime.track.get_snapshot().trains
+                }
+                source = coordinate.from_node.upper()
+                occupant = occupied.get(source)
+                if occupant is not None and occupant != train_id:
+                    raise ValueError(f"track block {source} is occupied by {self._ui_train_id(occupant)}")
+                route = (source, coordinate.to_node.upper())
+                result = self.runtime.track.place_train(
+                    train_id,
+                    source,
+                    coordinate.progress,
+                    route=route,
+                    direction=1,
+                )
+                if hasattr(result, "accepted") and not result.accepted:
+                    raise ValueError(result.detail or "train placement was rejected")
+                control = self.runtime.dispatcher.register_train(train_id)
+                control.mode = ControlMode.STOPPED
+                control.manual_speed = control.automatic_speed = 0.0
+                train.update({
+                    "block_id": source,
+                    "route": [source, route[1]],
+                    "mode": ControlMode.STOPPED.value,
+                    "speed": 0,
+                    "requested_speed_kmh": 0,
+                    "target_coordinate": None,
+                })
+                self.events.append({
+                    "type": "train_placed_on_track",
+                    "train_id": train_id,
+                    "coordinate": {
+                        "x": round(coordinate.x, 2), "y": round(coordinate.y, 2),
+                        "from_node": coordinate.from_node.lower(), "to_node": coordinate.to_node.lower(),
+                        "progress": round(coordinate.progress, 6),
+                    },
+                })
             elif kind in {"upsert_rolling_stock_inventory", "set_rolling_stock_inventory"}:
                 if self.runtime is None:
                     raise ValueError("runtime is not available")
@@ -2860,6 +2935,66 @@ class ControllerApplication:
                 self.blocks.append(block)
                 self._sync_runtime_from_ui(apply_motion=False)
                 self.events.append({"type": "block_added", "block_id": block_id})
+            elif kind in {"remove_block", "delete_block"}:
+                block_id = str(payload.get("block_id", payload.get("id", ""))).strip().upper()
+                block_index = next((index for index, item in enumerate(self.blocks)
+                                    if str(item.get("id", "")).upper() == block_id), None)
+                if block_index is None:
+                    raise ValueError(f"Unknown block: {block_id}")
+                block = self.blocks[block_index]
+                status = str(block.get("status", "free")).strip().lower()
+                if status in {"occupied", "route", "reserved", "out_of_service", "offline"} or block.get("occupied_by") or block.get("reserved_for"):
+                    raise ValueError(f"cannot remove block {block_id} while it is in use")
+
+                def references(collection: Iterable[dict[str, Any]], fields: Iterable[str]) -> list[str]:
+                    matches = []
+                    for item in collection:
+                        for field in fields:
+                            value = item.get(field)
+                            values = value if isinstance(value, (list, tuple, set)) else (value,)
+                            if any(str(candidate).strip().upper() == block_id for candidate in values if candidate not in (None, "")):
+                                matches.append(str(item.get("id", "")))
+                                break
+                    return matches
+
+                runtime_occupants = ()
+                if self.runtime is not None and hasattr(self.runtime.track, "get_snapshot"):
+                    runtime_occupants = tuple(
+                        motion.train_id for motion in self.runtime.track.get_snapshot().trains
+                        if str(motion.block_id).upper() == block_id
+                    )
+                if runtime_occupants:
+                    raise ValueError(f"cannot remove block {block_id} while a train is occupying it")
+                train_refs = references(self.trains, ("block_id", "destination_block_id", "current_block_id"))
+                if train_refs:
+                    raise ValueError(f"cannot remove block {block_id}: train {train_refs[0]} references it")
+                for label, collection, fields in (
+                    ("turnout", self.turnouts, ("from", "to", "alternate", "entry_block_id", "straight_block_id", "diverging_block_id")),
+                    ("station", self.stations, ("blockIds", "block_ids")),
+                    ("signal", self.signals, ("block_id", "protects_block_id")),
+                    ("waypoint", self.waypoints, ("connected_node_ids", "connectedNodeIds")),
+                    ("turntable", self.turntables, ("connected_block_ids", "aligned_block_id")),
+                    ("platform", self.platforms, ("blockId", "block_id")),
+                    ("route", self.routes, ("source_block_id", "target_block_id", "node_ids", "path")),
+                    ("connection speed limit", self.connection_limits, ("from", "to", "from_block_id", "to_block_id")),
+                ):
+                    matches = references(collection, fields)
+                    if matches:
+                        raise ValueError(f"cannot remove block {block_id}: {label} {matches[0]} references it")
+
+                self.blocks.pop(block_index)
+                for other in self.blocks:
+                    neighbours = other.get("neighbor_ids", other.get("neighborIds"))
+                    if neighbours is None:
+                        continue
+                    filtered = [item for item in neighbours if str(item).strip().upper() != block_id]
+                    other["neighbor_ids"] = filtered
+                    other.pop("neighborIds", None)
+                self.connection_limits = [rule for rule in self.connection_limits
+                                          if str(rule.get("from", "")).upper() != block_id
+                                          and str(rule.get("to", "")).upper() != block_id]
+                self._sync_runtime_from_ui(apply_motion=False)
+                self.events.append({"type": "block_removed", "block_id": block_id})
             elif kind == "update_block":
                 block_id = str(payload.get("block_id", payload.get("id", ""))).strip().upper()
                 block = next((item for item in self.blocks if str(item.get("id", "")).upper() == block_id), None)

@@ -25,6 +25,20 @@ class LayoutEditorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.app.command({"type": "add_block", "block": {"id": "b01"}})
 
+    def test_unreferenced_block_can_be_removed_and_runtime_graph_stays_valid(self):
+        self.app.command({"type": "add_block", "block": {"id": "b05", "name": "Temporary"}})
+        result = self.app.command({"type": "delete_block", "block_id": "b05"})
+        self.assertNotIn("B05", [block["id"] for block in self.app.blocks])
+        self.assertNotIn("b05", [block["id"] for block in result["layout"]["blocks"]])
+        self.assertIsNone(self.app.runtime.layout.graph().node("B05"))
+        self.assertEqual(result["events"][-1]["type"], "block_removed")
+
+    def test_referenced_block_cannot_be_removed(self):
+        before = [block.copy() for block in self.app.blocks]
+        with self.assertRaisesRegex(ValueError, "references it"):
+            self.app.command({"type": "remove_block", "block_id": "b04"})
+        self.assertEqual(self.app.blocks, before)
+
     def test_rename_requires_power_off_and_updates_references(self):
         command = {"type": "update_block", "block_id": "b02", "block": {"id": "central"}}
         with self.assertRaisesRegex(ValueError, "power off"):

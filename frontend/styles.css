@@ -418,8 +418,9 @@ body[data-workspace="trains"] .trains-subnav { display: flex; }
 .map-panel.is-editing .block-node { cursor: grab; }
 .map-panel.is-editing .block-node:active { cursor: grabbing; }
 .graph-editor-tools { display: flex; align-items: center; gap: 7px; padding: 8px 18px; border-top: 1px solid rgba(156,181,215,.08); border-bottom: 1px solid rgba(156,181,215,.08); background: rgba(9, 20, 34, .32); }
+.pinboard-placement-tools { display: flex; align-items: center; gap: 7px; padding: 8px 18px; border-bottom: 1px solid rgba(156,181,215,.08); background: rgba(9, 20, 34, .24); }
 .graph-editor-label { color: var(--faint); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
-.graph-editor-tools select { min-height: 25px; min-width: 118px; border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; background: #0d192a; color: var(--text); font-size: 9px; }
+.graph-editor-tools select, .pinboard-placement-tools select { min-height: 25px; min-width: 118px; border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; background: #0d192a; color: var(--text); font-size: 9px; }
 .graph-editor-arrow { color: var(--blue-bright); font-size: 12px; }
 
 @media (max-width: 1260px) {

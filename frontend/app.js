@@ -104,7 +104,10 @@
     pendingWaypointPlacementId: null,
     nextConsistItemNumber: 1,
     layoutAssetEditing: null,
-    pinboardCursor: null
+    pinboardCursor: null,
+    pendingPinboardTrain: null,
+    pinboardPlacementSelection: '',
+    pinboardTrainDrag: null
   };
 
   function rollingStockCatalogue() {
@@ -218,6 +221,18 @@
         { key: 'aspect', id: 'asset-aspect', label: 'Aspect', type: 'select', options: [['red', 'Red'], ['yellow', 'Yellow'], ['green', 'Green']] }
       ]
     },
+    turnout: {
+      label: 'Turnout', collection: 'turnouts', plural: 'Turnouts', prefix: 'T',
+      fields: [
+        { key: 'id', id: 'asset-id', label: 'Asset ID', required: true, placeholder: 'T01' },
+        { key: 'name', id: 'asset-name', label: 'Name', placeholder: 'Central turnout' },
+        { key: 'address', id: 'asset-address', label: 'Decoder address', type: 'number', min: 0, step: 1 },
+        { key: 'from', id: 'asset-from', label: 'Entry block', placeholder: 'b02' },
+        { key: 'to', id: 'asset-to', label: 'Straight block', placeholder: 'b03' },
+        { key: 'alternate', id: 'asset-alternate', label: 'Diverging block', placeholder: 'b04' },
+        { key: 'state', id: 'asset-state', label: 'State', type: 'select', options: [['straight', 'Straight'], ['diverging', 'Diverging']] }
+      ]
+    },
     waypoint: {
       label: 'Waypoint', collection: 'waypoints', plural: 'Waypoints', prefix: 'WP',
       fields: [
@@ -260,6 +275,7 @@
   const LAYOUT_ASSET_COMMANDS = {
     station: { add: 'add_station', update: 'update_station', remove: 'remove_station' },
     signal: { add: 'add_signal', update: 'update_signal', remove: 'remove_signal' },
+    turnout: { add: 'add_turnout', update: 'update_turnout', remove: 'remove_turnout' },
     waypoint: { add: 'add_waypoint', update: 'update_waypoint', remove: 'remove_waypoint' },
     turntable: { add: 'add_turntable', update: 'update_turntable', remove: 'remove_turntable' },
     platform: { add: 'add_platform', update: 'update_platform', remove: 'remove_platform' }
@@ -720,6 +736,7 @@
     const defaults = { id, name: `${layoutAssetDefinition(kind).label} ${id}` };
     if (kind === 'station') Object.assign(defaults, { blockIds: [], platformIds: [], waypointIds: [] });
     if (kind === 'signal') Object.assign(defaults, { address: '', block_id: firstBlock ? firstBlock.id : '', protects_block_id: secondBlock ? secondBlock.id : '', aspect: 'red' });
+    if (kind === 'turnout') Object.assign(defaults, { address: '', from: firstBlock ? firstBlock.id : '', to: secondBlock ? secondBlock.id : '', alternate: (app.state.layout.blocks || [])[2]?.id || '', state: 'straight' });
     if (kind === 'waypoint') Object.assign(defaults, { x: 490, y: 175, connected_node_ids: [] });
     if (kind === 'turntable') Object.assign(defaults, { address: '', connected_block_ids: firstBlock ? [firstBlock.id] : [], aligned_block_id: firstBlock ? firstBlock.id : '', x: 490, y: 175 });
     if (kind === 'platform') Object.assign(defaults, { stationId: firstStation ? firstStation.id : '', blockId: firstBlock ? firstBlock.id : '', lengthMm: 0 });
@@ -752,6 +769,7 @@
       turntable: [assetFieldText(record, 'aligned_block_id') ? `aligned ${assetFieldText(record, 'aligned_block_id')}` : '', assetFieldText(record, 'connected_block_ids')].filter(Boolean).join(' · '),
       platform: [assetFieldText(record, 'stationId'), assetFieldText(record, 'blockId')].filter(Boolean).join(' · ')
     };
+    values.turnout = [assetFieldText(record, 'from'), assetFieldText(record, 'to'), assetFieldText(record, 'alternate')].filter(Boolean).join(' -> ') || assetFieldText(record, 'state') || 'No references configured';
     const summary = values[kind];
     return (Array.isArray(summary) ? summary.join('') : '') || 'No references configured';
   }
@@ -861,6 +879,7 @@
     renderConnection();
     renderSidebar();
     renderGraph();
+    renderPinboardTrainPicker();
     renderSystematicView();
     if (['layout', 'scans'].includes(app.workspace)) renderScans();
     renderScanLibrary();
@@ -1229,13 +1248,13 @@
 
   function renderGraph() {
     const layout = app.state.layout;
+    $('#layout-panel').classList.toggle('is-editing', app.layoutEditing);
     if (app.layoutView === 'pinboard') {
       renderPinboard();
       return;
     }
     const stageMode = $('#map-stage-mode');
     if (stageMode) stageMode.textContent = 'LIVE BLOCK GRAPH';
-    $('#layout-panel').classList.toggle('is-editing', app.layoutEditing);
     $('#toggle-layout-edit').textContent = app.layoutEditing ? 'Editor' : 'Edit layout';
     const blocks = layout.blocks || [];
     const blockMap = Object.fromEntries(blocks.flatMap((block) => [[block.id, block], [String(block.id || '').toLowerCase(), block]]));
@@ -1328,6 +1347,26 @@
     return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null;
   }
 
+  function projectPinboardPoint(points, point) {
+    if (!Array.isArray(points) || points.length < 2) return null;
+    const lengths = points.map((item, index) => index === points.length - 1 ? 0 : Math.hypot(points[index + 1].x - item.x, points[index + 1].y - item.y));
+    const total = lengths.reduce((sum, value) => sum + value, 0);
+    if (total <= 0) return null;
+    let travelled = 0;
+    let best = null;
+    lengths.forEach((length, index) => {
+      if (length <= 0) return;
+      const start = points[index]; const end = points[index + 1];
+      const dx = end.x - start.x; const dy = end.y - start.y;
+      const local = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / (length * length)));
+      const x = start.x + dx * local; const y = start.y + dy * local;
+      const candidate = { x, y, distance: Math.hypot(point.x - x, point.y - y), progress: (travelled + length * local) / total, dx, dy };
+      if (!best || candidate.distance < best.distance) best = candidate;
+      travelled += length;
+    });
+    return best;
+  }
+
   function nearestPinboardCoordinate(point) {
     const blocks = app.state.layout.blocks || [];
     const blockMap = Object.fromEntries(blocks.map((block) => [String(block.id || '').toLowerCase(), block]));
@@ -1336,27 +1375,10 @@
       const from = blockMap[String(edge.from).toLowerCase()];
       const to = blockMap[String(edge.to).toLowerCase()];
       if (!from || !to) return;
-      const points = edgeControlPoints(from, to, edge);
-      const samples = [];
-      for (let index = 0; index <= 24; index += 1) {
-        const progress = index / 24;
-        if (points.length === 2) {
-          samples.push({ x: points[0].x + (points[1].x - points[0].x) * progress, y: points[0].y + (points[1].y - points[0].y) * progress });
-        } else {
-          const segment = Math.min(points.length - 2, Math.floor(progress * (points.length - 1)));
-          const local = progress * (points.length - 1) - segment;
-          const start = points[segment]; const end = points[segment + 1];
-          const previous = points[segment - 1] || start; const next = points[segment + 2] || end;
-          const c1 = { x: start.x + (end.x - previous.x) / 6, y: start.y + (end.y - previous.y) / 6 };
-          const c2 = { x: end.x - (next.x - start.x) / 6, y: end.y - (next.y - start.y) / 6 };
-          const u = local; const v = 1 - u;
-          samples.push({ x: v * v * v * start.x + 3 * v * v * u * c1.x + 3 * v * u * u * c2.x + u * u * u * end.x, y: v * v * v * start.y + 3 * v * v * u * c1.y + 3 * v * u * u * c2.y + u * u * u * end.y });
-        }
+      const projected = projectPinboardPoint(edgeControlPoints(from, to, edge), point);
+      if (projected && (!best || projected.distance < best.distance)) {
+        best = { ...projected, from_node: String(edge.from).toLowerCase(), to_node: String(edge.to).toLowerCase() };
       }
-      samples.forEach((sample, index) => {
-        const distance = Math.hypot(point.x - sample.x, point.y - sample.y);
-        if (!best || distance < best.distance) best = { ...sample, distance, from_node: String(edge.from).toLowerCase(), to_node: String(edge.to).toLowerCase(), progress: index / 24 };
-      });
     });
     return best && best.distance <= 32 ? best : null;
   }
@@ -1381,6 +1403,103 @@
     const controls = Array.isArray(matching.control_points || matching.controlPoints) ? (matching.control_points || matching.controlPoints) : [];
     const points = [start, ...(forward ? controls : [...controls].reverse()).map((point) => ({ x: Number(point.x), y: Number(point.y) })), end];
     return splinePointAtProgress(points, progress);
+  }
+
+  function renderPinboardTrainPicker() {
+    const select = $('#pinboard-train-select');
+    if (!select) return;
+    const trains = app.state.trains || [];
+    const trainOptions = trains.map((train) => `<option value="train:${escapeHtml(train.id)}">Train - ${escapeHtml(train.name || train.id)} - #${escapeHtml(train.number || '-')}</option>`).join('');
+    const inventory = rollingStockCatalogue();
+    const locomotiveRows = inventory.filter((item) => /loco|engine/i.test(String(item.type || '')));
+    const fallbackLocomotives = locomotiveRows.length ? locomotiveRows : trains.map((train) => ({
+      id: `train-locomotive:${train.id}`,
+      name: `${train.name || train.id} locomotive`,
+      type: 'locomotive',
+      length_mm: train.length_mm || 220,
+      mass_g: train.mass_g,
+      model: train.model_number || ''
+    }));
+    const locomotiveOptions = fallbackLocomotives.map((item) => `<option value="stock:${escapeHtml(item.id)}">Locomotive - ${escapeHtml(item.name || item.id)}</option>`).join('');
+    const rollingOptions = inventory.filter((item) => !/loco|engine/i.test(String(item.type || ''))).map((item) => `<option value="stock:${escapeHtml(item.id)}">Rolling stock - ${escapeHtml(item.name || item.id)}</option>`).join('');
+    const value = app.pinboardPlacementSelection || select.value;
+    select.innerHTML = `<option value="">Choose a train or locomotive</option><optgroup label="Trains">${trainOptions || '<option value="" disabled>No train profiles</option>'}</optgroup><optgroup label="Locomotives">${locomotiveOptions || '<option value="" disabled>No locomotives</option>'}</optgroup>${rollingOptions ? `<optgroup label="Rolling stock">${rollingOptions}</optgroup>` : ''}`;
+    if ([...select.options].some((option) => option.value === value)) select.value = value;
+    app.pinboardPlacementSelection = select.value;
+    const button = $('#place-pinboard-train');
+    if (button) button.disabled = !select.value;
+    const status = $('#pinboard-placement-status');
+    if (status) status.textContent = app.pendingPinboardTrain ? 'Click a rail to place the selected vehicle.' : 'Choose a train or locomotive, then click a rail.';
+  }
+
+  function pinboardStockFromSelection(selection) {
+    if (!selection || !selection.startsWith('stock:')) return null;
+    const id = selection.slice(6);
+    const found = rollingStockCatalogue().find((item) => item.id === id);
+    if (found) return found;
+    const fallbackTrainId = id.startsWith('train-locomotive:') ? id.slice('train-locomotive:'.length) : '';
+    const train = app.state.trains.find((item) => item.id === fallbackTrainId);
+    return train ? { id, name: `${train.name || train.id} locomotive`, type: 'locomotive', length_mm: train.length_mm || 220, mass_g: train.mass_g, model: train.model_number || '' } : null;
+  }
+
+  function safePinboardId(value) {
+    const slug = String(value || 'vehicle').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 28) || 'vehicle';
+    return `pinboard-${slug}-${Date.now()}`;
+  }
+
+  function beginPinboardTrainPlacement() {
+    const selection = $('#pinboard-train-select')?.value || app.pinboardPlacementSelection;
+    if (!selection) {
+      showToast('Choose a train or locomotive first.', 'warning');
+      return;
+    }
+    app.pinboardPlacementSelection = selection;
+    app.pendingPinboardTrain = selection;
+    renderPinboardTrainPicker();
+    showToast('Click a rail to place the selected vehicle.', 'success');
+  }
+
+  async function placePinboardTrainAtPoint(coordinate) {
+    const selection = app.pendingPinboardTrain;
+    if (!selection || !coordinate) {
+      if (selection) showToast('Drop the vehicle on a configured rail.', 'warning');
+      return;
+    }
+    const selectedTrainId = selection.startsWith('train:') ? selection.slice(6) : '';
+    const block = (app.state.layout.blocks || []).find((item) => String(item.id).toLowerCase() === coordinate.from_node);
+    const occupant = block && (block.trainId || block.occupied_by);
+    if (occupant && occupant !== selectedTrainId) {
+      showToast(`${block.name || block.id} is occupied. Choose a free track section.`, 'warning');
+      return;
+    }
+    let trainId = selectedTrainId;
+    if (!trainId) {
+      const item = pinboardStockFromSelection(selection);
+      if (!item) { app.pendingPinboardTrain = null; renderPinboardTrainPicker(); return; }
+      trainId = safePinboardId(item.name || item.id);
+      const response = await sendCommand({ type: 'add_train', train: {
+        id: trainId,
+        name: item.name || 'Locomotive',
+        number: '',
+        address: null,
+        mode: 'stopped',
+        speed: 0,
+        requested_speed_kmh: 0,
+        direction: 'forward',
+        block_id: coordinate.from_node.toUpperCase(),
+        length_mm: Number(item.length_mm) || 220,
+        mass_g: item.mass_g == null ? null : Number(item.mass_g),
+        maxSpeed: 120,
+        model_number: item.model || '',
+        consist: [{ id: item.id, type: item.type || 'locomotive', name: item.name || 'Locomotive', length_mm: Number(item.length_mm) || 220, mass_g: item.mass_g == null ? null : Number(item.mass_g) }]
+      }});
+      if (!response) { app.pendingPinboardTrain = null; renderPinboardTrainPicker(); return; }
+      app.pinboardPlacementSelection = `train:${trainId}`;
+    }
+    const response = await sendCommand({ type: 'place_train_on_track', train_id: trainId, x: coordinate.x, y: coordinate.y });
+    if (response) showToast(`${trainId} placed on the track.`, 'success');
+    app.pendingPinboardTrain = null;
+    renderPinboardTrainPicker();
   }
 
   function renderPinboard() {
@@ -1433,8 +1552,14 @@
       if (display) display.textContent = 'Move over the board to read coordinates';
     };
     stage.onclick = (event) => {
-      if (!app.layoutEditing || event.target.closest('.pinboard-node, .pinboard-train, .pinboard-spline-point')) return;
+      if (event.target.closest('.pinboard-node, .pinboard-train, .pinboard-spline-point')) return;
       const point = pinboardPointFromEvent(event);
+      const coordinate = nearestPinboardCoordinate(point);
+      if (app.pendingPinboardTrain) {
+        void placePinboardTrainAtPoint(coordinate);
+        return;
+      }
+      if (!app.layoutEditing) return;
       if (app.pendingWaypointPlacementId) {
         const waypoint = (app.state.layout.waypoints || []).find((item) => item.id === app.pendingWaypointPlacementId);
         if (!waypoint) { app.pendingWaypointPlacementId = null; return; }
@@ -1478,14 +1603,18 @@
     const point = svgPoint(event);
     app.waypointDrag = {
       waypointId,
+      pointerId: event.pointerId,
       start: point,
       original: { x: Number(waypoint.x) || 0, y: Number(waypoint.y) || 0 }
     };
+    window.addEventListener('pointermove', moveWaypointDrag);
+    window.addEventListener('pointerup', endWaypointDrag);
+    window.addEventListener('pointercancel', endWaypointDrag);
     event.preventDefault();
   }
 
   function moveWaypointDrag(event) {
-    if (!app.waypointDrag) return;
+    if (!app.waypointDrag || (app.waypointDrag.pointerId != null && event.pointerId !== app.waypointDrag.pointerId)) return;
     const waypoint = (app.state.layout.waypoints || []).find((item) => item.id === app.waypointDrag.waypointId);
     if (!waypoint) return;
     const point = svgPoint(event);
@@ -1494,30 +1623,51 @@
     renderGraph();
   }
 
-  function endWaypointDrag() {
+  function endWaypointDrag(event) {
     if (!app.waypointDrag) return;
+    if (event && app.waypointDrag.pointerId != null && event.pointerId !== app.waypointDrag.pointerId) return;
     const waypoint = (app.state.layout.waypoints || []).find((item) => item.id === app.waypointDrag.waypointId);
     if (waypoint) {
       sendCommand({ type: 'update_waypoint', waypoint_id: waypoint.id, waypoint: { x: waypoint.x, y: waypoint.y } });
       showToast(`${waypoint.id} moved to X ${waypoint.x} · Y ${waypoint.y}.`, 'success');
     }
     app.waypointDrag = null;
+    window.removeEventListener('pointermove', moveWaypointDrag);
+    window.removeEventListener('pointerup', endWaypointDrag);
+    window.removeEventListener('pointercancel', endWaypointDrag);
   }
 
   function beginPinboardTrainDrag(event, trainId) {
     if (event.button !== 0) return;
     event.preventDefault();
+    const pointerId = event.pointerId;
+    app.pinboardTrainDrag = { trainId, pointerId };
     const move = (current) => {
-      const next = pinboardPointFromEvent(current);
+      if (app.pinboardTrainDrag && app.pinboardTrainDrag.pointerId != null && current.pointerId !== app.pinboardTrainDrag.pointerId) return;
+      const raw = pinboardPointFromEvent(current);
+      const next = nearestPinboardCoordinate(raw) || raw;
       app.pinboardCursor = next;
       const display = $('#pinboard-coordinate');
       if (display) display.textContent = formatPinboardCoordinate(next);
     };
     const finish = async (current) => {
+      if (current && current.pointerId != null && current.pointerId !== pointerId) return;
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', finish);
-      const target = pinboardPointFromEvent(current);
-      const response = await sendCommand({ type: 'move_train_to_coordinate', train_id: trainId, x: target.x, y: target.y });
+      window.removeEventListener('pointercancel', finish);
+      app.pinboardTrainDrag = null;
+      const raw = pinboardPointFromEvent(current);
+      const target = nearestPinboardCoordinate(raw);
+      if (!target) {
+        showToast('Drop the train on a configured rail.', 'warning');
+        return;
+      }
+      const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
+      const response = await sendCommand({ type: simulated ? 'place_train_on_track' : 'move_train_to_coordinate', train_id: trainId, x: target.x, y: target.y });
+      if (simulated) {
+        if (response) showToast(`${trainId} moved along the track.`, 'success');
+        return;
+      }
       if (response) {
         const train = (response.trains || []).find((item) => item.id === trainId);
         const coordinate = train && train.target_coordinate;
@@ -1532,7 +1682,8 @@
       }
     };
     window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', finish, { once: true });
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
     move(event);
   }
 
@@ -2496,6 +2647,7 @@
     $('#map-stage').classList.toggle('is-hidden', app.layoutView === 'systematic');
     $('.map-summary').classList.toggle('is-hidden', app.layoutView === 'systematic');
     $('#graph-editor-tools').classList.toggle('is-hidden', page !== 'layout' || !app.layoutEditing || !['editor', 'pinboard'].includes(app.layoutView));
+    $('#pinboard-placement-tools').classList.toggle('is-hidden', !trackPage || app.layoutView !== 'pinboard');
     $('#connection-limit-editor').classList.toggle('is-hidden', page !== 'layout' || app.layoutView !== 'editor');
     $$('.map-legend .editor-action').forEach((button) => button.classList.toggle('is-hidden', page !== 'layout'));
     $('#add-layout-block').textContent = app.layoutView === 'pinboard' ? '＋ Place node' : '＋ Block';
@@ -2665,12 +2817,15 @@
     const block = app.state.layout.blocks.find((item) => item.id === blockId);
     if (!block) return;
     const point = svgPoint(event);
-    app.layoutDrag = { blockId, start: point, original: { x: Number(block.x) || 0, y: Number(block.y) || 0 } };
+    app.layoutDrag = { blockId, pointerId: event.pointerId, start: point, original: { x: Number(block.x) || 0, y: Number(block.y) || 0 } };
+    window.addEventListener('pointermove', moveBlockDrag);
+    window.addEventListener('pointerup', endBlockDrag);
+    window.addEventListener('pointercancel', endBlockDrag);
     event.preventDefault();
   }
 
   function moveBlockDrag(event) {
-    if (!app.layoutDrag) return;
+    if (!app.layoutDrag || (app.layoutDrag.pointerId != null && event.pointerId !== app.layoutDrag.pointerId)) return;
     const block = app.state.layout.blocks.find((item) => item.id === app.layoutDrag.blockId);
     if (!block) return;
     const point = svgPoint(event);
@@ -2679,11 +2834,36 @@
     renderGraph();
   }
 
-  function endBlockDrag() {
+  function endBlockDrag(event) {
     if (!app.layoutDrag) return;
+    if (event && app.layoutDrag.pointerId != null && event.pointerId !== app.layoutDrag.pointerId) return;
     const block = app.state.layout.blocks.find((item) => item.id === app.layoutDrag.blockId);
     if (block) sendCommand({ type: 'move_block', block_id: block.id, x: block.x, y: block.y });
     app.layoutDrag = null;
+    window.removeEventListener('pointermove', moveBlockDrag);
+    window.removeEventListener('pointerup', endBlockDrag);
+    window.removeEventListener('pointercancel', endBlockDrag);
+  }
+
+  async function deleteSelectedBlock() {
+    if (app.workspace !== 'layout' || !app.layoutEditing || !['editor', 'pinboard'].includes(app.layoutView)) {
+      showToast('Switch to layout edit mode before deleting a block.', 'warning');
+      return;
+    }
+    const block = selectedBlock();
+    if (!block) {
+      showToast('Select a block before deleting it.', 'warning');
+      return;
+    }
+    if (!window.confirm(`Delete ${block.name || block.id}? This cannot be undone.`)) return;
+    const response = await sendCommand({ type: 'remove_block', block_id: block.id });
+    if (!response) return;
+    app.layoutDrag = null;
+    app.waypointDrag = null;
+    app.pendingBlockPlacementId = null;
+    app.selectedBlockId = app.state.layout.blocks[0]?.id || null;
+    renderAll();
+    showToast(`${block.name || block.id} deleted`, 'success');
   }
 
   function saveTrainSettings() {
@@ -2953,6 +3133,14 @@
       app.selectedBlockId = node.dataset.blockId;
       openBlockEditor();
     });
+    document.addEventListener('keydown', (event) => {
+      if (!['Delete', 'Backspace'].includes(event.key)
+        || (event.target && typeof event.target.closest === 'function' && event.target.closest('input, textarea, select, [contenteditable="true"]'))
+        || app.workspace !== 'layout' || !app.layoutEditing
+        || !['editor', 'pinboard'].includes(app.layoutView)) return;
+      event.preventDefault();
+      void deleteSelectedBlock();
+    });
     $$('.mode-tab').forEach((button) => button.addEventListener('click', () => navigateWorkspace(button.dataset.workspace)));
     $$('.trains-subnav-link').forEach((link) => link.addEventListener('click', (event) => {
       event.preventDefault();
@@ -3011,7 +3199,10 @@
     $('#scan-file').addEventListener('change', useLocalScan);
     $('#add-layout-block').addEventListener('click', addLayoutBlock);
     $('#add-spline-point').addEventListener('click', addSplinePoint);
+    $('#pinboard-train-select').addEventListener('change', (event) => { app.pinboardPlacementSelection = event.target.value; app.pendingPinboardTrain = null; renderPinboardTrainPicker(); });
+    $('#place-pinboard-train').addEventListener('click', beginPinboardTrainPlacement);
     $('#edit-selected-block').addEventListener('click', () => openBlockEditor());
+    $('#delete-selected-block').addEventListener('click', deleteSelectedBlock);
     $('#block-editor-form').addEventListener('submit', saveBlockEditor);
     $('#cancel-block-editor').addEventListener('click', () => { app.editingBlockId = null; $('#block-editor').close(); });
     $('#close-block-editor').addEventListener('click', () => { app.editingBlockId = null; $('#block-editor').close(); });
@@ -3022,12 +3213,6 @@
     $('#save-connection-limit').addEventListener('click', saveConnectionLimit);
     $('#save-layout').addEventListener('click', saveLayout);
     $('#load-layout').addEventListener('click', loadSavedLayout);
-    $('#layout-svg').addEventListener('pointermove', moveBlockDrag);
-    $('#layout-svg').addEventListener('pointerup', endBlockDrag);
-    $('#layout-svg').addEventListener('pointerleave', endBlockDrag);
-    $('#layout-svg').addEventListener('pointermove', moveWaypointDrag);
-    $('#layout-svg').addEventListener('pointerup', endWaypointDrag);
-    $('#layout-svg').addEventListener('pointerleave', endWaypointDrag);
     $$('.control-mode').forEach((button) => button.addEventListener('click', () => {
       app.controlMode = button.dataset.controlMode;
       app.state.mode = app.controlMode;

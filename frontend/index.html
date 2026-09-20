@@ -190,6 +190,7 @@
               <button class="icon-button small" id="layout-zoom-in" title="Zoom in">+</button>
               <button class="button button-soft editor-action" id="open-layout-assets" type="button">Assets</button>
               <button class="button button-soft editor-action" id="edit-selected-block">Edit block</button>
+              <button class="button button-soft editor-action" id="delete-selected-block" type="button">Delete selected</button>
               <button class="button button-soft editor-action" id="add-layout-block">＋ Block</button>
               <button class="button button-soft editor-action" id="add-spline-point">＋ Spline point</button>
               <button class="button button-soft editor-action" id="save-layout">Save layout</button>
@@ -197,6 +198,7 @@
             </div>
           </div>
           <div class="graph-editor-tools" id="graph-editor-tools"><span class="graph-editor-label">Connections</span><select id="connection-from" aria-label="Connection source block"></select><span class="graph-editor-arrow">↔</span><select id="connection-to" aria-label="Connection target block"></select><button class="button button-soft editor-action" id="connect-blocks">Connect</button><button class="button button-soft editor-action" id="disconnect-blocks">Disconnect</button></div>
+          <div class="pinboard-placement-tools is-hidden" id="pinboard-placement-tools"><span class="graph-editor-label">Place on track</span><select id="pinboard-train-select" aria-label="Train or locomotive to place"></select><button type="button" class="button button-soft" id="place-pinboard-train">Place train</button><span class="settings-help" id="pinboard-placement-status" role="status">Choose a train or locomotive, then click a rail.</span></div>
           <div class="automation-recorder" id="automation-recorder"><span class="graph-editor-label">Action recorder</span><select id="recording-train-select" aria-label="Train to record"></select><button type="button" class="button button-soft" id="start-recording">Record</button><button type="button" class="button button-soft" id="stop-recording">Stop recording</button><button type="button" class="button button-soft" id="play-recording">Play last</button><span class="settings-help" id="recording-status" role="status">No recording yet.</span></div>
           <div class="connection-limit-editor is-hidden" id="connection-limit-editor">
             <div><strong>Connection speed limit</strong><p class="settings-help">Applies in the selected direction: source → target. Save layout to keep changes.</p></div>
@@ -414,6 +416,7 @@
         <select class="compact-select" id="layout-asset-kind" aria-label="Layout asset type">
           <option value="station">Stations</option>
           <option value="signal">Signals</option>
+          <option value="turnout">Turnouts</option>
           <option value="waypoint">Waypoints</option>
           <option value="turntable">Turntables</option>
           <option value="platform">Platforms</option>

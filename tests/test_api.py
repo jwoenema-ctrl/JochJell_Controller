@@ -365,6 +365,12 @@ class ApiTests(unittest.TestCase):
             app.command({"type": "update_signal", "signal_id": "s03", "signal": {"name": "Yard signal"}})
             self.assertEqual(next(item for item in app.state()["layout"]["signals"] if item["id"] == "S03")["name"], "Yard signal")
 
+            app.command({
+                "type": "add_turnout",
+                "turnout": {"id": "t02", "name": "Yard turnout", "from": "b02", "to": "b03", "alternate": "b04"},
+            })
+            app.command({"type": "remove_turnout", "turnout_id": "t02"})
+
             app.command({"type": "add_waypoint", "waypoint": {"id": "wp02", "connected_node_ids": ["b04", "tt01"]}})
             app.command({"type": "update_waypoint", "waypoint_id": "wp02", "waypoint": {"name": "Yard point"}})
             app.command({"type": "add_turntable", "turntable": {"id": "tt02", "connected_block_ids": ["b04"], "aligned_block_id": "b04"}})
@@ -604,6 +610,20 @@ class ApiTests(unittest.TestCase):
             train = next(item for item in result["trains"] if item["id"] == "t1")
             self.assertEqual(train["route"], ["B01", "B02", "B03", "B04"])
             self.assertEqual(app.runtime.route_updater.desired_routes["train-101"], ("B01", "B02", "B03", "B04"))
+        finally:
+            app.close()
+
+    def test_pinboard_can_place_a_stopped_train_between_connection_nodes(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            state = app.command({"type": "place_train_on_track", "train_id": "train-3", "x": 515, "y": 150})
+            train = next(item for item in state["trains"] if item["id"] == "t2")
+            self.assertEqual(train["position"], "B02")
+            self.assertEqual(train["motion"]["from_block_id"], "b02")
+            self.assertEqual(train["motion"]["to_block_id"], "b03")
+            self.assertGreater(train["motion"]["position"], 0)
+            self.assertTrue(any(event["type"] == "train_placed_on_track" for event in state["events"]))
         finally:
             app.close()
 

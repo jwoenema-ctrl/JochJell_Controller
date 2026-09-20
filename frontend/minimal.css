@@ -200,7 +200,8 @@ body[data-workspace="scans"] .dashboard { grid-template-columns: minmax(0, 1fr);
 .map-selected-note { grid-column: 1 / -1; max-width: none; justify-self: start; padding: 0; text-align: left; font-size: 12px; }
 .stat-icon, .stat-icon.orange, .stat-icon.green, .stat-icon.violet { background: var(--panel-raised); }
 .graph-editor-tools { flex-wrap: wrap; background: var(--panel-raised); border-color: var(--line); }
-.graph-editor-tools select { min-width: 0; max-width: 100%; min-height: 34px; background: var(--panel); font-size: 12px; }
+.pinboard-placement-tools { flex-wrap: wrap; background: var(--panel-raised); border-color: var(--line); }
+.graph-editor-tools select, .pinboard-placement-tools select { min-width: 0; max-width: 100%; min-height: 34px; background: var(--panel); font-size: 12px; }
 .graph-editor-label { font-size: 11px; }
 .editor-action { min-height: 32px; font-size: 12px; padding: 6px 10px; }
 .systematic-row { grid-template-columns: 120px minmax(0, 1fr) 110px; min-width: 0; }

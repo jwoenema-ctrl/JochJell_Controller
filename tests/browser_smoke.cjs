@@ -220,8 +220,32 @@ async function shot(page, name) {
     return waypoint && (Number(waypoint.x) !== before.x || Number(waypoint.y) !== before.y);
   }, waypointBefore);
   assert.ok(await page.locator('#layout-svg .pinboard-rail').evaluateAll(paths => paths.some(path => String(path.getAttribute('d') || '').includes('C'))), 'Spline control point should render a curved rail');
+  await page.getByRole('button', { name: 'Node graph', exact: true }).click();
+  const movableBlock = page.locator('#layout-svg .block-node[data-block-id="b05"]');
+  const movableBefore = await (await page.request.get(`http://127.0.0.1:${port}/api/state`)).json();
+  const movablePoint = await movableBlock.boundingBox();
+  await page.mouse.move(movablePoint.x + movablePoint.width / 2, movablePoint.y + movablePoint.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(movablePoint.x + movablePoint.width / 2 + 34, movablePoint.y + movablePoint.height / 2 + 22, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForFunction(async (before) => {
+    const state = await fetch('/api/state').then(response => response.json());
+    const block = state.layout.blocks.find(item => item.id === 'b05');
+    const previous = before.layout.blocks.find(item => item.id === 'b05');
+    return block && previous && (Number(block.x) !== Number(previous.x) || Number(block.y) !== Number(previous.y));
+  }, movableBefore);
+  await movableBlock.click();
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#delete-selected-block').click();
+  await page.waitForFunction(async () => {
+    const state = await fetch('/api/state').then(response => response.json());
+    return state.layout.blocks.length === 4 && !state.layout.blocks.some(item => item.id === 'b05');
+  });
+  await page.getByRole('button', { name: '2D pinboard', exact: true }).click();
   const pinboardTrain = page.locator('#layout-svg .pinboard-train').first();
   assert.ok(await pinboardTrain.count(), 'Pinboard should render an active train marker');
+  assert.equal(await page.locator('#pinboard-placement-tools').isVisible(), true, 'Pinboard should expose train placement controls');
+  assert.ok(await page.locator('#pinboard-train-select optgroup').count() >= 2, 'Pinboard selector should expose trains and locomotives');
   await pinboardTrain.hover();
   assert.equal(await pinboardTrain.locator('.pinboard-vehicle').first().evaluate(node => getComputedStyle(node).strokeWidth), '2.5px', 'Hovering a train should highlight its vehicles');
   await page.getByRole('button', { name: 'Node graph', exact: true }).click();

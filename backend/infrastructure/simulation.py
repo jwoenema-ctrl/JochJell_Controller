@@ -167,6 +167,42 @@ class SimulatedTrackSystem:
             self._refresh_safety_targets()
         return CommandResult(True, "remove_train", "train removed")
 
+    def place_train(
+        self,
+        train_id: str,
+        block_id: str,
+        position: float,
+        *,
+        route: Sequence[str] = (),
+        direction: int = 1,
+    ) -> CommandResult:
+        """Place or reposition a stopped train at a normalized track position."""
+
+        self._validate_speed(0.0)
+        if direction not in (-1, 1):
+            raise ValueError("direction must be -1 or 1")
+        if not 0.0 <= float(position) <= 1.0:
+            return CommandResult(False, "place_train", "position must be between 0 and 1")
+        if not train_id or not block_id:
+            raise ValueError("train_id and block_id are required")
+        with self._lock:
+            self._blocks.add(block_id)
+            route_tuple = self._normalise_route(block_id, route)
+            self._trains.pop(train_id, None)
+            self._trains[train_id] = _Train(
+                train_id=train_id,
+                block_id=block_id,
+                position=float(position),
+                speed=0.0,
+                commanded_speed=0.0,
+                target_speed=0.0,
+                direction=direction,
+                route=route_tuple,
+                route_index=route_tuple.index(block_id),
+            )
+            self._refresh_safety_targets()
+        return CommandResult(True, "place_train", "train placed")
+
     def set_train_route(self, train_id: str, route: Sequence[str]) -> CommandResult:
         """Replace a train's route while retaining its current block."""
 
