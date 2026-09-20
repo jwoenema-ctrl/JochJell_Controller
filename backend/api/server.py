@@ -156,6 +156,7 @@ class ControllerApplication:
         "detail": "Decoder CV and address programming is available when the active track transport supports it.",
     }, init=False, repr=False)
     _recording_history: list[PlaybackPlan] = field(default_factory=list, init=False, repr=False)
+    _automation_programs: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _coordinate_execution_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -962,6 +963,111 @@ class ControllerApplication:
             for plan in self._recording_history[-10:]
         ]}
 
+    def automation_programs_state(self) -> list[dict[str, Any]]:
+        """Expose authored automation programs without compiled runtime actions."""
+        result = []
+        for program in self._automation_programs:
+            item = {key: deepcopy(value) for key, value in program.items() if key != "_compiled_actions"}
+            item["train_id"] = self._ui_train_id(str(program.get("train_id", "")))
+            result.append(item)
+        return result
+
+    def _compile_automation_program(self, train_id: str, blocks: Any) -> tuple[tuple[RecordedAction, ...], float]:
+        """Compile UI block definitions into the existing validated playback model."""
+        if not isinstance(blocks, list) or not blocks:
+            raise ValueError("an automation program needs at least one action block")
+        canonical_id = self._canonical_train_id(str(train_id))
+        train = next((item for item in self.trains if item.get("id") == canonical_id), None)
+        if train is None:
+            raise ValueError(f"Unknown train: {train_id}")
+        maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
+        actions: list[RecordedAction] = []
+        cursor = 0.0
+
+        def number(value: Any, field: str, minimum: float = 0.0) -> float:
+            if isinstance(value, bool):
+                raise ValueError(f"{field} must be a number")
+            try:
+                result = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{field} must be a number") from exc
+            if not math.isfinite(result) or result < minimum:
+                raise ValueError(f"{field} must be a finite number >= {minimum}")
+            return result
+
+        for index, raw in enumerate(blocks):
+            if not isinstance(raw, dict):
+                raise ValueError(f"automation block {index + 1} must be an object")
+            kind = str(raw.get("type", raw.get("kind", ""))).strip().lower()
+            if kind in {"drive", "speed"}:
+                speed = number(raw.get("speed_kmh", raw.get("speed", 0)), "speed_kmh")
+                duration = number(raw.get("duration_s", raw.get("duration", 0)), "duration_s")
+                if speed > maximum:
+                    raise ValueError(f"speed_kmh cannot exceed the train maximum of {maximum:g}")
+                actions.append(RecordedAction(cursor, "speed", canonical_id, speed=speed / maximum))
+                cursor += duration
+                if duration > 0:
+                    actions.append(RecordedAction(cursor, "speed", canonical_id, speed=0.0))
+            elif kind == "wait":
+                cursor += number(raw.get("duration_s", raw.get("duration", 1)), "duration_s")
+            elif kind == "direction":
+                direction = str(raw.get("direction", "forward")).strip().lower()
+                if direction not in {"forward", "reverse"}:
+                    raise ValueError("direction must be forward or reverse")
+                actions.append(RecordedAction(cursor, "direction", canonical_id, direction=direction))
+            elif kind in {"function", "lighting"}:
+                raw_number = raw.get("function_number", raw.get("function", 0))
+                if isinstance(raw_number, bool):
+                    raise ValueError("function_number must be an integer")
+                try:
+                    function_number = int(raw_number)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("function_number must be an integer") from exc
+                if function_number < 0 or function_number > 31:
+                    raise ValueError("function_number must be between 0 and 31")
+                enabled = raw.get("enabled", False)
+                if not isinstance(enabled, bool):
+                    enabled = str(enabled).strip().lower() in {"true", "on", "1", "yes"}
+                actions.append(RecordedAction(cursor, "function", canonical_id, function_number=function_number, enabled=enabled))
+            elif kind == "stop":
+                actions.append(RecordedAction(cursor, "speed", canonical_id, speed=0.0))
+            else:
+                raise ValueError(f"unknown automation block type: {kind or 'blank'}")
+
+        if not actions:
+            raise ValueError("automation blocks do not contain a playable action")
+        return tuple(actions), cursor
+
+    def _automation_plan(self, program: dict[str, Any]) -> PlaybackPlan:
+        train_id = self._canonical_train_id(str(program["train_id"]))
+        actions = tuple(
+            RecordedAction.from_mapping(action, train_id=train_id)
+            for action in program.get("_compiled_actions", ())
+        )
+        duration = float(program.get("duration_s", 0) or 0)
+        return PlaybackPlan(train_id, actions, 0.0, duration)
+
+    def save_automation_program(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = payload.get("program", payload)
+        if not isinstance(raw, dict):
+            raise ValueError("program must be an object")
+        program_id = str(raw.get("id", "")).strip() or f"program-{int(time.time() * 1000)}"
+        name = str(raw.get("name", "Untitled train routine")).strip() or "Untitled train routine"
+        train_id = self._canonical_train_id(str(raw.get("train_id", "")))
+        actions, duration = self._compile_automation_program(train_id, raw.get("blocks"))
+        stored = {
+            "id": program_id,
+            "name": name,
+            "train_id": train_id,
+            "blocks": deepcopy(raw.get("blocks")),
+            "duration_s": round(duration, 3),
+            "_compiled_actions": [self._recording_action_payload(action) for action in actions],
+        }
+        self._automation_programs = [item for item in self._automation_programs if item.get("id") != program_id]
+        self._automation_programs.append(stored)
+        self.events.append({"type": "automation_program_saved", "program_id": program_id, "train_id": train_id})
+        return self.automation_programs_state()
+
     def _record_action_if_active(self, action: dict[str, Any]) -> None:
         recorder = self.runtime.recording if self.runtime is not None else None
         if recorder is None or not recorder.active:
@@ -973,18 +1079,14 @@ class ControllerApplication:
             # must never invalidate the underlying train command.
             return
 
-    def play_recording(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Play one stored plan immediately and leave the train in a safe stopped state."""
+    def _playback_plan(self, plan: PlaybackPlan, payload: dict[str, Any], event_type: str) -> dict[str, Any]:
+        """Play a recorded or authored plan and leave the train in a safe stopped state."""
         if self.runtime is None:
             raise ValueError("runtime is not available")
         if not self.track_power:
             raise ValueError("switch track power on before playing a recording")
-        index = int(payload.get("index", len(self._recording_history) - 1))
-        if index < 0 or index >= len(self._recording_history):
-            raise ValueError("recording index is out of range")
         if not self.simulation_mode and payload.get("confirm") is not True:
             raise ValueError("real-track playback requires confirm=true")
-        plan = self._recording_history[index]
         train_id = self._canonical_train_id(plan.train_id)
         train = next((item for item in self.trains if item.get("id") == train_id), None)
         if train is None:
@@ -996,8 +1098,13 @@ class ControllerApplication:
             raise ValueError("automatic-mode playback requires automatic=true")
         maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
         movement_attempted = False
+        playback_started = time.monotonic()
         try:
             for action in plan.actions:
+                target_delay = max(0.0, float(action.timestamp) - float(plan.started_at))
+                remaining = target_delay - (time.monotonic() - playback_started)
+                if remaining > 0:
+                    time.sleep(remaining)
                 if action.operation == "speed":
                     if float(action.speed) > 0:
                         movement_attempted = True
@@ -1017,13 +1124,29 @@ class ControllerApplication:
                 if action.operation == "speed":
                     train["speed"] = round(float(action.speed) * maximum)
                     train["requested_speed_kmh"] = train["speed"]
-            self.events.append({"type": "recording_played", "train_id": train_id, "action_count": plan.action_count})
+            self.events.append({"type": event_type, "train_id": train_id, "action_count": plan.action_count})
             return self.recording_state()
         finally:
             if movement_attempted:
                 self.runtime.track.stop_train(train_id)
             control.manual_speed = control.automatic_speed = 0.0
             train["speed"] = train["requested_speed_kmh"] = 0
+
+    def play_recording(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Play one stored recording and leave the train in a safe stopped state."""
+        if not self._recording_history:
+            raise ValueError("no recording is available")
+        index = int(payload.get("index", len(self._recording_history) - 1))
+        if index < 0 or index >= len(self._recording_history):
+            raise ValueError("recording index is out of range")
+        return self._playback_plan(self._recording_history[index], payload, "recording_played")
+
+    def play_automation_program(self, payload: dict[str, Any]) -> dict[str, Any]:
+        program_id = str(payload.get("program_id", "")).strip()
+        program = next((item for item in self._automation_programs if item.get("id") == program_id), None)
+        if program is None:
+            raise ValueError("automation program not found")
+        return self._playback_plan(self._automation_plan(program), payload, "automation_program_played")
 
     def request_decoder_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate a programming request without issuing an unsupported CV write."""
@@ -1638,6 +1761,7 @@ class ControllerApplication:
             "rollingStockInventory": self.rolling_stock_inventory(),
             "programming": self.programming_state(),
             "recording": self.recording_state(),
+            "automationPrograms": self.automation_programs_state(),
             "coordinate_execution": self.runtime.coordinate_movement.status.as_dict() if self.runtime is not None and self.runtime.coordinate_movement.status is not None else None,
             "feedback": snapshot["feedback"],
             "layout": {
@@ -2371,6 +2495,17 @@ class ControllerApplication:
                 self.events.append({"type": "recording_stopped", "train_id": plan.train_id, "action_count": plan.action_count})
             elif kind in {"play_recording", "playback_recording"}:
                 self.play_recording(payload)
+            elif kind in {"save_automation_program", "upsert_automation_program"}:
+                self.save_automation_program(payload)
+            elif kind in {"delete_automation_program", "remove_automation_program"}:
+                program_id = str(payload.get("program_id", payload.get("id", ""))).strip()
+                before = len(self._automation_programs)
+                self._automation_programs = [item for item in self._automation_programs if item.get("id") != program_id]
+                if len(self._automation_programs) == before:
+                    raise ValueError("automation program not found")
+                self.events.append({"type": "automation_program_deleted", "program_id": program_id})
+            elif kind in {"play_automation_program", "run_automation_program"}:
+                self.play_automation_program(payload)
             elif kind in {"place_train_on_track", "place_train"}:
                 if not self.simulation_mode:
                     raise ValueError("placing a train on a coordinate is available in simulation only")

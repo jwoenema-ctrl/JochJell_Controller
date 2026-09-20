@@ -199,7 +199,6 @@
           </div>
           <div class="graph-editor-tools" id="graph-editor-tools"><span class="graph-editor-label">Connections</span><select id="connection-from" aria-label="Connection source block"></select><span class="graph-editor-arrow">↔</span><select id="connection-to" aria-label="Connection target block"></select><button class="button button-soft editor-action" id="connect-blocks">Connect</button><button class="button button-soft editor-action" id="disconnect-blocks">Disconnect</button></div>
           <div class="pinboard-placement-tools is-hidden" id="pinboard-placement-tools"><span class="graph-editor-label">Place on track</span><select id="pinboard-train-select" aria-label="Train or locomotive to place"></select><button type="button" class="button button-soft" id="place-pinboard-train">Place train</button><span class="settings-help" id="pinboard-placement-status" role="status">Choose a train or locomotive, then click a rail.</span></div>
-          <div class="automation-recorder" id="automation-recorder"><span class="graph-editor-label">Action recorder</span><select id="recording-train-select" aria-label="Train to record"></select><button type="button" class="button button-soft" id="start-recording">Record</button><button type="button" class="button button-soft" id="stop-recording">Stop recording</button><button type="button" class="button button-soft" id="play-recording">Play last</button><span class="settings-help" id="recording-status" role="status">No recording yet.</span></div>
           <div class="connection-limit-editor is-hidden" id="connection-limit-editor">
             <div><strong>Connection speed limit</strong><p class="settings-help">Applies in the selected direction: source → target. Save layout to keep changes.</p></div>
             <label>Applies to <select id="connection-limit-train" aria-label="Speed limit train"><option value="">All trains (default)</option></select></label>
@@ -219,6 +218,64 @@
             <div class="summary-stat"><span class="stat-icon green">●</span><span><strong id="free-count">7</strong><small>Blocks available</small></span></div>
             <div class="summary-stat"><span class="stat-icon violet">⌁</span><span><strong id="route-count">2</strong><small>Active routes</small></span></div>
             <div class="map-selected-note" id="map-selected-note">Select a block to inspect its occupancy and route state.</div>
+          </div>
+        </section>
+
+        <section class="panel automation-studio" id="automation-studio-panel">
+          <div class="panel-heading automation-studio-heading">
+            <div>
+              <p class="eyebrow">ACTION PROGRAMMING</p>
+              <h2>Train automation</h2>
+              <p class="settings-help">Build a reusable train routine from action blocks, or capture live controller actions with the recorder.</p>
+            </div>
+            <div class="automation-recording-controls">
+              <span class="automation-live-indicator" id="recording-live-indicator"></span>
+              <select id="recording-train-select" aria-label="Train to record"></select>
+              <button type="button" class="button button-soft" id="start-recording">Record</button>
+              <button type="button" class="button button-soft" id="stop-recording">Stop recording</button>
+              <button type="button" class="button button-soft" id="play-recording">Play last</button>
+              <span class="settings-help" id="recording-status" role="status">No recording yet.</span>
+            </div>
+          </div>
+          <div class="automation-studio-toolbar">
+            <label>Program train<select id="automation-train-select" aria-label="Train to program"></select></label>
+            <label>Program name<input id="automation-program-name" type="text" maxlength="80" value="New train routine"></label>
+            <button type="button" class="button button-soft" id="automation-import-recording">Import last recording</button>
+            <button type="button" class="button button-soft" id="automation-clear-program">Clear blocks</button>
+            <button type="button" class="button button-primary" id="automation-save-program">Save program</button>
+            <button type="button" class="button button-soft" id="automation-run-program">Run program</button>
+          </div>
+          <div class="automation-studio-grid">
+            <aside class="automation-catalogue">
+              <div class="automation-catalogue-header">
+                <p class="eyebrow">BLOCK CATALOGUE</p>
+                <h3>Train actions</h3>
+                <small>Drag a block into the program, or click to add it.</small>
+              </div>
+              <div class="automation-palette" id="automation-catalogue">
+                <button type="button" class="automation-palette-block" draggable="true" data-action-block="drive"><strong>Drive</strong><small>Set speed and hold it</small></button>
+                <button type="button" class="automation-palette-block" draggable="true" data-action-block="wait"><strong>Wait</strong><small>Pause before the next action</small></button>
+                <button type="button" class="automation-palette-block" draggable="true" data-action-block="direction"><strong>Direction</strong><small>Forward or reverse</small></button>
+                <button type="button" class="automation-palette-block" draggable="true" data-action-block="function"><strong>Function</strong><small>Lighting, horn, or decoder F0-F31</small></button>
+                <button type="button" class="automation-palette-block" draggable="true" data-action-block="stop"><strong>Stop</strong><small>Bring the train to a safe stop</small></button>
+              </div>
+            </aside>
+            <section class="automation-program-panel">
+              <div class="automation-program-heading">
+                <div><p class="eyebrow">PROGRAM FLOW</p><h3 id="automation-program-title">New train routine</h3></div>
+                <span class="automation-block-count" id="automation-block-count">0 blocks</span>
+              </div>
+              <div class="automation-dropzone" id="automation-dropzone">
+                <div class="automation-block-list" id="automation-block-list" aria-live="polite"></div>
+                <div class="automation-empty-state" id="automation-empty-state">Drag an action block here to start a routine.</div>
+              </div>
+              <p class="settings-status" id="automation-status" role="status">Ready. Build a routine, then save it for later.</p>
+            </section>
+            <aside class="automation-inspector">
+              <div class="automation-inspector-heading"><p class="eyebrow">SAVED PROGRAMS</p><h3>Routines</h3></div>
+              <div class="automation-program-list" id="automation-program-list" aria-live="polite"></div>
+              <div class="automation-help-card"><strong>Block tips</strong><span>Drive for 12 seconds, then add Function and switch F0 lighting off. Wait blocks create pauses without changing speed.</span></div>
+            </aside>
           </div>
         </section>
 

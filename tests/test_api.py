@@ -737,6 +737,37 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_authored_automation_program_compiles_timed_blocks_and_runs(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            saved = app.command({
+                "type": "save_automation_program",
+                "program": {
+                    "id": "platform-arrival",
+                    "name": "Platform arrival",
+                    "train_id": "t2",
+                    "blocks": [
+                        {"type": "drive", "speed_kmh": 10, "duration_s": 0.01},
+                        {"type": "function", "function_number": 0, "enabled": False},
+                    ],
+                },
+            })
+            program = next(item for item in saved["automationPrograms"] if item["id"] == "platform-arrival")
+            self.assertEqual(program["train_id"], "t2")
+            self.assertEqual(program["duration_s"], 0.01)
+            self.assertNotIn("_compiled_actions", program)
+
+            ran = app.command({"type": "play_automation_program", "program_id": "platform-arrival", "automatic": True, "confirm": True})
+            train = next(item for item in ran["trains"] if item["id"] == "t2")
+            self.assertEqual(train["speed"], 0)
+            self.assertFalse(train["decoder_function_states"]["0"])
+
+            deleted = app.command({"type": "delete_automation_program", "program_id": "platform-arrival"})
+            self.assertEqual(deleted["automationPrograms"], [])
+        finally:
+            app.close()
+
 
 if __name__ == "__main__":
     unittest.main()

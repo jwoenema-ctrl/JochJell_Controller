@@ -172,6 +172,66 @@ body[data-workspace="trains"] .trains-subnav { display: flex; }
 .automation-recorder { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 8px 17px; border-bottom: 1px solid var(--line); background: rgba(9, 17, 31, .32); }
 .automation-recorder select { min-height: 29px; max-width: 190px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font: inherit; }
 .automation-recorder .settings-help { margin-left: auto; }
+.automation-studio { margin-top: 16px; overflow: hidden; }
+.automation-studio-heading { align-items: flex-start; gap: 16px; }
+.automation-studio-heading .settings-help { max-width: 560px; margin: 4px 0 0; }
+.automation-recording-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.automation-recording-controls select, .automation-studio-toolbar input, .automation-studio-toolbar select { min-height: 32px; padding: 0 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-raised); color: var(--text); font: inherit; }
+.automation-recording-controls select { max-width: 190px; }
+.automation-live-indicator { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 3px transparent; }
+.automation-live-indicator.is-active { background: var(--orange); box-shadow: 0 0 0 3px rgba(255, 153, 64, .16); }
+.automation-studio-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; padding: 13px 18px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--panel-raised); }
+.automation-studio-toolbar label { display: grid; gap: 4px; min-width: 170px; color: var(--faint); font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
+.automation-studio-toolbar label:nth-child(2) { min-width: 220px; }
+.automation-studio-grid { display: grid; grid-template-columns: 218px minmax(0, 1fr) 245px; min-height: 520px; }
+.automation-catalogue, .automation-inspector { padding: 17px; background: rgba(8, 16, 29, .42); }
+.automation-catalogue { border-right: 1px solid var(--line); }
+.automation-inspector { border-left: 1px solid var(--line); }
+.automation-catalogue h3, .automation-inspector h3, .automation-program-heading h3 { margin: 2px 0 0; }
+.automation-catalogue small { display: block; margin-top: 7px; line-height: 1.45; color: var(--muted); }
+.automation-palette { display: grid; gap: 9px; margin-top: 17px; }
+.automation-palette-block { display: grid; gap: 3px; width: 100%; padding: 11px 12px; border: 1px solid var(--line-bright); border-left: 4px solid var(--cyan); border-radius: 8px 12px 8px 12px; background: var(--panel); color: var(--text); text-align: left; cursor: grab; }
+.automation-palette-block:hover { border-color: var(--cyan); transform: translateX(2px); }
+.automation-palette-block strong { font-size: 12px; }
+.automation-palette-block small { margin: 0; font-size: 10px; }
+.automation-palette-block[data-action-block="wait"] { border-left-color: var(--violet); }
+.automation-palette-block[data-action-block="direction"] { border-left-color: var(--orange); }
+.automation-palette-block[data-action-block="function"] { border-left-color: var(--green); }
+.automation-palette-block[data-action-block="stop"] { border-left-color: var(--red); }
+.automation-program-panel { min-width: 0; padding: 17px; background: rgba(13, 25, 42, .24); }
+.automation-program-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.automation-block-count { color: var(--faint); font-size: 10px; }
+.automation-dropzone { min-height: 405px; padding: 14px; border: 1px dashed var(--line-bright); border-radius: 12px; background: rgba(8, 16, 29, .25); transition: border-color .15s, background .15s; }
+.automation-dropzone.is-dragging { border-color: var(--cyan); background: rgba(83, 210, 220, .07); }
+.automation-block-list { display: grid; gap: 10px; }
+.automation-code-block { padding: 12px 13px; border: 1px solid var(--line-bright); border-left: 4px solid var(--cyan); border-radius: 9px 15px 9px 15px; background: var(--panel); box-shadow: 0 7px 18px rgba(0, 0, 0, .12); cursor: pointer; }
+.automation-code-block.is-selected { border-color: var(--cyan); box-shadow: 0 0 0 2px rgba(83, 210, 220, .13); }
+.automation-code-violet { border-left-color: var(--violet); }
+.automation-code-orange { border-left-color: var(--orange); }
+.automation-code-green { border-left-color: var(--green); }
+.automation-code-red { border-left-color: var(--red); }
+.automation-block-head { display: flex; align-items: start; gap: 9px; }
+.automation-block-head > div:nth-child(2) { display: grid; gap: 3px; min-width: 0; }
+.automation-block-head small { color: var(--muted); font-size: 10px; }
+.automation-block-index { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--panel-raised); color: var(--cyan); font-size: 10px; font-weight: 700; }
+.automation-block-actions { display: flex; gap: 4px; margin-left: auto; }
+.automation-block-actions .icon-button { min-width: 30px; padding: 0 5px; font-size: 9px; }
+.automation-block-fields { display: flex; align-items: end; flex-wrap: wrap; gap: 9px; margin: 11px 0 0 29px; }
+.automation-block-fields label { display: grid; gap: 4px; color: var(--faint); font-size: 9px; }
+.automation-block-fields input, .automation-block-fields select { min-width: 94px; min-height: 29px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-raised); color: var(--text); font: inherit; }
+.automation-stop-note { color: var(--muted); font-size: 10px; }
+.automation-connector { width: 2px; height: 10px; margin: -1px auto; background: var(--line-bright); }
+.automation-empty-state { display: grid; place-items: center; min-height: 370px; color: var(--muted); font-size: 12px; text-align: center; }
+.automation-program-list { display: grid; gap: 9px; margin-top: 15px; }
+.automation-program-row { display: grid; gap: 9px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.automation-program-row > span:first-child { display: grid; gap: 3px; min-width: 0; }
+.automation-program-row strong { overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.automation-program-row small { color: var(--muted); font-size: 9px; }
+.automation-program-row-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.automation-program-row-actions .text-button { padding: 0; font-size: 9px; }
+.danger-text { color: var(--red); }
+.automation-help-card { display: grid; gap: 6px; margin-top: 18px; padding: 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); color: var(--muted); font-size: 10px; line-height: 1.45; }
+.automation-help-card strong { color: var(--text); font-size: 11px; }
 .programming-form { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; padding: 0 18px; }
 .programming-form label { display: grid; gap: 4px; color: var(--faint); font-size: 9px; }
 .programming-form input, .programming-form select { min-width: 0; min-height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font: inherit; }

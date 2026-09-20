@@ -72,6 +72,13 @@
 
   const clone = (value) => JSON.parse(JSON.stringify(value));
 
+  const AUTOMATION_BLOCK_DEFS = {
+    drive: { label: 'Drive', description: 'Set speed and hold it', color: 'blue' },
+    wait: { label: 'Wait', description: 'Pause before the next action', color: 'violet' },
+    direction: { label: 'Direction', description: 'Forward or reverse', color: 'orange' },
+    function: { label: 'Function', description: 'Lighting or decoder function', color: 'green' },
+    stop: { label: 'Stop', description: 'Bring the train to a safe stop', color: 'red' }
+  };
 
 
   const app = {
@@ -107,7 +114,10 @@
     pinboardCursor: null,
     pendingPinboardTrain: null,
     pinboardPlacementSelection: '',
-    pinboardTrainDrag: null
+    pinboardTrainDrag: null,
+    automationDraft: { id: null, name: 'New train routine', trainId: '', blocks: [] },
+    automationSelectedBlockId: null,
+    automationPrograms: []
   };
 
   function rollingStockCatalogue() {
@@ -366,6 +376,7 @@
     if (value.rollingStockInventory) app.state.rollingStockInventory = value.rollingStockInventory;
     if (value.programming) app.state.programming = value.programming;
     if (value.recording) app.state.recording = value.recording;
+    if (Array.isArray(value.automationPrograms)) app.automationPrograms = value.automationPrograms;
     if (value.coordinate_execution !== undefined) app.state.coordinate_execution = value.coordinate_execution;
   }
 
@@ -892,6 +903,7 @@
     renderInventory();
     renderProgramming();
     renderRecording();
+    renderAutomationStudio();
     renderStats();
     renderConnectionEditor();
     renderLayoutAssetInspector();
@@ -959,6 +971,7 @@
     status.textContent = active
       ? `Recording ${active.train_id} · ${active.actions.length} action${active.actions.length === 1 ? '' : 's'}`
       : state.history && state.history.length ? `${state.history.length} saved plan${state.history.length === 1 ? '' : 's'} · ready to play` : 'No recording yet.';
+    $('#recording-live-indicator')?.classList.toggle('is-active', Boolean(active));
   }
 
   async function startRecording() {
@@ -971,6 +984,147 @@
   async function playRecording() {
     if (!window.confirm('Play the last recorded train actions now? The train will be stopped when playback finishes.')) return;
     await sendCommand({ type: 'play_recording', index: Math.max(0, ((app.state.recording || {}).history || []).length - 1), confirm: true, automatic: true });
+  }
+
+  function automationNewBlock(type) {
+    const id = `automation-block-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    if (type === 'drive') return { id, type, speed_kmh: 10, duration_s: 12 };
+    if (type === 'wait') return { id, type, duration_s: 2 };
+    if (type === 'direction') return { id, type, direction: 'forward' };
+    if (type === 'function') return { id, type, function_number: 0, enabled: false };
+    return { id, type: 'stop' };
+  }
+
+  function automationBlockSummary(block) {
+    if (block.type === 'drive') return `Drive at ${Number(block.speed_kmh || 0)} km/h for ${Number(block.duration_s || 0)} s`;
+    if (block.type === 'wait') return `Wait for ${Number(block.duration_s || 0)} s`;
+    if (block.type === 'direction') return `Set direction to ${block.direction || 'forward'}`;
+    if (block.type === 'function') return `Function F${Number(block.function_number || 0)} ${block.enabled ? 'on' : 'off'}`;
+    return 'Stop the train';
+  }
+
+  function automationBlockFields(block, index) {
+    const field = (label, name, value, type = 'number', extra = '') => `<label>${label}<input type="${type}" data-automation-index="${index}" data-automation-field="${name}" value="${escapeHtml(value)}" ${extra}></label>`;
+    if (block.type === 'drive') return field('Speed km/h', 'speed_kmh', Number(block.speed_kmh || 0), 'number', 'min="0" step="0.1"') + field('Duration seconds', 'duration_s', Number(block.duration_s || 0), 'number', 'min="0" step="0.1"');
+    if (block.type === 'wait') return field('Duration seconds', 'duration_s', Number(block.duration_s || 0), 'number', 'min="0" step="0.1"');
+    if (block.type === 'direction') return `<label>Direction<select data-automation-index="${index}" data-automation-field="direction"><option value="forward" ${block.direction === 'forward' ? 'selected' : ''}>Forward</option><option value="reverse" ${block.direction === 'reverse' ? 'selected' : ''}>Reverse</option></select></label>`;
+    if (block.type === 'function') return field('Function number', 'function_number', Number(block.function_number || 0), 'number', 'min="0" max="31" step="1"') + `<label>State<select data-automation-index="${index}" data-automation-field="enabled"><option value="false" ${!block.enabled ? 'selected' : ''}>Off</option><option value="true" ${block.enabled ? 'selected' : ''}>On</option></select></label>`;
+    return '<span class="automation-stop-note">The controller will command a full stop here.</span>';
+  }
+
+  function renderAutomationStudio() {
+    const trainSelect = $('#automation-train-select');
+    const list = $('#automation-block-list');
+    if (!trainSelect || !list) return;
+    const trains = app.state.trains || [];
+    const draft = app.automationDraft;
+    if (!trains.some((train) => train.id === draft.trainId)) draft.trainId = (trains.find((train) => train.id === app.selectedTrainId) || trains[0] || {}).id || '';
+    trainSelect.innerHTML = trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || train.id)} � #${escapeHtml(train.number || '')}</option>`).join('');
+    trainSelect.value = draft.trainId;
+    $('#automation-program-name').value = draft.name || 'New train routine';
+    $('#automation-program-title').textContent = draft.name || 'New train routine';
+    $('#automation-block-count').textContent = `${draft.blocks.length} block${draft.blocks.length === 1 ? '' : 's'}`;
+    list.innerHTML = draft.blocks.map((block, index) => {
+      const definition = AUTOMATION_BLOCK_DEFS[block.type] || AUTOMATION_BLOCK_DEFS.stop;
+      return `<article class="automation-code-block automation-code-${definition.color} ${app.automationSelectedBlockId === block.id ? 'is-selected' : ''}" data-automation-block-id="${escapeHtml(block.id)}"><div class="automation-block-head"><span class="automation-block-index">${index + 1}</span><div><strong>${escapeHtml(definition.label)}</strong><small>${escapeHtml(automationBlockSummary(block))}</small></div><div class="automation-block-actions"><button type="button" class="icon-button small" data-automation-action="up" data-automation-index="${index}" aria-label="Move block up">Up</button><button type="button" class="icon-button small" data-automation-action="down" data-automation-index="${index}" aria-label="Move block down">Down</button><button type="button" class="icon-button small" data-automation-action="delete" data-automation-index="${index}" aria-label="Delete block">X</button></div></div><div class="automation-block-fields">${automationBlockFields(block, index)}</div></article>`;
+    }).join('<div class="automation-connector" aria-hidden="true"></div>');
+    $('#automation-empty-state').classList.toggle('is-hidden', draft.blocks.length > 0);
+    const programList = $('#automation-program-list');
+    programList.innerHTML = app.automationPrograms.length
+      ? app.automationPrograms.map((program) => `<div class="automation-program-row" data-automation-program-id="${escapeHtml(program.id)}"><span><strong>${escapeHtml(program.name || program.id)}</strong><small>${escapeHtml(String(program.train_id || ''))} � ${escapeHtml(String((program.blocks || []).length))} blocks � ${escapeHtml(String(program.duration_s || 0))} s</small></span><span class="automation-program-row-actions"><button type="button" class="text-button" data-automation-program-action="load">Load</button><button type="button" class="text-button" data-automation-program-action="run">Run</button><button type="button" class="text-button danger-text" data-automation-program-action="delete">Delete</button></span></div>`).join('')
+      : '<p class="settings-help">No saved routines yet. Build one and save it here.</p>';
+  }
+
+  function addAutomationBlock(type) {
+    if (!AUTOMATION_BLOCK_DEFS[type]) return;
+    const block = automationNewBlock(type);
+    app.automationDraft.blocks.push(block);
+    app.automationSelectedBlockId = block.id;
+    renderAutomationStudio();
+  }
+
+  function updateAutomationBlockField(event) {
+    const input = event.target.closest('[data-automation-field]');
+    if (!input) return;
+    const index = Number(input.dataset.automationIndex);
+    const block = app.automationDraft.blocks[index];
+    if (!block) return;
+    const field = input.dataset.automationField;
+    if (field === 'enabled') block[field] = input.value === 'true';
+    else if (input.type === 'number') block[field] = Number(input.value);
+    else block[field] = input.value;
+    renderAutomationStudio();
+  }
+
+  function automationBlockAction(action, index) {
+    const blocks = app.automationDraft.blocks;
+    if (!blocks[index]) return;
+    if (action === 'delete') blocks.splice(index, 1);
+    if (action === 'up' && index > 0) [blocks[index - 1], blocks[index]] = [blocks[index], blocks[index - 1]];
+    if (action === 'down' && index < blocks.length - 1) [blocks[index + 1], blocks[index]] = [blocks[index], blocks[index + 1]];
+    renderAutomationStudio();
+  }
+
+  function importLastRecording() {
+    const history = (app.state.recording || {}).history || [];
+    const plan = history[history.length - 1];
+    if (!plan) { showToast('Record a train routine first.', 'warning'); return; }
+    const train = app.state.trains.find((item) => item.id === app.automationDraft.trainId) || selectedTrain();
+    const maximum = Math.max(1, Number(train?.maxSpeed || 140));
+    const actions = plan.actions || [];
+    app.automationDraft.trainId = app.state.trains.some((item) => item.id === plan.train_id) ? plan.train_id : app.automationDraft.trainId;
+    app.automationDraft.blocks = actions.map((action, index) => {
+      if (action.operation === 'speed') {
+        const next = actions[index + 1];
+        const duration = next && next.timestamp != null ? Math.max(0, Number(next.timestamp) - Number(action.timestamp)) : 0;
+        const speed = Number(action.speed || 0) * maximum;
+        return speed > 0 ? { ...automationNewBlock('drive'), speed_kmh: Number(speed.toFixed(1)), duration_s: Number(duration.toFixed(1)) } : automationNewBlock('stop');
+      }
+      if (action.operation === 'direction') return { ...automationNewBlock('direction'), direction: action.direction || 'forward' };
+      return { ...automationNewBlock('function'), function_number: Number(action.function_number || 0), enabled: Boolean(action.enabled) };
+    });
+    $('#automation-status').textContent = `Imported ${app.automationDraft.blocks.length} blocks from the last recording.`;
+    renderAutomationStudio();
+  }
+
+  async function saveAutomationProgram() {
+    const draft = app.automationDraft;
+    draft.name = ($('#automation-program-name').value || '').trim() || 'New train routine';
+    if (!draft.trainId || !draft.blocks.length) { $('#automation-status').textContent = 'Choose a train and add at least one action block.'; return false; }
+    const id = draft.id || `program-${Date.now()}`;
+    const response = await sendCommand({ type: 'save_automation_program', program: { id, name: draft.name, train_id: draft.trainId, blocks: draft.blocks } });
+    if (!response) return false;
+    draft.id = id;
+    $('#automation-status').textContent = `Saved ${draft.name}.`;
+    return true;
+  }
+
+  async function runAutomationProgram() {
+    if (!app.automationDraft.id && !(await saveAutomationProgram())) return;
+    if (!window.confirm('Run this train routine now? The train will be stopped when the routine finishes.')) return;
+    await sendCommand({ type: 'play_automation_program', program_id: app.automationDraft.id, confirm: true, automatic: true });
+  }
+
+  function loadAutomationProgram(id) {
+    const program = app.automationPrograms.find((item) => item.id === id);
+    if (!program) return;
+    app.automationDraft = { id: program.id, name: program.name || 'Train routine', trainId: program.train_id || '', blocks: clone(program.blocks || []) };
+    app.automationSelectedBlockId = null;
+    renderAutomationStudio();
+    $('#automation-status').textContent = `Loaded ${app.automationDraft.name}.`;
+  }
+
+  async function deleteAutomationProgram(id) {
+    const program = app.automationPrograms.find((item) => item.id === id);
+    if (!program || !window.confirm(`Delete ${program.name || id}?`)) return;
+    await sendCommand({ type: 'delete_automation_program', program_id: id });
+    if (app.automationDraft.id === id) app.automationDraft = { id: null, name: 'New train routine', trainId: app.selectedTrainId, blocks: [] };
+  }
+
+  function clearAutomationProgram() {
+    app.automationDraft = { id: null, name: 'New train routine', trainId: app.selectedTrainId, blocks: [] };
+    app.automationSelectedBlockId = null;
+    renderAutomationStudio();
   }
 
   function renderProgramming() {
@@ -2642,6 +2796,7 @@
     $('.sidebar').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     $('#systematic-panel').classList.toggle('is-hidden', !trackPage || app.layoutView !== 'systematic');
     $('#layout-panel').classList.toggle('is-hidden', !trackPage);
+    $('#automation-studio-panel').classList.toggle('is-hidden', page !== 'layout');
     $('#layout-info-panel').classList.toggle('is-hidden', !trackPage);
     $('#layout-panel').classList.toggle('systematic-only', app.layoutView === 'systematic');
     $('#map-stage').classList.toggle('is-hidden', app.layoutView === 'systematic');
@@ -3249,6 +3404,20 @@
     $('#start-recording').addEventListener('click', startRecording);
     $('#stop-recording').addEventListener('click', stopRecording);
     $('#play-recording').addEventListener('click', playRecording);
+    $('#automation-train-select').addEventListener('change', (event) => { app.automationDraft.trainId = event.target.value; app.selectedTrainId = event.target.value; renderSidebar(); renderAutomationStudio(); });
+    $('#automation-program-name').addEventListener('input', (event) => { app.automationDraft.name = event.target.value; $('#automation-program-title').textContent = event.target.value || 'New train routine'; });
+    $('#automation-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-action-block]'); if (button) addAutomationBlock(button.dataset.actionBlock); });
+    $('#automation-catalogue').addEventListener('dragstart', (event) => { const button = event.target.closest('[data-action-block]'); if (button) event.dataTransfer.setData('text/plain', button.dataset.actionBlock); });
+    $('#automation-dropzone').addEventListener('dragover', (event) => { event.preventDefault(); $('#automation-dropzone').classList.add('is-dragging'); });
+    $('#automation-dropzone').addEventListener('dragleave', () => $('#automation-dropzone').classList.remove('is-dragging'));
+    $('#automation-dropzone').addEventListener('drop', (event) => { event.preventDefault(); $('#automation-dropzone').classList.remove('is-dragging'); addAutomationBlock(event.dataTransfer.getData('text/plain')); });
+    $('#automation-block-list').addEventListener('change', updateAutomationBlockField);
+    $('#automation-block-list').addEventListener('click', (event) => { const button = event.target.closest('[data-automation-action]'); if (button) automationBlockAction(button.dataset.automationAction, Number(button.dataset.automationIndex)); else { const block = event.target.closest('[data-automation-block-id]'); if (block) { app.automationSelectedBlockId = block.dataset.automationBlockId; renderAutomationStudio(); } } });
+    $('#automation-program-list').addEventListener('click', (event) => { const button = event.target.closest('[data-automation-program-action]'); const row = event.target.closest('[data-automation-program-id]'); if (!button || !row) return; const id = row.dataset.automationProgramId; if (button.dataset.automationProgramAction === 'load') loadAutomationProgram(id); if (button.dataset.automationProgramAction === 'run') { loadAutomationProgram(id); runAutomationProgram(); } if (button.dataset.automationProgramAction === 'delete') deleteAutomationProgram(id); });
+    $('#automation-import-recording').addEventListener('click', importLastRecording);
+    $('#automation-clear-program').addEventListener('click', clearAutomationProgram);
+    $('#automation-save-program').addEventListener('click', saveAutomationProgram);
+    $('#automation-run-program').addEventListener('click', runAutomationProgram);
     $('#start-calibration').addEventListener('click', startCalibration);
     $('#cancel-calibration').addEventListener('click', () => sendCommand({ type: 'cancel_calibration' }));
     $('#record-calibration').addEventListener('click', recordCalibration);
