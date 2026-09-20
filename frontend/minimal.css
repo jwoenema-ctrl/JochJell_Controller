@@ -252,6 +252,14 @@ body .field textarea { min-height: 86px; }
 .consist-list { max-height: 300px; }
 .consist-item { min-height: 50px; }
 .consist-summary, .assembler-train-picker, .tiny-status { font-size: 12px; }
+.assembler-locomotive-tools { grid-template-columns: minmax(0, 1fr) minmax(180px, .8fr) auto; padding: 16px 20px; }
+.assembler-locomotive-tools strong { font-size: 13px; }
+.assembler-locomotive-tools small { font-size: 11px; }
+.assembler-locomotive-tools select { min-height: 38px; font-size: 12px; background: var(--panel-raised); }
+.locomotive-consist-item { min-height: 50px; padding: 8px 10px; }
+.locomotive-consist-item strong { font-size: 12px; }
+.locomotive-consist-item small { font-size: 11px; }
+.locomotive-consist-item .consist-position { font-size: 11px; }
 .add-car-button { min-height: 38px; color: var(--text); background: transparent; border-color: var(--line-bright); font-size: 12px; margin-bottom: 20px; }
 .add-car-button:hover { background: var(--panel-soft); }
 body .rolling-stock-label { font-size: 12px; }
@@ -381,6 +389,8 @@ body .empty-state { font-size: 13px; }
   .asset-list { max-height: 160px; }
   .assembler-train-picker { grid-template-columns: minmax(0, 1fr); }
   .assembler-train-picker select { min-width: 0; }
+  .assembler-locomotive-tools { grid-template-columns: minmax(0, 1fr); }
+  .assembler-locomotive-tools select, .assembler-locomotive-tools button { width: 100%; }
   .scan-viewer-host { margin: 0 12px; height: 320px; }
   .scan-footer { padding: 16px 12px; }
   .scan-status { display: none; }

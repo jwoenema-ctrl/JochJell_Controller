@@ -104,6 +104,18 @@
           </div>
         </section>
 
+        <section class="panel selected-train-functions-panel" id="selected-train-functions-panel" aria-labelledby="selected-train-functions-title">
+          <div class="panel-heading compact-heading">
+            <div>
+              <p class="eyebrow">TRAIN FUNCTIONS</p>
+              <h2 id="selected-train-functions-title">Decoder controls</h2>
+            </div>
+            <span class="panel-action" id="selected-train-function-count">0 assigned</span>
+          </div>
+          <div class="train-function-grid" id="selected-train-functions" role="group" aria-label="Assigned train functions"></div>
+          <p class="settings-help train-function-empty" id="selected-train-function-status">No decoder functions assigned to this train.</p>
+        </section>
+
         <section class="panel simulation-panel">
           <div class="panel-heading">
             <div>
@@ -410,8 +422,13 @@
               <button class="text-button" id="save-consist">Save consist</button>
             </div>
             <div class="assembler-train-picker"><label>Assembling</label><select id="assembler-train-select"></select><span class="tiny-status">● Stored</span></div>
+            <div class="assembler-locomotive-tools">
+              <div><p class="eyebrow">LOCOMOTIVE PAIRING</p><strong>Run decoders as one train</strong><small>Add another configured locomotive. Speed, direction, and stop commands will stay synchronized.</small></div>
+              <select id="assembler-locomotive-select" aria-label="Locomotive to pair"></select>
+              <button type="button" class="button button-soft" id="add-locomotive">Add locomotive</button>
+            </div>
+            <div class="assembler-locomotive-list" id="assembler-locomotive-list"></div>
             <div class="consist-list" id="consist-list"></div>
-            <div id="assembler-functions"></div>
             <button class="add-car-button" id="add-car">＋ Add rolling stock</button>
           </section>
         </div>

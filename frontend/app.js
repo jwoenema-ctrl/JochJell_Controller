@@ -119,6 +119,9 @@
     automationSelectedBlockId: null,
     automationPrograms: []
   };
+  app.state.trains.forEach((train) => {
+    if (train.length_mm == null && Number.isFinite(Number(train.length))) train.length_mm = Number(train.length) * 1000;
+  });
 
   function rollingStockCatalogue() {
     const inventory = app.state.rollingStockInventory || {};
@@ -301,6 +304,11 @@
   const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
   function escapeHtml(value) {
     return String(value == null ? '' : value).replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#039;', '"': '&quot;' }[character]));
+  }
+  function formatLengthMm(value) {
+    if (value == null || value === '') return '-';
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? String(value) : '-';
   }
 
   function formatTime(value) {
@@ -1260,6 +1268,7 @@
     $('#speed-slider').value = Math.round(dialSpeed);
     $('#speed-slider').disabled = app.source !== 'api' || app.state.track_power === false || app.nativeModePending || app.powerPending || app.controlPending;
     $('#speed-command-status').textContent = `${train.actual_speed_kmh == null ? 'Commanded' : 'Actual'} ${Math.round(Number(train.actual_speed_kmh ?? train.speed) || 0)} km/h${train.speed_limit_kmh == null ? '' : ` · limit ${train.speed_limit_kmh} km/h`} · auto-applies`;
+    renderSelectedTrainFunctions(train);
     $('#simulation-clock').textContent = app.state.simulation.clock || '00:00:00';
     $('#simulation-date').textContent = app.state.simulation.date || 'Simulation date';
     $('#simulation-rate').textContent = app.simRate === 1 ? 'Real time' : `Real time · ${app.simRate}× step`;
@@ -1271,6 +1280,28 @@
     $('#simulation-rate-select').value = String(app.simRate);
     $$('.control-mode').forEach((button) => button.classList.toggle('is-active', button.dataset.controlMode === app.controlMode));
     $$('.mode-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.workspace === app.workspace));
+  }
+
+  function renderSelectedTrainFunctions(train) {
+    const grid = $('#selected-train-functions');
+    const status = $('#selected-train-function-status');
+    const count = $('#selected-train-function-count');
+    if (!grid || !status || !count) return;
+    const assigned = (Array.isArray(train.decoder_functions) ? train.decoder_functions : [])
+      .filter((item) => item && item.enabled !== false && Number.isInteger(Number(item.function_number)))
+      .filter((item) => Number(item.function_number) >= 0 && Number(item.function_number) <= 31)
+      .sort((left, right) => Number(left.function_number) - Number(right.function_number));
+    const states = train.decoder_function_states && typeof train.decoder_function_states === 'object' ? train.decoder_function_states : {};
+    count.textContent = `${assigned.length} assigned`;
+    status.classList.toggle('is-hidden', assigned.length > 0);
+    grid.innerHTML = assigned.map((item) => {
+      const number = Number(item.function_number);
+      const enabled = Boolean(states[String(number)]);
+      const label = item.name || item.function_name || item.description || `Function F${number}`;
+      const momentary = item.momentary ? ' - momentary' : '';
+      const disabled = app.source !== 'api' || app.state.track_power === false;
+      return `<button type="button" class="button button-soft train-function-button${enabled ? ' is-on' : ''}" data-train-function="${number}" aria-pressed="${enabled}" title="F${number}: ${escapeHtml(label)}${momentary}"${disabled ? ' disabled' : ''}><span class="train-function-main"><strong>F${number}</strong><small>${escapeHtml(label)}</small></span><em>${enabled ? 'ON' : 'OFF'}</em></button>`;
+    }).join('');
   }
 
   function blockCenter(block) {
@@ -2307,11 +2338,13 @@
     const states = train.decoder_function_states && typeof train.decoder_function_states === 'object' ? train.decoder_function_states : {};
     const previous = Boolean(states[String(functionNumber)]);
     train.decoder_function_states = { ...states, [String(functionNumber)]: Boolean(enabled) };
+    renderSidebar();
     renderEditor();
     renderAssembler();
     const response = await sendCommand({ type: 'set_train_function', train_id: train.id, function_number: functionNumber, enabled: Boolean(enabled) });
     if (!response) {
       train.decoder_function_states[String(functionNumber)] = previous;
+      renderSidebar();
       renderEditor();
       renderAssembler();
     } else showToast('F' + functionNumber + (enabled ? ' enabled' : ' disabled'), 'success');
@@ -2326,10 +2359,10 @@
       const selectedDestination = String(train.destination_block_id || (blocks[blocks.length - 1] && blocks[blocks.length - 1].id) || '').toUpperCase();
       const destinationOptions = blocks.map((block) => { const id = String(block.id || '').toUpperCase(); const selected = id === selectedDestination ? ' selected' : ''; return `<option value="${escapeHtml(id)}"${selected}>${escapeHtml(block.name || id)} · ${escapeHtml(id)}</option>`; }).join('');
       const mass = train.mass_g == null ? '' : train.mass_g;
-      const lengthMm = train.length_mm == null ? Math.round((Number(train.length) || 0) * 1000) : train.length_mm;
+      const lengthMm = train.length_mm == null ? (Number(train.length) || 0) : train.length_mm;
       const controlMode = trainControlMode(train);
       const controlModeOptions = TRAIN_CONTROL_MODES.map((option) => `<option value="${option.value}"${option.value === controlMode ? ' selected' : ''}>${option.label}</option>`).join('');
-      content.innerHTML = `<div class="field-grid"><div class="field"><label for="editor-name">Service name</label><input id="editor-name" value="${escapeHtml(train.name || '')}"></div><div class="field"><label for="editor-number">DCC address / service no.</label><input id="editor-number" inputmode="numeric" value="${escapeHtml(train.number || '')}"></div><div class="field"><label for="editor-origin">Origin</label><input id="editor-origin" value="${escapeHtml(train.origin || '')}"></div><div class="field"><label for="editor-destination">Destination</label><input id="editor-destination" value="${escapeHtml(train.destination || '')}"></div><div class="field"><label for="editor-destination-block">Destination block</label><select id="editor-destination-block">${destinationOptions || '<option value="">No blocks configured</option>'}</select></div><div class="field train-control-mode-field"><label for="editor-control-mode">Control mode</label><select id="editor-control-mode">${controlModeOptions}</select></div><div class="field"><label for="editor-manufacturer">Manufacturer</label><input id="editor-manufacturer" value="${escapeHtml(train.manufacturer || '')}"></div><div class="field"><label for="editor-model">Model / catalogue no.</label><input id="editor-model" value="${escapeHtml(train.model_number || '')}"></div><div class="field"><label for="editor-era">Railway era</label><input id="editor-era" value="${escapeHtml(train.era || '')}"></div><div class="field"><label for="editor-protocol">Decoder protocol</label><select id="editor-protocol"><option value="DCC"${String(train.decoder_protocol || 'DCC').toUpperCase() === 'DCC' ? ' selected' : ''}>DCC</option><option value="MM"${String(train.decoder_protocol || '').toUpperCase() === 'MM' ? ' selected' : ''}>Motorola</option><option value="SX"${String(train.decoder_protocol || '').toUpperCase() === 'SX' ? ' selected' : ''}>Selectrix</option></select></div><div class="field"><label for="editor-mass">Mass (g)</label><input id="editor-mass" type="number" min="0" step="1" value="${escapeHtml(mass)}"></div><div class="field"><label for="editor-length">Length (mm)</label><input id="editor-length" type="number" min="0" step="1" value="${escapeHtml(lengthMm)}"></div><div class="field"><label for="editor-max-speed">Maximum speed (km/h)</label><input id="editor-max-speed" type="number" min="0" step="1" value="${escapeHtml(train.maxSpeed || 140)}"></div></div><p class="editor-note">Changes are held in the dashboard until saved to the controller. The same profile can drive manual, automatic, and schedule simulation modes.</p><div class="button-row" style="padding: 12px 0 0"><button class="button button-primary" id="save-train-settings">Save profile</button><button class="button button-soft" id="route-selected">Plan route</button></div>`;
+      content.innerHTML = `<div class="field-grid"><div class="field"><label for="editor-name">Service name</label><input id="editor-name" value="${escapeHtml(train.name || '')}"></div><div class="field"><label for="editor-number">DCC address / service no.</label><input id="editor-number" inputmode="numeric" value="${escapeHtml(train.number || '')}"></div><div class="field"><label for="editor-origin">Origin</label><input id="editor-origin" value="${escapeHtml(train.origin || '')}"></div><div class="field"><label for="editor-destination">Destination</label><input id="editor-destination" value="${escapeHtml(train.destination || '')}"></div><div class="field"><label for="editor-destination-block">Destination block</label><select id="editor-destination-block">${destinationOptions || '<option value="">No blocks configured</option>'}</select></div><div class="field train-control-mode-field"><label for="editor-control-mode">Control mode</label><select id="editor-control-mode">${controlModeOptions}</select></div><div class="field"><label for="editor-manufacturer">Manufacturer</label><input id="editor-manufacturer" value="${escapeHtml(train.manufacturer || '')}"></div><div class="field"><label for="editor-model">Model / catalogue no.</label><input id="editor-model" value="${escapeHtml(train.model_number || '')}"></div><div class="field"><label for="editor-era">Railway era</label><input id="editor-era" value="${escapeHtml(train.era || '')}"></div><div class="field"><label for="editor-protocol">Decoder protocol</label><select id="editor-protocol"><option value="DCC"${String(train.decoder_protocol || 'DCC').toUpperCase() === 'DCC' ? ' selected' : ''}>DCC</option><option value="MM"${String(train.decoder_protocol || '').toUpperCase() === 'MM' ? ' selected' : ''}>Motorola</option><option value="SX"${String(train.decoder_protocol || '').toUpperCase() === 'SX' ? ' selected' : ''}>Selectrix</option></select></div><div class="field"><label for="editor-mass">Mass (g)</label><input id="editor-mass" type="number" min="0" step="1" value="${escapeHtml(mass)}"></div><div class="field"><label for="editor-length">Length (mm)</label><input id="editor-length" type="number" min="0" step="any" value="${escapeHtml(lengthMm)}"></div><div class="field"><label for="editor-max-speed">Maximum speed (km/h)</label><input id="editor-max-speed" type="number" min="0" step="1" value="${escapeHtml(train.maxSpeed || 140)}"></div></div><p class="editor-note">Changes are held in the dashboard until saved to the controller. The same profile can drive manual, automatic, and schedule simulation modes.</p><div class="button-row" style="padding: 12px 0 0"><button class="button button-primary" id="save-train-settings">Save profile</button><button class="button button-soft" id="route-selected">Plan route</button></div>`;
       content.insertAdjacentHTML('beforeend', renderFunctionControls(train, false));
       bindFunctionControls(content);
       $('#save-train-settings').addEventListener('click', saveTrainSettings);
@@ -2361,6 +2394,14 @@
       const consist = train.consist || [];
       content.innerHTML = `<div class="consist-summary"><span>Formation</span><strong>${consist.length} vehicles · ${escapeHtml(train.length || '—')} m</strong></div><div class="consist-list">${consist.map((item, index) => `<div class="consist-item"><span class="consist-icon">${index === 0 ? '▣' : '▤'}</span><span><strong>${escapeHtml(item.name || item.type || 'Vehicle')}</strong><small>${escapeHtml(item.detail || item.type || 'Rolling stock')}</small></span><span>${index === 0 ? 'Front' : `${index + 1}/${consist.length}`}</span></div>`).join('')}</div>`;
     }
+    const dataLengthRow = $$('.data-item', content).find((row) => row.firstElementChild && row.firstElementChild.textContent === 'Overall length / mass');
+    if (dataLengthRow && dataLengthRow.lastElementChild) {
+      dataLengthRow.lastElementChild.textContent = formatLengthMm(train.length_mm) + ' mm � ' + (train.mass_g == null || train.mass_g === '' ? '-' : train.mass_g) + ' g';
+    }
+    if (dataLengthRow && dataLengthRow.lastElementChild) dataLengthRow.lastElementChild.textContent = formatLengthMm(train.length_mm) + ' mm - ' + (train.mass_g == null || train.mass_g === '' ? '-' : train.mass_g) + ' g';
+    const formationSummary = $('.consist-summary strong', content);
+    if (formationSummary) formationSummary.textContent = (train.consist || []).length + ' vehicles � ' + formatLengthMm(train.length_mm) + ' mm';
+    if (formationSummary) formationSummary.textContent = (train.consist || []).length + ' vehicles - ' + formatLengthMm(train.length_mm) + ' mm';
     $$('.editor-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.editorTab === app.editorTab));
   }
 
@@ -2588,8 +2629,19 @@
     if (!train) return [];
     if (app.consistDraft && app.consistDraft.trainId === train.id) return app.consistDraft.consist;
     const consist = clone(train.consist || []);
-    if (createDraft) app.consistDraft = { trainId: train.id, consist };
+    if (createDraft) app.consistDraft = { trainId: train.id, consist, locomotiveIds: clone(train.locomotive_ids || []) };
     return consist;
+  }
+
+  function locomotiveIdsForTrain(train, createDraft = false) {
+    if (!train) return [];
+    if (app.consistDraft && app.consistDraft.trainId === train.id) return app.consistDraft.locomotiveIds || (app.consistDraft.locomotiveIds = []);
+    const locomotiveIds = clone(train.locomotive_ids || []);
+    if (createDraft) {
+      app.consistDraft = { trainId: train.id, consist: clone(train.consist || []), locomotiveIds };
+      return app.consistDraft.locomotiveIds;
+    }
+    return locomotiveIds;
   }
 
   function consistLengthMm(consist) {
@@ -2622,6 +2674,32 @@
     showToast(`${item.name} added to draft consist`, 'success');
   }
 
+  function addLocomotiveToConsist() {
+    const train = selectedTrain();
+    const select = $('#assembler-locomotive-select');
+    const memberId = select && select.value;
+    const member = app.state.trains.find((item) => item.id === memberId);
+    if (!train || !member) {
+      showToast('Choose a locomotive to pair first.', 'warning');
+      return;
+    }
+    const locomotiveIds = locomotiveIdsForTrain(train, true);
+    if (member.id === train.id || locomotiveIds.includes(member.id)) return;
+    locomotiveIds.push(member.id);
+    renderAssembler();
+    showToast(`${member.name || member.id} paired with ${train.name || train.id}`, 'success');
+  }
+
+  function removeLocomotiveFromConsist(memberId) {
+    const train = selectedTrain();
+    if (!train) return;
+    const locomotiveIds = locomotiveIdsForTrain(train, true);
+    const index = locomotiveIds.indexOf(memberId);
+    if (index < 0) return;
+    locomotiveIds.splice(index, 1);
+    renderAssembler();
+  }
+
   function changeConsistItem(index, direction) {
     const train = selectedTrain();
     if (!train) return;
@@ -2650,15 +2728,17 @@
     const train = app.state.trains.find((item) => item.id === app.consistDraft.trainId);
     if (!train) return;
     train.consist = clone(app.consistDraft.consist);
+    train.locomotive_ids = clone(app.consistDraft.locomotiveIds || []);
     const lengthMm = consistLengthMm(train.consist);
     if (lengthMm != null) {
-      train.length_mm = Math.round(lengthMm);
-      train.length = Math.round(lengthMm) / 1000;
+      train.length_mm = lengthMm;
+      train.length = lengthMm;
     }
     const savedConsist = clone(train.consist);
+    const savedLocomotiveIds = clone(train.locomotive_ids);
     app.consistDraft = null;
     renderAll();
-    await sendCommand({ type: 'update_consist', train_id: train.id, consist: savedConsist });
+    await sendCommand({ type: 'update_consist', train_id: train.id, consist: savedConsist, locomotive_ids: savedLocomotiveIds, length_mm: train.length_mm });
   }
 
   function renderAssembler() {
@@ -2682,15 +2762,33 @@
     select.innerHTML = app.state.trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || `Train ${train.number}`)} · #${escapeHtml(train.number || '—')}</option>`).join('');
     select.value = (app.consistDraft && app.consistDraft.trainId) || app.selectedTrainId;
     const train = app.state.trains.find((item) => item.id === select.value) || selectedTrain();
+    const locomotiveSelect = $('#assembler-locomotive-select');
+    const locomotiveList = $('#assembler-locomotive-list');
+    const locomotiveIds = train ? locomotiveIdsForTrain(train, false) : [];
+    const availableLocomotives = app.state.trains.filter((item) => item.id !== (train && train.id) && !locomotiveIds.includes(item.id));
+    if (locomotiveSelect) {
+      locomotiveSelect.innerHTML = availableLocomotives.length
+        ? availableLocomotives.map((item) => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.name || item.id) + ' - #' + escapeHtml(item.number || '-') + '</option>').join('')
+        : '<option value="">All configured locomotives are already paired</option>';
+      locomotiveSelect.disabled = !availableLocomotives.length;
+    }
+    const addLocomotiveButton = $('#add-locomotive');
+    if (addLocomotiveButton) addLocomotiveButton.disabled = !availableLocomotives.length;
+    if (locomotiveList) {
+      const leadMarkup = train
+        ? '<div class="locomotive-consist-item is-lead"><span class="consist-icon">L</span><span><strong>' + escapeHtml(train.name || train.id) + '</strong><small>Lead locomotive - decoder #' + escapeHtml(train.number || '-') + '</small></span><span class="consist-position">Lead</span></div>'
+        : '';
+      const helperMarkup = locomotiveIds.map((memberId, index) => {
+        const member = app.state.trains.find((item) => item.id === memberId);
+        if (!member) return '';
+        return '<div class="locomotive-consist-item"><span class="consist-icon">L</span><span><strong>' + escapeHtml(member.name || member.id) + '</strong><small>Paired locomotive - decoder #' + escapeHtml(member.number || '-') + '</small></span><span class="consist-position">Helper ' + (index + 1) + '</span><button type="button" class="icon-button small" data-remove-locomotive="' + escapeHtml(member.id) + '" aria-label="Remove ' + escapeHtml(member.name || member.id) + '">x</button></div>';
+      }).join('');
+      locomotiveList.innerHTML = leadMarkup + helperMarkup || '<div class="empty-state">No locomotive selected.</div>';
+    }
     const consist = (app.consistDraft && app.consistDraft.trainId === (train && train.id)) ? app.consistDraft.consist : (train && train.consist) || [];
     const draftStatus = $('.assembler-panel .tiny-status');
     if (draftStatus) draftStatus.textContent = app.consistDraft && app.consistDraft.trainId === (train && train.id) ? '● Draft' : '● Stored';
     $('#consist-list').innerHTML = consist.length ? consist.map((item, index) => `<div class="consist-item"><span class="consist-icon">${index === 0 ? '▣' : '▤'}</span><span><strong>${escapeHtml(item.name || item.type || 'Vehicle')}</strong><small>${escapeHtml(item.detail || item.type || 'Rolling stock')}</small></span><span class="consist-position">${index === 0 ? 'Front' : `${index + 1}/${consist.length}`}</span><span class="consist-actions"><button type="button" class="icon-button small consist-action" data-consist-action="up" data-consist-index="${index}" aria-label="Move ${escapeHtml(item.name || 'vehicle')} forward"${index === 0 ? ' disabled' : ''}>↑</button><button type="button" class="icon-button small consist-action" data-consist-action="down" data-consist-index="${index}" aria-label="Move ${escapeHtml(item.name || 'vehicle')} backward"${index === consist.length - 1 ? ' disabled' : ''}>↓</button><button type="button" class="icon-button small consist-action" data-consist-action="remove" data-consist-index="${index}" aria-label="Remove ${escapeHtml(item.name || 'vehicle')}">×</button></span></div>`).join('') : '<div class="empty-state">No rolling stock assigned. Choose an entry below to start the consist.</div>';
-    const functionHost = $('#assembler-functions');
-    if (functionHost) {
-      functionHost.innerHTML = train ? renderFunctionControls(train, true) : '';
-      if (train) bindFunctionControls(functionHost);
-    }
     $$('.consist-action', $('#consist-list')).forEach((button) => button.addEventListener('click', () => {
       const index = Number(button.dataset.consistIndex);
       if (button.dataset.consistAction === 'remove') removeConsistItem(index);
@@ -3038,7 +3136,7 @@
     const maxSpeed = Number($('#editor-max-speed').value);
     train.mass_g = Number.isFinite(mass) && mass >= 0 ? mass : null;
     train.length_mm = Number.isFinite(lengthMm) && lengthMm >= 0 ? lengthMm : 0;
-    train.length = Math.round(train.length_mm) / 1000;
+    train.length = train.length_mm;
     train.maxSpeed = Number.isFinite(maxSpeed) && maxSpeed >= 0 ? maxSpeed : train.maxSpeed;
     renderAll();
     sendCommand({ type: 'update_train', train_id: train.id, train: { name: train.name, number: train.number, origin: train.origin, destination: train.destination, destination_block_id: train.destination_block_id, manufacturer: train.manufacturer, model_number: train.model_number, era: train.era, decoder_protocol: train.decoder_protocol, mass_g: train.mass_g, length_mm: train.length_mm, maxSpeed: train.maxSpeed } });
@@ -3430,6 +3528,12 @@
     $('#stop-train').addEventListener('click', () => setSpeed(0));
     $('#direction-forward').addEventListener('click', () => setDirection('forward'));
     $('#direction-reverse').addEventListener('click', () => setDirection('reverse'));
+    $('#selected-train-functions').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-train-function]');
+      if (!button || button.disabled) return;
+      const functionNumber = Number(button.dataset.trainFunction);
+      void toggleTrainFunction(functionNumber, button.getAttribute('aria-pressed') !== 'true');
+    });
     $('#simulation-toggle').addEventListener('click', () => { app.state.simulation.running = !app.state.simulation.running; renderSidebar(); sendCommand({ type: app.state.simulation.running ? 'resume_simulation' : 'pause_simulation' }); });
     $('#simulation-tick').addEventListener('click', tickSimulation);
     $('#track-power-toggle').addEventListener('click', toggleTrackPower);
@@ -3491,6 +3595,11 @@
     });
     $('#assembler-train-select').addEventListener('change', (event) => { cancelSpeedDraft(); app.selectedTrainId = event.target.value; app.consistDraft = null; renderSidebar(); renderTrainList(); renderEditor(); renderAssembler(); });
     $('#add-car').addEventListener('click', addRollingStock);
+    $('#add-locomotive').addEventListener('click', addLocomotiveToConsist);
+    $('#assembler-locomotive-list').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-remove-locomotive]');
+      if (button) removeLocomotiveFromConsist(button.dataset.removeLocomotive);
+    });
     $('#save-consist').addEventListener('click', saveConsist);
     $('#close-editor').addEventListener('click', () => { $('#train-editor-panel').classList.toggle('is-collapsed'); showToast($('#train-editor-panel').classList.contains('is-collapsed') ? 'Train profile collapsed' : 'Train profile expanded', 'success'); });
   }

@@ -520,6 +520,32 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_paired_locomotives_share_motion_commands(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "set_train_mode", "train_id": "t1", "mode": "manual"})
+            app.command({"type": "update_consist", "train_id": "t1", "consist": [], "locomotive_ids": ["t2"]})
+            state = app.state()
+            lead = next(item for item in state["trains"] if item["id"] == "t1")
+            self.assertEqual(lead["locomotive_ids"], ["t2"])
+
+            app.command({"type": "stop_train", "train_id": "t1"})
+            raw_trains = {item["id"]: item for item in app.trains}
+            app.command({"type": "set_direction", "train_id": "t1", "direction": "reverse"})
+            self.assertEqual(raw_trains["train-101"]["direction"], "reverse")
+            self.assertEqual(raw_trains["train-3"]["direction"], "reverse")
+
+            app.command({"type": "speed", "train_id": "t1", "speed": 30})
+            self.assertEqual(raw_trains["train-101"]["speed"], 30)
+            self.assertEqual(raw_trains["train-3"]["speed"], 30)
+
+            app.command({"type": "stop_train", "train_id": "t2"})
+            self.assertEqual(raw_trains["train-101"]["speed"], 0)
+            self.assertEqual(raw_trains["train-3"]["speed"], 0)
+        finally:
+            app.close()
+
     def test_train_database_detail_commands_are_persisted_and_evented(self) -> None:
         app = ControllerApplication.sample()
         try:
@@ -559,6 +585,31 @@ class ApiTests(unittest.TestCase):
             app.command({"type": "delete_decoder_function", "train_id": "t1", "function_number": 2})
             self.assertEqual(app.train_database("t1")["decoder_functions"], [])
             self.assertEqual(app.train_database("t1")["maintenance_records"], [])
+        finally:
+            app.close()
+
+    def test_train_and_assembled_lengths_remain_exact_millimetres(self) -> None:
+        app = ControllerApplication.sample()
+        try:
+            app.command({"type": "update_train", "train_id": "t1", "train": {"length_mm": 1523.75}})
+            train = next(item for item in app.state()["trains"] if item["id"] == "t1")
+            self.assertEqual(train["length_mm"], 1523.75)
+            self.assertEqual(train["length"], 1523.75)
+
+            app.command({
+                "type": "update_consist",
+                "train_id": "t1",
+                "consist": [
+                    {"id": "coach-a", "type": "coach", "name": "Coach A", "length_mm": 101.25},
+                    {"id": "coach-b", "type": "coach", "name": "Coach B", "length_mm": 202.5},
+                ],
+                "length_mm": 303.75,
+            })
+            train = next(item for item in app.state()["trains"] if item["id"] == "t1")
+            self.assertEqual(train["length_mm"], 303.75)
+            record = app.train_database("train-101")
+            self.assertEqual(record["length_mm"], 303.75)
+            self.assertEqual(record["rolling_stock"][0]["length_mm"], 101.25)
         finally:
             app.close()
 

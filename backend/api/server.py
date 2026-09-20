@@ -173,6 +173,7 @@ class ControllerApplication:
             else:
                 self.runtime = ControllerRuntime.create(database_path=self.database_path)
         self.runtime.connection.check()
+        self._restore_formation_metadata()
         if self.z21_host:
             self.track_power = False
             for train in self.trains:
@@ -182,6 +183,25 @@ class ControllerApplication:
         self._last_train_blocks = {str(train.get("id")): str(train.get("block_id", "")) for train in self.trains}
         if self.database_path != ":memory:" and self.runtime.layout_repository.load(self.layout_id) is not None:
             self.load_layout(self.layout_id)
+
+    def _restore_formation_metadata(self) -> None:
+        """Load persisted locomotive pairings without replacing the UI fixture."""
+        if self.runtime is None:
+            return
+        for train in self.trains:
+            details = self.runtime.train_database.get(str(train.get("id", "")))
+            metadata = dict(details.metadata) if details is not None else {}
+            raw_ids = metadata.get("locomotive_ids", ())
+            if isinstance(raw_ids, (list, tuple)):
+                train["locomotive_ids"] = [self._canonical_train_id(str(item)) for item in raw_ids if str(item)]
+            if not train.get("consist") and isinstance(metadata.get("consist"), list):
+                train["consist"] = deepcopy(metadata["consist"])
+        for train in self.trains:
+            for raw_id in train.get("locomotive_ids", ()):
+                member_id = self._canonical_train_id(str(raw_id))
+                member = next((item for item in self.trains if str(item.get("id")) == member_id), None)
+                if member is not None and member is not train:
+                    member["coupled_to"] = str(train.get("id"))
 
     @classmethod
     def sample(
@@ -739,6 +759,7 @@ class ControllerApplication:
                         "origin": train.get("origin", ""),
                         "destination": train.get("destination", ""),
                         "consist": train.get("consist", []),
+                        "locomotive_ids": list(train.get("locomotive_ids", ())),
                     },
                 )
             )
@@ -1560,7 +1581,7 @@ class ControllerApplication:
                 "model_number": model.model,
                 "era": model.era,
                 "length_mm": model.length_mm,
-                "length": (model.length_mm / 1000) if model.length_mm is not None else row.get("length", ""),
+                "length": model.length_mm if model.length_mm is not None else row.get("length", ""),
                 "mass_g": model.mass_g,
                 "maxSpeed": model.max_speed_kmh if model.max_speed_kmh is not None else row.get("maxSpeed", 140),
                 "decoder_functions": [
@@ -1932,6 +1953,33 @@ class ControllerApplication:
     def _canonical_train_id(self, ui_id: str) -> str:
         return {"t1": "train-101", "t2": "train-3"}.get(ui_id, ui_id)
 
+    def _coupled_train_ids(self, train_id: str) -> list[str]:
+        """Return the lead decoder followed by its paired locomotive decoders."""
+        lead_id = self._canonical_train_id(str(train_id))
+        lead = next((item for item in self.trains if str(item.get("id")) == lead_id), None)
+        if lead is None:
+            return [lead_id]
+        parent_id = lead.get("coupled_to")
+        if parent_id:
+            parent_id = self._canonical_train_id(str(parent_id))
+            parent = next((item for item in self.trains if str(item.get("id")) == parent_id), None)
+            if parent is not None:
+                lead_id = parent_id
+                lead = parent
+        raw_ids = lead.get("locomotive_ids", ())
+        if not isinstance(raw_ids, (list, tuple)):
+            raw_ids = ()
+        result = [lead_id]
+        for raw_id in raw_ids:
+            member_id = self._canonical_train_id(str(raw_id))
+            if member_id != lead_id and member_id not in result and any(str(item.get("id")) == member_id for item in self.trains):
+                result.append(member_id)
+        return result
+
+    def _coupled_trains(self, train_id: str) -> list[dict[str, Any]]:
+        ids = self._coupled_train_ids(train_id)
+        return [train for train in self.trains if str(train.get("id")) in ids]
+
     def _next_schedule_destination(self, train: dict[str, Any]) -> str | None:
         """Resolve the next human-readable timetable destination for a train."""
 
@@ -1982,7 +2030,9 @@ class ControllerApplication:
             if raw_length in (None, ""):
                 raw_length = 0
             try:
-                display_length = round(float(raw_length) / 1000, 2)
+                display_length = float(raw_length)
+                if display_length.is_integer():
+                    display_length = int(display_length)
             except (TypeError, ValueError):
                 display_length = 0
             max_speed = train.get("maxSpeed", train.get("max_speed_kmh", 140))
@@ -2009,9 +2059,11 @@ class ControllerApplication:
                 "era": train.get("era", ""),
                 "mass_g": train.get("mass_g"),
                 "decoder_protocol": train.get("decoder_protocol", "DCC"),
+                "length_mm": display_length,
                 "length": display_length,
                 "maxSpeed": max_speed,
                 "consist": train.get("consist", []),
+                "locomotive_ids": [self._ui_train_id(str(item)) for item in train.get("locomotive_ids", ()) if str(item)],
                 "decoder_function_states": dict(train.get("decoder_function_states", {})),
                 "target_coordinate": deepcopy(train.get("target_coordinate")) if train.get("target_coordinate") else None,
                 **self._train_motion_state(train),
@@ -2717,14 +2769,21 @@ class ControllerApplication:
                 control = self.runtime.dispatcher.register_train(train_id)
                 if control.mode is ControlMode.AUTOMATIC:
                     raise ValueError("switch this train to manual control before changing direction")
-                motion = next((item for item in self.runtime.track.get_snapshot().trains if item.train_id == train_id), None)
-                if float(train.get("speed", 0)) > 0 or control.desired_speed > 0 or (motion and (motion.speed > 0 or motion.target_speed > 0)):
-                    raise ValueError("stop the train and wait for it to halt before changing direction")
-                result = self.runtime.track.set_train_direction(train_id, forward=direction == "forward")
-                if not result.accepted:
-                    raise ValueError(result.detail or "direction command rejected")
-                control.manual_speed = control.automatic_speed = 0.0
-                train["direction"] = direction
+                coupled = self._coupled_trains(train_id)
+                for member in coupled:
+                    member_id = str(member["id"])
+                    member_control = self.runtime.dispatcher.register_train(member_id)
+                    motion = next((item for item in self.runtime.track.get_snapshot().trains if item.train_id == member_id), None)
+                    if float(member.get("speed", 0)) > 0 or member_control.desired_speed > 0 or (motion and (motion.speed > 0 or motion.target_speed > 0)):
+                        raise ValueError("stop the train and wait for it to halt before changing direction")
+                for member in coupled:
+                    member_id = str(member["id"])
+                    result = self.runtime.track.set_train_direction(member_id, forward=direction == "forward")
+                    if not result.accepted:
+                        raise ValueError(result.detail or "direction command rejected")
+                    member_control = self.runtime.dispatcher.register_train(member_id)
+                    member_control.manual_speed = member_control.automatic_speed = 0.0
+                    member["direction"] = direction
                 self._record_action_if_active({"operation": "direction", "train_id": train_id, "direction": direction})
                 self.events.append({"type": "train_direction_changed", "train_id": train_id, "direction": direction})
             elif kind in {"speed", "set_speed", "drive"}:
@@ -2742,8 +2801,8 @@ class ControllerApplication:
                 requested_speed = min(maximum, requested_speed)
                 if requested_speed > 0 and not self.track_power:
                     raise ValueError("switch track power on before requesting movement")
+                coupled = self._coupled_trains(train_id)
                 if self.runtime is not None:
-                    normalized = requested_speed / maximum
                     control = self.runtime.dispatcher.register_train(train_id)
                     if requested_speed > 0 and control.mode is ControlMode.STOPPED:
                         # A stopped train is the safe startup state. An explicit
@@ -2751,12 +2810,24 @@ class ControllerApplication:
                         # it under manual control.
                         control.mode = ControlMode.MANUAL
                         train["mode"] = ControlMode.MANUAL.value
-                    if control.mode is ControlMode.AUTOMATIC:
-                        result = self.runtime.dispatcher.automatic_speed(train_id, normalized)
-                    else:
-                        result = self.runtime.dispatcher.manual_speed(train_id, normalized)
-                    if hasattr(result, "accepted") and not result.accepted:
-                        raise ValueError(result.detail or "train speed command rejected")
+                    for member in coupled:
+                        member_id = str(member["id"])
+                        member_maximum = max(1.0, float(member.get("maxSpeed", member.get("max_speed_kmh", 140)) or 140))
+                        member_speed = min(requested_speed, member_maximum)
+                        member_control = self.runtime.dispatcher.register_train(member_id)
+                        if member_speed > 0 and member_control.mode is ControlMode.STOPPED:
+                            member_control.mode = ControlMode.MANUAL
+                            member["mode"] = ControlMode.MANUAL.value
+                        normalized = member_speed / member_maximum
+                        command = self.runtime.dispatcher.automatic_speed if control.mode is ControlMode.AUTOMATIC else self.runtime.dispatcher.manual_speed
+                        result = command(member_id, normalized)
+                        if hasattr(result, "accepted") and not result.accepted:
+                            raise ValueError(result.detail or "train speed command rejected")
+                        member["speed"] = member["requested_speed_kmh"] = member_speed
+                else:
+                    for member in coupled:
+                        member_maximum = max(1.0, float(member.get("maxSpeed", member.get("max_speed_kmh", 140)) or 140))
+                        member["speed"] = member["requested_speed_kmh"] = min(requested_speed, member_maximum)
                 train["speed"] = train["requested_speed_kmh"] = requested_speed
                 self._publish_domain_event(
                     TrainSpeedChanged(
@@ -2772,14 +2843,18 @@ class ControllerApplication:
                 train = next((item for item in self.trains if item["id"] == train_id), None)
                 if train is None:
                     raise ValueError(f"Unknown train: {train_id}")
+                coupled = self._coupled_trains(train_id)
                 if self.runtime is not None:
-                    result = self.runtime.track.stop_train(train_id)
-                    if hasattr(result, "accepted") and not result.accepted:
-                        raise ValueError(result.detail or "train stop command rejected")
-                    control = self.runtime.dispatcher.register_train(train_id)
-                    control.manual_speed = control.automatic_speed = 0.0
-                    control.last_command = "stop_train"
-                train["speed"] = train["requested_speed_kmh"] = 0
+                    for member in coupled:
+                        member_id = str(member["id"])
+                        result = self.runtime.track.stop_train(member_id)
+                        if hasattr(result, "accepted") and not result.accepted:
+                            raise ValueError(result.detail or "train stop command rejected")
+                        control = self.runtime.dispatcher.register_train(member_id)
+                        control.manual_speed = control.automatic_speed = 0.0
+                        control.last_command = "stop_train"
+                for member in coupled:
+                    member["speed"] = member["requested_speed_kmh"] = 0
                 self.events.append({"type": "train_stopped", "train_id": train_id})
             elif kind in {"set_train_function", "set_decoder_function_state", "toggle_train_function"}:
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
@@ -2889,8 +2964,51 @@ class ControllerApplication:
                 train = next((item for item in self.trains if item["id"] == train_id), None)
                 if train is None:
                     raise ValueError(f"Unknown train: {train_id}")
+                raw_locomotive_ids = payload.get("locomotive_ids", train.get("locomotive_ids", ()))
+                if not isinstance(raw_locomotive_ids, (list, tuple)):
+                    raise ValueError("locomotive_ids must be a list")
+                locomotive_ids: list[str] = []
+                for raw_id in raw_locomotive_ids:
+                    member_id = self._canonical_train_id(str(raw_id))
+                    if member_id == train_id:
+                        raise ValueError("a train cannot be paired with itself")
+                    if not any(item["id"] == member_id for item in self.trains):
+                        raise ValueError(f"Unknown locomotive: {raw_id}")
+                    if member_id not in locomotive_ids:
+                        locomotive_ids.append(member_id)
+                previous_ids = set(train.get("locomotive_ids", ()))
+                if "length_mm" in payload:
+                    try:
+                        length_mm = float(payload["length_mm"])
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("length_mm must be a finite non-negative number") from exc
+                    if not math.isfinite(length_mm) or length_mm < 0:
+                        raise ValueError("length_mm must be a finite non-negative number")
+                    train["length_mm"] = length_mm
                 train["consist"] = list(payload.get("consist", []))
-                self._sync_train_database()
+                train["locomotive_ids"] = locomotive_ids
+                for other in self.trains:
+                    if other is train:
+                        continue
+                    other_ids = [str(item) for item in other.get("locomotive_ids", ()) if str(item) not in locomotive_ids]
+                    if other_ids != list(other.get("locomotive_ids", ())):
+                        other["locomotive_ids"] = other_ids
+                for member_id in previous_ids - set(locomotive_ids):
+                    member = next((item for item in self.trains if item["id"] == member_id), None)
+                    if member is not None:
+                        member.pop("coupled_to", None)
+                for member_id in locomotive_ids:
+                    member = next(item for item in self.trains if item["id"] == member_id)
+                    member["coupled_to"] = train_id
+                    member["block_id"] = train.get("block_id", member.get("block_id"))
+                    member["route"] = list(train.get("route", member.get("route", [])))
+                    member["direction"] = train.get("direction", member.get("direction", "forward"))
+                    member["mode"] = train.get("mode", member.get("mode", "manual"))
+                    member["speed"] = member["requested_speed_kmh"] = min(
+                        float(train.get("speed", 0) or 0),
+                        float(member.get("maxSpeed", member.get("max_speed_kmh", 140)) or 140),
+                    )
+                self._sync_runtime_from_ui()
             elif kind in {"update_decoder_function", "upsert_decoder_function", "set_decoder_function"}:
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 train = next((item for item in self.trains if item["id"] == train_id), None)

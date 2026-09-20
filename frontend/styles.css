@@ -110,6 +110,19 @@ h2 { font-size: 15px; letter-spacing: -.01em; font-weight: 650; }
 .control-mode small { margin-top: 3px; color: var(--faint); font-size: 9px; }
 
 .selected-train-panel { padding-bottom: 15px; }
+.selected-train-functions-panel { margin-top: -9px; border-top-left-radius: 7px; border-top-right-radius: 7px; }
+.selected-train-functions-panel .panel-heading { padding-top: 12px; padding-bottom: 8px; }
+.selected-train-functions-panel .panel-heading h2 { font-size: 14px; }
+.train-function-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; padding: 0 18px 10px; }
+.train-function-button { display: flex; align-items: center; justify-content: space-between; gap: 7px; min-width: 0; min-height: 36px; padding: 6px 9px; border-radius: 7px; text-align: left; }
+.train-function-main { display: grid; min-width: 0; gap: 2px; }
+.train-function-main strong { color: var(--cyan); font-size: 10px; }
+.train-function-main small { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.train-function-button em { flex: 0 0 auto; color: var(--faint); font-size: 8px; font-style: normal; font-weight: 700; letter-spacing: .05em; }
+.train-function-button.is-on { border-color: var(--green); background: rgba(107, 213, 158, .12); }
+.train-function-button.is-on em { color: var(--green); }
+.train-function-button:disabled { cursor: not-allowed; opacity: .55; }
+.train-function-empty { margin: 0; padding: 0 18px 12px; }
 .train-badge { display: grid; place-items: center; width: 34px; height: 27px; border: 1px solid rgba(92,157,255,.26); border-radius: 7px; color: var(--blue-bright); background: rgba(92,157,255,.09); font-size: 11px; font-weight: 700; }
 .selected-train-route { display: flex; align-items: center; gap: 8px; padding: 0 18px 17px; color: var(--muted); font-size: 10px; }
 .route-line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--blue), var(--cyan)); opacity: .55; }
@@ -440,6 +453,18 @@ body[data-workspace="trains"] .trains-subnav { display: flex; }
 .assembler-train-picker { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; padding: 0 18px 10px; color: var(--faint); font-size: 9px; }
 .assembler-train-picker select { min-height: 27px; }
 .tiny-status { color: var(--green); font-size: 9px; }
+.assembler-locomotive-tools { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, .9fr) auto; align-items: end; gap: 10px; padding: 12px 18px; border-top: 1px solid rgba(156,181,215,.08); border-bottom: 1px solid rgba(156,181,215,.08); background: rgba(27,44,68,.18); }
+.assembler-locomotive-tools > div { display: grid; gap: 3px; }
+.assembler-locomotive-tools strong { font-size: 10px; }
+.assembler-locomotive-tools small { color: var(--muted); font-size: 9px; line-height: 1.35; }
+.assembler-locomotive-tools select { min-height: 28px; border: 1px solid var(--line); border-radius: 6px; padding: 0 8px; background: #0d192a; color: var(--text); font-size: 10px; }
+.assembler-locomotive-list { display: grid; gap: 6px; padding: 10px 18px 0; }
+.locomotive-consist-item { display: grid; grid-template-columns: 25px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-height: 34px; padding: 5px 8px; border: 1px solid rgba(156,181,215,.1); border-radius: 6px; background: rgba(27,44,68,.3); }
+.locomotive-consist-item.is-lead { border-color: rgba(92,157,255,.4); }
+.locomotive-consist-item > span:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.locomotive-consist-item strong { font-size: 9px; font-weight: 600; }
+.locomotive-consist-item small { color: var(--faint); font-size: 8px; }
+.locomotive-consist-item .consist-position { color: var(--cyan); font-size: 9px; }
 .consist-list { display: flex; flex-direction: column; gap: 5px; padding: 0 18px; max-height: 105px; overflow: auto; }
 .consist-item { display: grid; grid-template-columns: 25px 1fr auto; align-items: center; gap: 8px; min-height: 31px; padding: 4px 7px; border: 1px solid rgba(156,181,215,.1); border-radius: 6px; background: rgba(27,44,68,.3); }
 .consist-icon { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 5px; background: rgba(92,157,255,.12); color: var(--blue-bright); font-size: 10px; }
