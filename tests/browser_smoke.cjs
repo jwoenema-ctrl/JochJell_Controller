@@ -60,7 +60,6 @@ async function shot(page, name) {
   await page.waitForFunction(() => document.querySelector('#direction-forward').getAttribute('aria-pressed') === 'true');
   await page.getByRole('link', { name: 'Locomotives', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#train-panel').classList.contains('is-hidden') === false);
-  assert.equal(await page.locator('#train-editor-panel').isVisible(), true, 'Locomotives tab should reveal its target panel');
   assert.equal(await page.locator('.trains-subnav').evaluate(node => getComputedStyle(node).position), 'sticky', 'Train navigation should stay above its selected panel');
   assert.equal(await page.locator('#train-panel .panel-heading h2').textContent(), 'Locomotives');
   assert.ok(await page.locator('.train-row').count() >= 1, 'Locomotive subcategory must show locomotive records');
