@@ -1,4 +1,4 @@
-# H0 controller feature map
+# JochJell Controller feature map
 
 The project is intentionally split by replacement boundary so a simulated layout can be iterated
 without changing the Z21 protocol adapter.

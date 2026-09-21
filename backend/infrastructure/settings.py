@@ -12,13 +12,13 @@ from typing import Any, Mapping
 
 
 WORKSPACE_PANELS = {
-    "dispatch": ["layout-info", "node-graph", "systematic", "trains"],
-    "layout": ["layout-info", "node-graph", "systematic", "routes", "scans"],
+    "dispatch": ["layout-info", "node-graph", "systematic", "trains", "timetable"],
+    "layout": ["layout-info", "node-graph", "automation", "systematic", "routes", "scans", "timetable"],
     "trains": ["trains", "train-profile", "rolling-stock", "programming", "calibration", "assembler"],
     "timetable": ["timetable"],
     "scans": ["scans"],
 }
-CONTROL_PANELS = ["control-center", "selected-train", "simulation", "connection-health"]
+CONTROL_PANELS = ["control-center", "selected-train", "train-functions", "simulation", "connection-health"]
 DEFAULT_WORKSPACE_LAYOUT = {
     "pages": {
         page: {
@@ -42,12 +42,23 @@ def validate_workspace_layout(value: Any, current: Mapping[str, Any] | None = No
     def migrate_legacy_order(page: str, key: str, order: Any) -> Any:
         if page == "layout" and key == "order" and isinstance(order, list):
             legacy = ["layout-info", "node-graph", "systematic"]
-            if len(order) == len(legacy) and set(order) == set(legacy):
-                return list(order) + ["routes", "scans"]
+            if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
+                return list(order) + ["automation", "routes", "scans", "timetable"]
+            legacy = ["layout-info", "node-graph", "systematic", "routes", "scans"]
+            if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
+                return list(order) + ["automation", "timetable"]
+        if page == "dispatch" and key == "order" and isinstance(order, list):
+            legacy = ["layout-info", "node-graph", "systematic", "trains"]
+            if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
+                return list(order) + ["timetable"]
         if page == "trains" and key == "order" and isinstance(order, list):
             legacy = ["trains", "train-profile", "assembler"]
-            if len(order) == len(legacy) and set(order) == set(legacy):
+            if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
                 return ["trains", "train-profile", "rolling-stock", "programming", "calibration", "assembler"]
+        if page in ("dispatch", "trains") and key == "sidebar_order" and isinstance(order, list):
+            legacy = ["control-center", "selected-train", "simulation", "connection-health"]
+            if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
+                return ["control-center", "selected-train", "train-functions", "simulation", "connection-health"]
         return order
 
     if current:

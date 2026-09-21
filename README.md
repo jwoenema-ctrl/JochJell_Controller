@@ -1,4 +1,4 @@
-# H0 Z21 Train Controller
+# JochJell Controller
 
 Modular Python controller and browser dashboard for an H0 model railway using the Roco/Z21 LAN interface.
 
@@ -35,7 +35,7 @@ Modular Python controller and browser dashboard for an H0 model railway using th
 
 ### Windows executable
 
-For the all-in-one app-window edition, use `dist/H0-Control-Desk-Native.exe`.
+For the all-in-one app-window edition, use `dist/JochJell-Controller-Native.exe`.
 It embeds the complete interface using [pywebview](https://pywebview.flowrl.com/guide/usage.html)
 and Microsoft WebView2: no external browser or separate controller window opens.
 It starts in simulation; use **Settings → Connection → Connect to real Z21** for an
@@ -57,13 +57,13 @@ use the password printed on the router label in Windows. See the
 
 The original browser-launcher edition is still available:
 
-Run `dist/H0-Control-Desk.exe`, choose Simulation, and click **Start controller**.
+Run `dist/JochJell-Controller.exe`, choose Simulation, and click **Start controller**.
 The self-contained Windows x64 executable includes Python, the backend, and frontend assets;
 Visual Studio and Python are not required on the destination PC. A small desktop controller
 window opens the interface in your default browser. Keep that window open while operating;
 **Stop controller and exit** stops the controller and requests track power off.
 
-App data is stored separately in `%LOCALAPPDATA%/H0 Control Desk/`, not inside the executable.
+App data is stored separately in `%LOCALAPPDATA%/JochJell Controller/`, not inside the executable.
 Existing development data is not bundled or overwritten. To transfer it, close both controllers
 and copy your `controller.sqlite3` and `scans` folder into that app-data directory, backing up
 any existing destination files first. Only one desktop controller can use port 8765 at a time.
@@ -79,8 +79,8 @@ python -m pip install -r requirements-build.txt
 
 For downloads intended for other computers, prefer the assets on the repository's
 GitHub Releases page over temporary workflow artifacts. A pushed tag matching `v*`
-builds and tests the app, then publishes `H0-Control-Desk-Native.exe` and
-`H0-Control-Desk-Native-Windows-x64.zip` as release assets, together with
+builds and tests the app, then publishes `JochJell-Controller-Native.exe` and
+`JochJell-Controller-Native-Windows-x64.zip` as release assets, together with
 `SHA256SUMS.txt` for integrity checking. Ordinary pushes and manual workflow runs
 build test artifacts but do not publish a release. A version tag is release-once:
 the workflow fails instead of replacing assets if a release already exists for it.
@@ -107,7 +107,7 @@ Run the standard-library smoke tests with:
 python -m unittest discover -s tests
 ```
 
-The interface has separate Dispatch, Layout editor, Trains, Timetable, 3D scans, and Settings
+The interface has separate Home, Automation, Trains, Timetable, 3D workspace, and Settings
 pages, with light, dark, and device-following themes. The viewer uses a bounded viewport,
 including on phones; Settings previews your theme and saves preferences explicitly.
 

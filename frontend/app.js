@@ -1,5 +1,5 @@
 /*
- * H0 Control Desk
+ * JochJell Controller
  * A dependency-free browser client. The API adapters are intentionally small so
  * the dashboard can be served by the local controller or opened with sample data.
  */
@@ -2478,7 +2478,9 @@
 
   function routeFlowBlock(type, value) {
     const id = `route-flow-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    return type === 'routine' ? { id, type, program_id: value } : { id, type: 'node', node_id: String(value || '').toUpperCase() };
+    if (type === 'routine') return { id, type, program_id: value };
+    if (type === 'sync') return { id, type, locomotive_id: value };
+    return { id, type: 'node', node_id: String(value || '').toUpperCase() };
   }
 
   function routeFlowNodeIds(flow = app.routeFlow) {
@@ -2491,21 +2493,27 @@
   function renderRouteFlow() {
     const nodeCatalogue = $('#route-node-catalogue');
     const routineCatalogue = $('#route-routine-catalogue');
+    const syncCatalogue = $('#route-sync-catalogue');
     const flow = $('#route-flow');
     const empty = $('#route-flow-empty');
     const count = $('#route-flow-count');
-    if (!nodeCatalogue || !routineCatalogue || !flow) return;
+    if (!nodeCatalogue || !routineCatalogue || !syncCatalogue || !flow) return;
     const nodes = routeGraphNodes();
+    const trains = Array.isArray(app.state.trains) ? app.state.trains : [];
     nodeCatalogue.innerHTML = `<p class="eyebrow">TRACK NODES</p>${nodes.length ? nodes.map((node) => `<button type="button" class="route-palette-button" draggable="true" data-route-palette-type="node" data-route-palette-value="${escapeHtml(node.value)}"><strong>${escapeHtml(node.label.split(' · ')[0])}</strong><small>${escapeHtml(node.value)}</small></button>`).join('') : '<p class="settings-help">No track nodes configured.</p>'}`;
     routineCatalogue.innerHTML = `<p class="eyebrow">ROUTINES</p>${app.automationPrograms.length ? app.automationPrograms.map((program) => `<button type="button" class="route-palette-button" draggable="true" data-route-palette-type="routine" data-route-palette-value="${escapeHtml(program.id)}"><strong>${escapeHtml(program.name || program.id)}</strong><small>${escapeHtml(String((program.blocks || []).length))} action blocks</small></button>`).join('') : '<p class="settings-help">Save a routine to use it here.</p>'}`;
+    syncCatalogue.innerHTML = `<p class="eyebrow">SYNC LOCOMOTIVES</p>${trains.length ? trains.map((train) => `<button type="button" class="route-palette-button" draggable="true" data-route-palette-type="sync" data-route-palette-value="${escapeHtml(train.id)}"><strong>Add ${escapeHtml(train.name || train.id)}</strong><small>Join this locomotive to the active consist</small></button>`).join('') : '<p class="settings-help">No locomotive profiles configured.</p>'}`;
     flow.innerHTML = (app.routeFlow || []).map((block, index) => {
       const kind = block.type || block.kind;
       const isRoutine = kind === 'routine' || kind === 'program';
+      const isSync = kind === 'sync' || kind === 'sync_locomotive';
       const program = isRoutine ? app.automationPrograms.find((item) => item.id === (block.program_id || block.id)) : null;
-      const node = !isRoutine ? nodes.find((item) => item.value === String(block.node_id || block.value || '').toUpperCase()) : null;
-      const label = isRoutine ? (block.name || program?.name || block.program_id || 'Routine') : (node?.label?.split(' · ')[0] || block.node_id || 'Track node');
-      const detail = isRoutine ? `Routine · ${program ? `${(program.blocks || []).length} blocks` : 'reference'}` : `Track node · ${String(block.node_id || block.value || '').toUpperCase()}`;
-      return `<article class="route-flow-block" data-route-flow-index="${index}" data-route-flow-kind="${escapeHtml(isRoutine ? 'routine' : 'node')}" draggable="true"><span class="route-flow-index">${index + 1}</span><div class="route-flow-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></div><div class="route-flow-actions"><button type="button" class="icon-button small" data-route-flow-action="up" data-route-flow-index="${index}" aria-label="Move block up">Up</button><button type="button" class="icon-button small" data-route-flow-action="down" data-route-flow-index="${index}" aria-label="Move block down">Down</button><button type="button" class="icon-button small" data-route-flow-action="delete" data-route-flow-index="${index}" aria-label="Remove block">Delete</button></div></article>`;
+      const syncTrain = isSync ? trains.find((item) => String(item.id) === String(block.locomotive_id || block.train_id || block.value)) : null;
+      const node = !isRoutine && !isSync ? nodes.find((item) => item.value === String(block.node_id || block.value || '').toUpperCase()) : null;
+      const label = isRoutine ? (block.name || program?.name || block.program_id || 'Routine') : isSync ? `Sync ${syncTrain?.name || block.locomotive_id || 'locomotive'}` : (node?.label?.split(' · ')[0] || block.node_id || 'Track node');
+      const detail = isRoutine ? `Routine · ${program ? `${(program.blocks || []).length} blocks` : 'reference'}` : isSync ? 'Add locomotive to the active consist' : `Track node · ${String(block.node_id || block.value || '').toUpperCase()}`;
+      const flowKind = isRoutine ? 'routine' : isSync ? 'sync' : 'node';
+      return `<article class="route-flow-block" data-route-flow-index="${index}" data-route-flow-kind="${escapeHtml(flowKind)}" draggable="true"><span class="route-flow-index">${index + 1}</span><div class="route-flow-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></div><div class="route-flow-actions"><button type="button" class="icon-button small" data-route-flow-action="up" data-route-flow-index="${index}" aria-label="Move block up">Up</button><button type="button" class="icon-button small" data-route-flow-action="down" data-route-flow-index="${index}" aria-label="Move block down">Down</button><button type="button" class="icon-button small" data-route-flow-action="delete" data-route-flow-index="${index}" aria-label="Remove block">Delete</button></div></article>`;
     }).join('<div class="route-flow-connector" aria-hidden="true"></div>');
     if (empty) empty.classList.toggle('is-hidden', Boolean(app.routeFlow.length));
     if (count) count.textContent = `${app.routeFlow.length} block${app.routeFlow.length === 1 ? '' : 's'}`;
@@ -2519,7 +2527,7 @@
   }
 
   function addRouteFlowBlock(type, value) {
-    if (!value || (type !== 'node' && type !== 'routine')) return;
+    if (!value || !['node', 'routine', 'sync'].includes(type)) return;
     app.routeFlow.push(routeFlowBlock(type, value));
     app.routeEditorDirty = true;
     renderRouteFlow();
@@ -2546,7 +2554,7 @@
     const nodes = routeGraphNodes();
     fillScheduleSelect($('#route-source'), nodes, nodes[0]?.value || '', 'No graph nodes configured');
     fillScheduleSelect($('#route-target'), nodes, nodes[1]?.value || nodes[0]?.value || '', 'No graph nodes configured');
-    $('#route-status').textContent = 'Create a named path from the current layout graph.';
+    $('#route-status').textContent = 'Create a reusable route flow. It will be bound to a train in a later step.';
     renderRouteFlow();
   }
 
@@ -2564,7 +2572,7 @@
     fillScheduleSelect($('#route-source'), nodes, current.source_block_id || current.source || nodes[0]?.value || '', 'No graph nodes configured');
     fillScheduleSelect($('#route-target'), nodes, current.target_block_id || current.target || nodes[1]?.value || nodes[0]?.value || '', 'No graph nodes configured');
     $('#route-algorithm').value = current.algorithm || 'a_star';
-    $('#route-status').textContent = current.id ? `Editing ${current.name || current.id}.` : 'Create a named path from the current layout graph.';
+    $('#route-status').textContent = current.id ? `Editing ${current.name || current.id}.` : 'Create a reusable route flow. It will be bound to a train in a later step.';
   }
 
   function renderRoutes() {
@@ -2574,12 +2582,10 @@
     const nodes = routeGraphNodes();
     fillScheduleSelect($('#route-source'), nodes, $('#route-source').value, 'No graph nodes configured');
     fillScheduleSelect($('#route-target'), nodes, $('#route-target').value, 'No graph nodes configured');
-    const trains = (app.state.trains || []).map((train) => ({ value: train.id, label: `${train.name || train.id} · #${train.number || '—'}` }));
-    fillScheduleSelect($('#route-train'), trains, app.selectedTrainId, 'No trains configured');
     if (!app.routeEditorDirty && !app.editingRouteId && !$('#route-name').value) clearRouteEditor();
     renderRouteFlow();
     list.innerHTML = routes.length ? routes.map((route) => {
-      const path = Array.isArray(route.node_ids) ? route.node_ids.join(' → ') : `${route.source_block_id} → ${route.target_block_id}`;
+      const path = Array.isArray(route.node_ids) && route.node_ids.length ? route.node_ids.join(' → ') : (Array.isArray(route.flow) && route.flow.length ? route.flow.map((block) => block.type === 'sync' ? `Sync ${block.locomotive_id || 'locomotive'}` : block.type === 'routine' ? `Routine ${block.program_id || 'reference'}` : block.node_id || 'Block').join(' → ') : 'Stationary · current block');
       return `<div class="route-row" data-route-id="${escapeHtml(route.id)}"><span class="route-row-main"><strong>${escapeHtml(route.name || route.id)}</strong><small>${escapeHtml(route.id)} · ${escapeHtml(path)}</small></span><span class="route-row-meta">${escapeHtml(route.algorithm || 'a_star')}${route.enabled === false ? ' · disabled' : ''}</span><span class="route-row-actions"><button type="button" class="icon-button small" data-route-action="edit" title="Edit route">✎</button><button type="button" class="icon-button small" data-route-action="delete" title="Delete route">×</button></span></div>`;
     }).join('') : '<div class="empty-state">No saved route plans. Create one from the graph nodes above.</div>';
   }
@@ -2587,31 +2593,29 @@
   async function saveRouteEditor() {
     const id = $('#route-id').value.trim();
     const name = $('#route-name').value.trim();
+    const flow = Array.isArray(app.routeFlow) ? app.routeFlow : [];
     const flowNodes = routeFlowNodeIds();
-    const source = flowNodes[0] || $('#route-source').value;
-    const target = flowNodes[flowNodes.length - 1] || $('#route-target').value;
-    if (!id || !name || !source || !target) {
-      $('#route-status').textContent = 'Route ID, name, and at least two track nodes are required.';
-      showToast('Add a route name and two track nodes first.', 'warning');
+    const source = flowNodes[0] || null;
+    const target = flowNodes[flowNodes.length - 1] || null;
+    if (!id || !name || !flow.length) {
+      $('#route-status').textContent = 'Route ID, name, and at least one flow block are required.';
+      showToast('Add a route name and at least one flow block first.', 'warning');
       return;
     }
-    if (app.routeFlow.length && flowNodes.length < 2) {
-      $('#route-status').textContent = 'Add at least two track node blocks to define the path.';
-      showToast('A route needs a start and end track node.', 'warning');
-      return;
-    }
-    if (source === target) {
-      $('#route-status').textContent = 'Choose two different graph nodes.';
-      showToast('Route source and target must differ.', 'warning');
-      return;
-    }
-    const route = { id, name, source_block_id: source, target_block_id: target, algorithm: $('#route-algorithm').value, enabled: true };
-    if (app.routeFlow.length) route.flow = app.routeFlow.map((block) => { const { id: _blockId, ...savedBlock } = block; return savedBlock; });
-    if (flowNodes.length >= 2) route.node_ids = flowNodes;
+    const route = {
+      id,
+      name,
+      source_block_id: source,
+      target_block_id: target,
+      node_ids: flowNodes,
+      flow: flow.map((block) => { const { id: _blockId, ...savedBlock } = block; return savedBlock; }),
+      algorithm: flowNodes.length ? $('#route-algorithm').value : 'stationary',
+      enabled: true
+    };
     const editing = app.editingRouteId;
     if (editing) {
       const existing = app.state.routes.find((item) => item.id === editing);
-      if (existing) Object.assign(existing, route, { id: editing });
+      if (existing) Object.assign(existing, route, { id: editing, enabled: existing.enabled !== false });
       await sendCommand({ type: 'update_route', route_id: editing, route });
       $('#route-status').textContent = `${name} updated.`;
       showToast(`${name} updated`, 'success');
@@ -2634,17 +2638,6 @@
     showToast(`${route.name || route.id} deleted`, 'success');
   }
 
-  async function applySelectedRoute() {
-    const routeId = app.editingRouteId || $('#route-list .route-row')?.dataset.routeId;
-    const trainId = $('#route-train').value || app.selectedTrainId;
-    if (!routeId || !trainId) {
-      showToast('Choose a route and train first.', 'warning');
-      return;
-    }
-    await sendCommand({ type: 'apply_route', route_id: routeId, train_id: trainId });
-    $('#route-status').textContent = `Route applied to ${trainId}.`;
-  }
-
   function fillScheduleSelect(select, options, selected, emptyLabel) {
     if (!select) return;
     const values = options.length ? options : [{ value: '', label: emptyLabel }];
@@ -2655,6 +2648,21 @@
   function scheduleTimeSeconds(value) {
     const parts = String(value || '00:00').split(':').map(Number);
     return Math.max(0, ((parts[0] || 0) % 24) * 3600 + Math.max(0, Math.min(59, parts[1] || 0)) * 60);
+  }
+
+  function scheduleRouteLabel(route) {
+    if (!route) return '';
+    const name = String(route.name || route.id || '').trim();
+    const path = Array.isArray(route.node_ids) ? route.node_ids.filter(Boolean).join('  →  ') : '';
+    return name || path;
+  }
+
+  function updateScheduleDispatchFields() {
+    const mode = $('#schedule-dispatch-mode')?.value || 'display';
+    const routeField = $('#schedule-route-field');
+    const coordinateField = $('#schedule-coordinate-field');
+    if (routeField) routeField.classList.toggle('is-hidden', mode !== 'route');
+    if (coordinateField) coordinateField.classList.toggle('is-hidden', mode !== 'coordinate');
   }
 
   function openScheduleEditor(schedule) {
@@ -2669,11 +2677,17 @@
     $('#schedule-origin').value = current.origin || '';
     $('#schedule-destination').value = current.destination || '';
     $('#schedule-coordinate').value = current.destination_coordinate ? formatPinboardCoordinate(current.destination_coordinate) : '';
-    $('#schedule-route').value = current.route || '';
     $('#schedule-state').value = current.state || 'Draft';
     const trains = (app.state.trains || []).map((train) => ({ value: train.id, label: `${train.name || `Train ${train.number || train.id}`} · #${train.number || '—'}` }));
     const linkedTrain = current.train_id || ((app.state.trains || []).find((train) => String(train.number || '') === String(current.number || '')) || {}).id || '';
     fillScheduleSelect($('#schedule-train'), trains, linkedTrain, 'No trains configured');
+    const routes = (app.state.routes || []).map((route) => ({ value: route.id, label: `${scheduleRouteLabel(route)}${route.enabled === false ? ' · disabled' : ''}` }));
+    fillScheduleSelect($('#schedule-route-id'), routes, current.route_id || '', routes.length ? 'Choose a saved route' : 'No saved routes configured');
+    const selectedRoute = (app.state.routes || []).find((route) => route.id === current.route_id);
+    $('#schedule-route').value = current.route || scheduleRouteLabel(selectedRoute) || '';
+    const inferredMode = current.dispatch_mode || (current.route_id ? 'route' : current.destination_coordinate ? 'coordinate' : (current.id ? 'display' : (routes.length ? 'route' : 'coordinate')));
+    $('#schedule-dispatch-mode').value = ['route', 'coordinate', 'display'].includes(inferredMode) ? inferredMode : 'display';
+    updateScheduleDispatchFields();
     const stations = (app.state.layout.stations || []).map((station) => ({ value: station.id, label: station.name || station.id }));
     const firstStop = Array.isArray(current.stops) && current.stops[0] ? current.stops[0] : {};
     fillScheduleSelect($('#schedule-station'), stations, current.station_id || firstStop.station_id || '', 'No stations configured');
@@ -2694,9 +2708,23 @@
     const trainId = $('#schedule-train').value;
     const origin = $('#schedule-origin').value.trim();
     const destination = $('#schedule-destination').value.trim();
+    const dispatchMode = $('#schedule-dispatch-mode').value || 'display';
+    const routeId = $('#schedule-route-id').value || '';
     const coordinateText = $('#schedule-coordinate').value.trim();
     let destinationCoordinate;
-    if (coordinateText) {
+    if (dispatchMode === 'coordinate' && !coordinateText) {
+      showToast('Enter a destination coordinate for coordinate dispatch.', 'warning');
+      return;
+    }
+    if (dispatchMode === 'route' && !routeId) {
+      showToast('Choose a saved route for route dispatch.', 'warning');
+      return;
+    }
+    if (dispatchMode !== 'display' && !trainId && !$('#schedule-number').value.trim()) {
+      showToast('Assign a train or enter its decoder number before dispatching.', 'warning');
+      return;
+    }
+    if (dispatchMode === 'coordinate' && coordinateText) {
       const parsedCoordinate = parsePinboardCoordinate(coordinateText);
       const projectedCoordinate = parsedCoordinate && nearestPinboardCoordinate(parsedCoordinate);
       if (!projectedCoordinate) {
@@ -2714,12 +2742,14 @@
       service,
       number: $('#schedule-number').value.trim(),
       train_id: trainId || undefined,
+      dispatch_mode: dispatchMode,
+      route_id: dispatchMode === 'route' ? routeId : null,
       origin,
       destination,
       station_id: stationId || undefined,
       platform: platformId || '',
       route,
-      destination_coordinate: destinationCoordinate,
+      destination_coordinate: dispatchMode === 'coordinate' ? destinationCoordinate : null,
       stops: stationId ? [{ station_id: stationId, platform_id: platformId || null, arrival_seconds: arrivalSeconds, departure_seconds: arrivalSeconds + 60 }] : [],
       state: $('#schedule-state').value || 'Draft'
     };
@@ -3359,6 +3389,8 @@
   }
 
   async function tickSimulation() {
+    const button = $('#simulation-tick');
+    if (button) button.disabled = true;
     try {
       const response = await fetchJson('/api/simulation/tick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds: 60, rate: app.simRate }) });
       mergePayload(response);
@@ -3371,6 +3403,28 @@
       localTick();
       updateSync('Simulation tick applied locally', 'warning');
       showToast('Simulation advanced locally; API is unavailable.', 'warning');
+    } finally {
+      if (button) button.disabled = false;
+      renderSidebar();
+    }
+  }
+
+  async function toggleSimulation() {
+    const button = $('#simulation-toggle');
+    const wasRunning = Boolean(app.state.simulation.running);
+    const shouldRun = !wasRunning;
+    app.state.simulation.running = shouldRun;
+    renderSidebar();
+    if (button) button.disabled = true;
+    try {
+      const response = await sendCommand({ type: shouldRun ? 'resume_simulation' : 'pause_simulation' });
+      if (!response) {
+        app.state.simulation.running = wasRunning;
+        renderSidebar();
+      }
+    } finally {
+      if (button) button.disabled = false;
+      renderSidebar();
     }
   }
 
@@ -3528,7 +3582,14 @@
       else updateWorkspaceVisibility();
       renderTrainList();
       const target = document.querySelector(link.getAttribute('href'));
-      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const navigation = document.querySelector('.trains-subnav');
+      if (!target || !navigation) return;
+      requestAnimationFrame(() => {
+        const targetTop = target.getBoundingClientRect().top + window.scrollY;
+        const navigationOffset = navigation.getBoundingClientRect().height + 20;
+        const reducedMotion = app.settings?.interface?.reduce_motion === true;
+        window.scrollTo({ top: Math.max(0, targetTop - navigationOffset), behavior: reducedMotion ? 'auto' : 'smooth' });
+      });
     }));
     $('#app-settings-form').addEventListener('submit', saveAppSettings);
     $('#app-settings-form').addEventListener('input', () => { app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; renderWlanPresentation(app.settingsRuntime); updateNativeControls(); });
@@ -3664,7 +3725,7 @@
       const functionNumber = Number(button.dataset.trainFunction);
       void toggleTrainFunction(functionNumber, button.getAttribute('aria-pressed') !== 'true');
     });
-    $('#simulation-toggle').addEventListener('click', () => { app.state.simulation.running = !app.state.simulation.running; renderSidebar(); sendCommand({ type: app.state.simulation.running ? 'resume_simulation' : 'pause_simulation' }); });
+    $('#simulation-toggle').addEventListener('click', () => { void toggleSimulation(); });
     $('#simulation-tick').addEventListener('click', tickSimulation);
     $('#track-power-toggle').addEventListener('click', toggleTrackPower);
     $('#simulation-rate-select').addEventListener('change', (event) => { app.simRate = Number(event.target.value) || 1; renderSidebar(); showToast(`Fast-forward multiplier set to ${app.simRate}×; live clock remains real time.`, 'success'); });
@@ -3695,11 +3756,12 @@
     $('#new-route').addEventListener('click', clearRouteEditor);
     $('#save-route').addEventListener('click', saveRouteEditor);
     $('#cancel-route').addEventListener('click', clearRouteEditor);
-    $('#apply-route').addEventListener('click', applySelectedRoute);
+
     ['#route-id', '#route-name', '#route-source', '#route-target', '#route-algorithm'].forEach((selector) => $(selector).addEventListener('input', () => { app.routeEditorDirty = true; }));
     $('#route-node-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (button) addRouteFlowBlock(button.dataset.routePaletteType, button.dataset.routePaletteValue); });
     $('#route-routine-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (button) addRouteFlowBlock(button.dataset.routePaletteType, button.dataset.routePaletteValue); });
-    ['#route-node-catalogue', '#route-routine-catalogue'].forEach((selector) => $(selector).addEventListener('dragstart', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (!button) return; event.dataTransfer.setData('application/x-route-flow', JSON.stringify({ type: button.dataset.routePaletteType, value: button.dataset.routePaletteValue })); event.dataTransfer.effectAllowed = 'copy'; }));
+    $('#route-sync-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (button) addRouteFlowBlock(button.dataset.routePaletteType, button.dataset.routePaletteValue); });
+    ['#route-node-catalogue', '#route-routine-catalogue', '#route-sync-catalogue'].forEach((selector) => $(selector).addEventListener('dragstart', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (!button) return; event.dataTransfer.setData('application/x-route-flow', JSON.stringify({ type: button.dataset.routePaletteType, value: button.dataset.routePaletteValue })); event.dataTransfer.effectAllowed = 'copy'; }));
     $('#route-flow-dropzone').addEventListener('dragover', (event) => { event.preventDefault(); $('#route-flow-dropzone').classList.add('is-dragging'); });
     $('#route-flow-dropzone').addEventListener('dragleave', () => $('#route-flow-dropzone').classList.remove('is-dragging'));
     $('#route-flow-dropzone').addEventListener('drop', (event) => { event.preventDefault(); $('#route-flow-dropzone').classList.remove('is-dragging'); const raw = event.dataTransfer.getData('application/x-route-flow'); if (!raw) return; try { const item = JSON.parse(raw); addRouteFlowBlock(item.type, item.value); } catch { showToast('That flow block could not be added.', 'warning'); } });
@@ -3715,6 +3777,11 @@
     });
     $('#simulate-schedule').addEventListener('click', simulateNextScheduleEvent);
     $('#schedule-editor-form').addEventListener('submit', saveScheduleEditor);
+    $('#schedule-dispatch-mode').addEventListener('change', updateScheduleDispatchFields);
+    $('#schedule-route-id').addEventListener('change', (event) => {
+      const route = (app.state.routes || []).find((item) => item.id === event.target.value);
+      if (route) $('#schedule-route').value = scheduleRouteLabel(route);
+    });
     $('#cancel-schedule-editor').addEventListener('click', () => { app.editingScheduleId = null; $('#schedule-editor').close(); });
     $('#close-schedule-editor').addEventListener('click', () => { app.editingScheduleId = null; $('#schedule-editor').close(); });
     $('#train-data-editor-form').addEventListener('submit', saveTrainDataEditor);

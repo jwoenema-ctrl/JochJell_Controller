@@ -22,8 +22,24 @@ class WorkspacePreferencesTests(unittest.TestCase):
         second = validate_settings({"workspace_layout": {"pages": {"layout": {"order": order}}}}, first)
         self.assertEqual(second["theme"], "dark")
         self.assertEqual(second["workspace_layout"]["pages"]["dispatch"]["sidebar_side"], "right")
-        self.assertEqual(second["workspace_layout"]["pages"]["layout"]["order"], order + ["routes", "scans"])
+        self.assertEqual(second["workspace_layout"]["pages"]["layout"]["order"], order + ["automation", "routes", "scans", "timetable"])
         self.assertEqual(first["workspace_layout"]["pages"]["layout"]["order"], DEFAULT_WORKSPACE_LAYOUT["pages"]["layout"]["order"])
+
+    def test_current_panel_inventory_is_in_defaults(self):
+        self.assertIn("timetable", DEFAULT_WORKSPACE_LAYOUT["pages"]["dispatch"]["order"])
+        self.assertIn("automation", DEFAULT_WORKSPACE_LAYOUT["pages"]["layout"]["order"])
+        self.assertIn("timetable", DEFAULT_WORKSPACE_LAYOUT["pages"]["layout"]["order"])
+        self.assertIn("train-functions", DEFAULT_WORKSPACE_LAYOUT["pages"]["trains"]["sidebar_order"])
+
+    def test_old_sidebar_preferences_receive_new_train_functions_panel(self):
+        old = deepcopy(DEFAULT_WORKSPACE_LAYOUT)
+        old_sidebar = ["control-center", "selected-train", "simulation", "connection-health"]
+        old["pages"]["dispatch"]["sidebar_order"] = old_sidebar
+        old["pages"]["trains"]["sidebar_order"] = old_sidebar
+        migrated = validate_settings({}, {**DEFAULT_SETTINGS, "workspace_layout": old})
+        expected = ["control-center", "selected-train", "train-functions", "simulation", "connection-health"]
+        self.assertEqual(migrated["workspace_layout"]["pages"]["dispatch"]["sidebar_order"], expected)
+        self.assertEqual(migrated["workspace_layout"]["pages"]["trains"]["sidebar_order"], expected)
 
     def test_invalid_preferences_are_atomic(self):
         app = ControllerApplication.sample()

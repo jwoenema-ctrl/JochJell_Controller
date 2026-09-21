@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#09111f">
-  <title>H0 Control Desk</title>
+  <title>JochJell Controller</title>
   <link rel="icon" href="/assets/logo.ico">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="minimal.css">
@@ -14,10 +14,10 @@
   <div class="app-shell">
     <header class="topbar">
       <div class="brand-lockup">
-        <div class="brand-mark brand-logo"><img src="/assets/logo.png" alt="H0 Control Desk logo" width="40" height="40"></div>
+        <div class="brand-mark brand-logo"><img src="/assets/logo.png" alt="JochJell Controller logo" width="40" height="40"></div>
         <div>
           <p class="eyebrow">Z21 / ROCO CONTROL</p>
-          <h1>H0 Control Desk</h1>
+        <h1>JochJell Controller</h1>
         </div>
       </div>
 
@@ -309,22 +309,22 @@
             <div class="field-grid">
               <div class="field"><label for="route-id">Route ID</label><input id="route-id" required maxlength="48" placeholder="yard-to-platform"></div>
               <div class="field"><label for="route-name">Name</label><input id="route-name" required placeholder="Yard to platform"></div>
-              <div class="field"><label for="route-train">Apply to train</label><select id="route-train"></select></div>
               <div class="field"><label for="route-algorithm">Planner</label><select id="route-algorithm"><option value="a_star">A* cost-aware</option><option value="bfs">Breadth-first</option></select></div>
             </div>
             <div class="route-flow-builder">
               <aside class="route-block-catalogue">
                 <p class="eyebrow">FLOW BLOCKS</p>
                 <h3>Build the route</h3>
-                <p>Drag track nodes and routines into the flow, or click a block to add it.</p>
+                <p>Build a reusable flow. Track nodes are optional for stationary shunting and coupling work.</p>
                 <div class="route-palette-group" id="route-node-catalogue"></div>
                 <div class="route-palette-group" id="route-routine-catalogue"></div>
+                <div class="route-palette-group" id="route-sync-catalogue"></div>
               </aside>
               <section class="route-flow-panel">
                 <div class="route-flow-heading"><div><p class="eyebrow">ROUTE FLOW</p><h3>Track path & actions</h3></div><span class="route-flow-count" id="route-flow-count">0 blocks</span></div>
                 <div class="route-flow-dropzone" id="route-flow-dropzone">
                   <div class="route-flow" id="route-flow" aria-live="polite"></div>
-                  <div class="route-flow-empty" id="route-flow-empty">Drag a track node or routine here to start the route.</div>
+                  <div class="route-flow-empty" id="route-flow-empty">Drag a block here to start this reusable route.</div>
                 </div>
               </section>
             </div>
@@ -332,8 +332,8 @@
               <label for="route-source">From node</label><select id="route-source"></select>
               <label for="route-target">To node</label><select id="route-target"></select>
             </div>
-            <div class="button-row"><button type="button" class="button button-primary" id="save-route">Save route</button><button type="button" class="button button-soft" id="cancel-route">Clear</button><button type="button" class="button button-soft" id="apply-route">Apply to selected train</button></div>
-            <p class="settings-status" id="route-status" role="status" aria-live="polite">Create a named path from the current layout graph.</p>
+            <div class="button-row"><button type="button" class="button button-primary" id="save-route">Save route</button><button type="button" class="button button-soft" id="cancel-route">Clear</button></div>
+            <p class="settings-status" id="route-status" role="status" aria-live="polite">Create a reusable route flow. It will be bound to a train in a later step.</p>
           </div>
           <div class="route-list" id="route-list" aria-live="polite"></div>
         </section>
@@ -507,7 +507,7 @@
     </section>
 
     <footer class="footer-bar">
-      <span>H0 Control Desk <span class="footer-muted">· local workspace</span></span>
+      <span>JochJell Controller <span class="footer-muted">· JochJell · v0.2.1 · local workspace</span></span>
       <span><span class="footer-indicator"></span> <span id="footer-source">Embedded sample state</span> <span class="footer-muted">·</span> Last sync <span id="footer-sync">—</span></span>
     </footer>
   </div>
@@ -581,11 +581,13 @@
           <div class="field"><label for="schedule-destination">Destination</label><input id="schedule-destination"></div>
           <div class="field"><label for="schedule-station">Operational station</label><select id="schedule-station"></select></div>
           <div class="field"><label for="schedule-platform">Platform</label><select id="schedule-platform"></select></div>
-          <div class="field field-wide"><label for="schedule-coordinate">Destination coordinate</label><input id="schedule-coordinate" placeholder="Paste X 515.0 · Y 150.0 from the pinboard"><small class="settings-help">Coordinates are accepted only when they lie on the configured track.</small></div>
+          <div class="field"><label for="schedule-dispatch-mode">Dispatch plan</label><select id="schedule-dispatch-mode"><option value="route">Saved route</option><option value="coordinate">Destination coordinate</option><option value="display">Timetable only</option></select><small class="settings-help">Choose a reusable route, a pinboard destination, or a display-only service.</small></div>
+          <div class="field field-wide" id="schedule-route-field"><label for="schedule-route-id">Saved route</label><select id="schedule-route-id"></select><small class="settings-help">The route is bound to the assigned train when this service departs.</small></div>
+          <div class="field field-wide" id="schedule-coordinate-field"><label for="schedule-coordinate">Destination coordinate</label><input id="schedule-coordinate" placeholder="Paste X 515.0 · Y 150.0 from the pinboard"><small class="settings-help">Coordinates are accepted only when they lie on the configured track.</small></div>
           <div class="field"><label for="schedule-state">State</label><select id="schedule-state"><option>Draft</option><option>Ready</option><option>Active</option><option>Boarding</option><option>Delayed</option><option>Paused</option><option>Completed</option></select></div>
           <div class="field field-wide"><label for="schedule-route">Route / display text</label><input id="schedule-route" placeholder="Origin  →  Destination"></div>
         </div>
-        <p class="editor-note">The assigned train and operational station drive schedule simulation; the route text is the human-readable timetable label.</p>
+        <p class="editor-note">The assigned train and operational station drive schedule simulation. A saved route becomes the train's active path at departure; coordinate driving remains available for calibrated pinboard targets.</p>
       </div>
       <div class="modal-actions"><button type="button" class="button button-soft" id="cancel-schedule-editor">Cancel</button><button type="submit" class="button button-primary" id="save-schedule-editor">Save service</button></div>
     </form>

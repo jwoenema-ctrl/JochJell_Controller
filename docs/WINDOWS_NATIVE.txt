@@ -1,6 +1,6 @@
-H0 Control Desk - Embedded Windows edition (x64)
+JochJell Controller - Embedded Windows edition (x64)
 
-Run H0-Control-Desk-Native.exe. The full control desk opens inside its own window,
+Run JochJell-Controller-Native.exe. The full control desk opens inside its own window,
 starting in simulation mode. No browser tab, Python installation, or Visual Studio
 is needed. Layout editing, Settings, photo scans and train controls stay in the app.
 
@@ -18,7 +18,7 @@ and feedback. Settings also offers a return to simulation.
 Roco 10814 WLAN Package:
 1. Unlock the z21start network interface with the activation code supplied with
    the package. This is a one-time hardware setup performed with Roco's official
-   Maintenance Tool or Updater app, not in H0 Control Desk.
+   Maintenance Tool or Updater app, not in JochJell Controller.
 2. Connect the z21start LAN socket to a yellow LAN socket on the supplied 10814
    router. Join the Z21 WLAN in Windows using the password printed on the router.
 3. In Settings > Connection, select Use Roco 10814 WLAN, verify the Z21 address
@@ -29,7 +29,7 @@ Roco 10814 WLAN Package:
 
 Selecting WLAN does not unlock the z21start, configure the router, join Windows
 to Wi-Fi, or connect to hardware by itself. WLAN and a wired connection use the
-same Z21 UDP protocol. H0 Control Desk never asks for or stores the WLAN password.
+same Z21 UDP protocol. JochJell Controller never asks for or stores the WLAN password.
 The route check cannot identify the Wi-Fi network by name, so confirm the selected
 Windows network yourself.
 Full setup and official references: docs/WLAN_10814.md
@@ -37,7 +37,7 @@ Close the window, or choose Controller > Stop and exit, to stop and power off.
 Always keep a physical emergency stop available.
 
 Data is shared with the browser-launcher desktop edition in:
-%LOCALAPPDATA%\H0 Control Desk\
+%LOCALAPPDATA%\JochJell Controller\
 Close the other desktop edition before starting this one. Your source-code server
 on port 8080 uses separate data unless you explicitly transfer its database.
 
@@ -49,8 +49,8 @@ Build: python -m pip install -r requirements-native.txt
        ./scripts/build_native_windows.ps1
 
 Release packaging:
-- The standalone files are H0-Control-Desk-Native.exe and
-  H0-Control-Desk-Native-Windows-x64.zip.
+- The standalone files are JochJell-Controller-Native.exe and
+  JochJell-Controller-Native-Windows-x64.zip.
 - Prefer GitHub Release assets for end-user downloads. GitHub Actions artifacts
   are temporary build outputs intended for verification.
 - Pushing a version tag matching v* runs all tests and executable smoke checks

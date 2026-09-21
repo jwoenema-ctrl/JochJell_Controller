@@ -21,7 +21,7 @@ let server, browser;
   for(let i=0;i<3;i++) await page.getByRole('button',{name:'Move Layout information down',exact:true}).click();
   await page.getByRole('button',{name:'Save arrangement',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#workspace-layout-status').textContent.includes('saved on'));
-  await nav('Dispatch');
+  await nav('Home');
   async function verifyPosition(){
     const graph=await page.locator('#layout-panel').boundingBox(), info=await page.locator('#layout-info-panel').boundingBox(), sidebar=await page.locator('.sidebar').boundingBox();
     assert.ok(info.y>graph.y,'Information is below graph');
@@ -46,7 +46,7 @@ let server, browser;
     await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR,'custom-settings.png'),fullPage:true});
   }
   await page.setViewportSize({width:390,height:844});
-  for(const name of ['Dispatch','Layout editor','Trains','Timetable','3D scans','Settings']){
+  for(const name of ['Home','Automation','Trains','Settings']){
     await nav(name);
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth)<=2,name+' mobile overflow');
   }

@@ -43,7 +43,7 @@ async function mount(page, url) {
       document.body.dataset.workspace = page;
       document.querySelector('.sidebar').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
       const visible = WorkspaceLayout.defaults().pages[page].order;
-      const ids = { 'layout-info': 'layout-info-panel', 'node-graph': 'layout-panel', systematic: 'systematic-panel', trains: 'train-panel', 'train-profile': 'train-editor-panel', assembler: 'assembler-panel', timetable: 'timetable-panel', scans: 'scan-panel' };
+      const ids = { 'layout-info': 'layout-info-panel', 'node-graph': 'layout-panel', automation: 'automation-studio-panel', systematic: 'systematic-panel', trains: 'train-panel', 'train-profile': 'train-editor-panel', 'rolling-stock': 'rolling-stock-panel', programming: 'programming-panel', calibration: 'calibration-panel', assembler: 'assembler-panel', timetable: 'timetable-panel', scans: 'scan-panel' };
       for (const [key, id] of Object.entries(ids)) document.getElementById(id).classList.toggle('is-hidden', !visible.includes(key) || key === 'systematic');
       panelLayout.setPage(page);
     };
@@ -63,7 +63,7 @@ async function mount(page, url) {
   await page.getByRole('button', { name: 'Move Layout information down', exact: true }).click();
   await page.getByRole('button', { name: 'Move Layout information down', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: 'Move Layout information down', exact: true }).isDisabled(), true);
-  assert.deepEqual(await page.evaluate(() => panelLayout.getPreferences().pages.dispatch.order), ['node-graph', 'systematic', 'trains', 'layout-info']);
+  assert.deepEqual(await page.evaluate(() => panelLayout.getPreferences().pages.dispatch.order), ['node-graph', 'systematic', 'trains', 'timetable', 'layout-info']);
   await page.evaluate(() => visitPanelPage('dispatch'));
   const boxes = await page.evaluate(() => ['.sidebar', '.workspace', '#layout-panel', '#layout-info-panel'].map(selector => {
     const r = document.querySelector(selector).getBoundingClientRect(); return { x: r.x, y: r.y };

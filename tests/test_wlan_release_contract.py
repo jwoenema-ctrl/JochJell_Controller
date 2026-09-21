@@ -45,7 +45,8 @@ class WlanReleaseContractTests(unittest.TestCase):
 
         self.assertIn("--onefile", build)
         self.assertIn("--windowed", build)
-        self.assertIn("--name H0-Control-Desk-Native", build)
+        self.assertIn("--name JochJell-Controller-Native", build)
+        self.assertIn("--version-file 'scripts/version_info.txt'", build)
         self.assertIn("frontend/assets/logo.ico", build)
 
     def test_tagged_workflow_publishes_tested_native_release_assets(self) -> None:
@@ -59,8 +60,8 @@ class WlanReleaseContractTests(unittest.TestCase):
             "contents: write",
             "gh release create",
             '--repo "$GITHUB_REPOSITORY"',
-            "H0-Control-Desk-Native.exe",
-            "H0-Control-Desk-Native-Windows-x64.zip",
+            "JochJell-Controller-Native.exe",
+            "JochJell-Controller-Native-Windows-x64.zip",
             "SHA256SUMS.txt",
             "docs/WLAN_10814.md",
         ):

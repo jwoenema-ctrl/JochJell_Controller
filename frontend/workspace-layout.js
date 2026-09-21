@@ -7,6 +7,7 @@
   const PANELS = {
     'layout-info': ['Layout information', '#layout-info-panel'],
     'node-graph': ['Node graph', '#layout-panel'],
+    automation: ['Train automation', '#automation-studio-panel'],
     systematic: ['Schematic track view', '#systematic-panel'],
     routes: ['Route plans', '#route-panel'],
     trains: ['Train overview', '#train-panel'],
@@ -19,16 +20,17 @@
     scans: ['3D track viewer', '#scan-panel'],
     'control-center': ['Control center', '.control-panel'],
     'selected-train': ['Selected train', '.selected-train-panel'],
+    'train-functions': ['Train functions', '#selected-train-functions-panel'],
     simulation: ['Simulation', '.simulation-panel'],
     'connection-health': ['Connection health', '.health-panel']
   };
-  const PAGE_LABELS = { dispatch: 'Dispatch', layout: 'Layout editor', trains: 'Trains', timetable: 'Timetable', scans: '3D scans' };
+  const PAGE_LABELS = { dispatch: 'Home', layout: 'Automation', trains: 'Trains', timetable: 'Timetable', scans: '3D workspace' };
   const MAIN = {
-    dispatch: ['layout-info', 'node-graph', 'systematic', 'trains'],
-    layout: ['layout-info', 'node-graph', 'systematic', 'routes', 'scans'],
+    dispatch: ['layout-info', 'node-graph', 'systematic', 'trains', 'timetable'],
+    layout: ['layout-info', 'node-graph', 'automation', 'systematic', 'routes', 'scans', 'timetable'],
     trains: ['trains', 'train-profile', 'rolling-stock', 'programming', 'calibration', 'assembler'], timetable: ['timetable'], scans: ['scans']
   };
-  const SIDEBAR = ['control-center', 'selected-train', 'simulation', 'connection-health'];
+  const SIDEBAR = ['control-center', 'selected-train', 'train-functions', 'simulation', 'connection-health'];
   const copy = value => JSON.parse(JSON.stringify(value));
   function defaults() {
     return { pages: Object.fromEntries(Object.entries(MAIN).map(([page, order]) => [page, {
@@ -88,9 +90,11 @@
       const option = doc.createElement('option'); option.value = page; option.textContent = label;
       query('#workspace-layout-page').append(option);
     }
-    // Flatten the two old panel groups, leaving their containers in place for
-    // existing visibility code. Real nodes keep all state and event listeners.
+    // Flatten the legacy panel groups into their managed parents. Real nodes
+    // keep all state and event listeners while newly added panels become
+    // available to the same arrangement controls immediately.
     for (const id of new Set(Object.values(MAIN).flat())) if (nodes[id]) workspace.append(nodes[id]);
+    for (const id of SIDEBAR) if (nodes[id]) sidebar.append(nodes[id]);
     dashboard.classList.add('workspace-layout-enabled');
     function reorder(parent, items, anchor = null) {
       for (const item of items) {

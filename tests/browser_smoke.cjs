@@ -58,6 +58,12 @@ async function shot(page, name) {
   await page.waitForFunction(() => document.querySelector('#direction-forward').getAttribute('aria-pressed') === 'true');
   await page.getByRole('link', { name: 'Locomotives', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#train-panel').classList.contains('is-hidden') === false);
+  await page.waitForFunction(() => {
+    const navigation = document.querySelector('.trains-subnav')?.getBoundingClientRect();
+    const panel = document.querySelector('#train-panel')?.getBoundingClientRect();
+    return navigation && panel && panel.top >= navigation.bottom - 1;
+  });
+  assert.equal(await page.locator('.trains-subnav').evaluate(node => getComputedStyle(node).position), 'sticky', 'Train navigation should stay above its selected panel');
   assert.equal(await page.locator('#train-panel .panel-heading h2').textContent(), 'Locomotives');
   assert.ok(await page.locator('.train-row').count() >= 1, 'Locomotive subcategory must show locomotive records');
   assert.match(await page.locator('.train-row').first().textContent(), /→|#/, 'Locomotive rows show service data');
@@ -167,8 +173,8 @@ async function shot(page, name) {
   await page.locator('#new-route').click();
   await page.locator('#route-id').fill('smoke-route');
   await page.locator('#route-name').fill('Smoke route');
-  await page.locator('#route-source').selectOption('B01');
-  await page.locator('#route-target').selectOption('B04');
+  await page.locator('#route-node-catalogue [data-route-palette-value="B01"]').click();
+  await page.locator('#route-node-catalogue [data-route-palette-value="B04"]').click();
   await page.locator('#save-route').click();
   await page.waitForFunction(() => document.querySelector('#route-list').textContent.includes('Smoke route'));
   await page.locator('#route-list [data-route-id="smoke-route"] [data-route-action="edit"]').click();

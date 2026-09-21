@@ -1,4 +1,4 @@
-"""Small dependency-free HTTP API for the local H0 controller dashboard.
+"""Small dependency-free HTTP API for the local JochJell Controller dashboard.
 
 The API deliberately keeps the browser boundary thin. Domain and hardware modules can
 be swapped behind ``ControllerApplication`` without changing the frontend contract.
@@ -1444,6 +1444,74 @@ class ControllerApplication:
             "progress": round(coordinate.progress, 6),
         }
 
+    def _validate_schedule_dispatch(self, schedule: dict[str, Any]) -> None:
+        """Normalize a timetable's dispatch target and validate saved routes."""
+
+        route_id = str(schedule.get("route_id", "") or "").strip()
+        raw_mode = str(schedule.get("dispatch_mode", "") or "").strip().lower()
+        if not raw_mode:
+            raw_mode = "route" if route_id else "coordinate" if schedule.get("destination_coordinate") else "display"
+        if raw_mode not in {"route", "coordinate", "display"}:
+            raise ValueError("dispatch_mode must be route, coordinate, or display")
+        if raw_mode == "route":
+            if not route_id:
+                raise ValueError("route dispatch requires a route_id")
+            route = next((item for item in self.routes if str(item.get("id", "")) == route_id), None)
+            if route is None:
+                raise ValueError(f"Unknown route: {route_id}")
+            schedule["route_id"] = route_id
+            schedule["destination_coordinate"] = None
+        elif raw_mode == "coordinate":
+            if not schedule.get("destination_coordinate"):
+                raise ValueError("coordinate dispatch requires destination_coordinate")
+            schedule["route_id"] = None
+        else:
+            schedule["route_id"] = None
+            schedule["destination_coordinate"] = None
+        schedule["dispatch_mode"] = raw_mode
+
+    def _schedule_route_target(self, schedule: dict[str, Any], stop_id: str, train_id: str) -> dict[str, Any] | None:
+        """Bind a saved route to the assigned train when a service departs."""
+
+        route_id = str(schedule.get("route_id", "") or "").strip()
+        if not route_id:
+            return None
+        if self.runtime is None:
+            raise ValueError("controller runtime unavailable")
+        route = next((item for item in self.routes if str(item.get("id", "")) == route_id), None)
+        if route is None:
+            raise ValueError(f"Unknown route: {route_id}")
+        if not route.get("enabled", True):
+            raise ValueError(f"cannot dispatch disabled route: {route_id}")
+        canonical_train_id = self._canonical_train_id(train_id)
+        train = next((item for item in self.trains if str(item.get("id")) == canonical_train_id), None)
+        if train is None:
+            raise ValueError(f"Unknown train: {train_id}")
+        path = tuple(str(item).upper() for item in route.get("node_ids", ()) if str(item).strip())
+        train["scheduled_route_id"] = route_id
+        train["scheduled_route_name"] = str(route.get("name", route_id))
+        if path:
+            self.runtime.route_updater.set_route(canonical_train_id, path)
+            if hasattr(self.runtime.track, "set_train_route"):
+                result = self.runtime.track.set_train_route(canonical_train_id, path)
+                if hasattr(result, "accepted") and not result.accepted:
+                    raise ValueError(result.detail or "scheduled route was rejected")
+            train["destination_block_id"] = path[-1]
+            train["route"] = list(path)
+            self._publish_domain_event(RouteChanged(train_id=canonical_train_id, route=path))
+        target = {
+            "route_id": route_id,
+            "name": str(route.get("name", route_id)),
+            "node_ids": [item.lower() for item in path],
+            "flow": deepcopy(route.get("flow", [])),
+            "schedule_id": str(schedule.get("id", "")),
+        }
+        self.events.append({
+            "type": "schedule_route_bound", "schedule_id": str(schedule.get("id", "")),
+            "stop_id": str(stop_id), "train_id": canonical_train_id, "route": deepcopy(target),
+        })
+        return target
+
     def _schedule_coordinate_target(self, schedule: dict[str, Any], stop_id: str, train_id: str) -> dict[str, Any] | None:
         """Plan a calibrated destination for a timetable departure.
 
@@ -2085,6 +2153,8 @@ class ControllerApplication:
                 "graph_enabled": bool(train.get("graph_enabled", True)),
                 "route": train.get("route", []),
                 "destination_block_id": train.get("destination_block_id"),
+                "scheduled_route_id": train.get("scheduled_route_id"),
+                "scheduled_route_name": train.get("scheduled_route_name"),
                 "origin": train.get("origin", "Layout"),
                 "destination": train.get("destination", "Layout"),
                 "next_destination": self._next_schedule_destination(train),
@@ -2117,17 +2187,23 @@ class ControllerApplication:
             remaining = max(1, math.ceil(seconds * rate / interval))
             while remaining:
                 count = min(100, remaining)
-                self.tick(count, elapsed_seconds=count * interval)
+                self.tick(count, elapsed_seconds=count * interval, force=True)
                 remaining -= count
             return self._ui_snapshot()
 
-    def tick(self, steps: int = 1, *, elapsed_seconds: float | None = None) -> dict[str, Any]:
+    def tick(self, steps: int = 1, *, elapsed_seconds: float | None = None, force: bool = False) -> dict[str, Any]:
         with self._lock:
             safe_steps = max(1, min(int(steps), 100))
-            if self.simulation_mode and not self.simulation_running:
+            if self.simulation_mode and not self.simulation_running and not force:
                 self.events.append({"type": "simulation_tick_skipped", "reason": "simulation paused"})
                 return self._ui_snapshot()
             if self.runtime is not None:
+                scheduler_was_running = self.runtime.scheduler.running
+                if force and self.simulation_mode and not scheduler_was_running:
+                    self.runtime.scheduler.start(
+                        tick=self.runtime.scheduler.current_tick,
+                        world_tick=self.runtime.scheduler.world_current_tick,
+                    )
                 self.runtime.tick(safe_steps)
                 if elapsed_seconds is None:
                     self._world_clock_seconds += safe_steps * 60
@@ -2159,7 +2235,11 @@ class ControllerApplication:
                     if row is not None:
                         row["state"] = state
                         if schedule_event.kind.value == "departure":
-                            self._schedule_coordinate_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
+                            dispatch_mode = str(row.get("dispatch_mode", "") or "").lower()
+                            if dispatch_mode == "route" or row.get("route_id"):
+                                self._schedule_route_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
+                            elif dispatch_mode == "coordinate" or row.get("destination_coordinate"):
+                                self._schedule_coordinate_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
                     self._publish_domain_event(
                         ScheduleStateChanged(
                             schedule_id=schedule_id,
@@ -2167,6 +2247,8 @@ class ControllerApplication:
                         )
                     )
                     self.events.append({"type": f"schedule_{schedule_event.kind.value}", "schedule_id": schedule_id, "stop_id": schedule_event.stop.stop_id, "train_id": schedule_event.stop.train_id, "tick": schedule_event.tick})
+                if force and self.simulation_mode and not scheduler_was_running:
+                    self.runtime.scheduler.pause()
                 self._sync_ui_from_runtime()
                 self.tick_count = self.runtime.track.get_snapshot().tick
             else:
@@ -2456,6 +2538,42 @@ class ControllerApplication:
             raise
         self.events.append({"type": f"{asset_type}_{'removed' if operation == 'remove' else 'added' if operation == 'add' else 'updated'}", f"{asset_type}_id": selected_id})
         return True
+
+    def _normalize_route_flow(self, raw: Any) -> tuple[list[dict[str, Any]], list[str]]:
+        """Normalize reusable route blocks and extract only optional graph nodes."""
+        if raw is None:
+            return [], []
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError("route flow must be a list")
+        graph = self.runtime.layout.graph() if self.runtime is not None else None
+        flow: list[dict[str, Any]] = []
+        node_ids: list[str] = []
+        for raw_block in raw:
+            if not isinstance(raw_block, dict):
+                raise ValueError("route flow blocks must be objects")
+            kind = str(raw_block.get("type", raw_block.get("kind", ""))).strip().lower()
+            if kind == "program":
+                kind = "routine"
+            if kind == "node":
+                node_id = str(raw_block.get("node_id", raw_block.get("value", ""))).strip().upper()
+                if not node_id or graph is None or graph.node(node_id) is None:
+                    raise ValueError("route node blocks must reference graph nodes")
+                flow.append({"type": "node", "node_id": node_id})
+                node_ids.append(node_id)
+            elif kind == "routine":
+                program_id = str(raw_block.get("program_id", raw_block.get("value", ""))).strip()
+                if not program_id:
+                    raise ValueError("routine blocks require a program_id")
+                flow.append({"type": "routine", "program_id": program_id})
+            elif kind in {"sync", "sync_locomotive"}:
+                locomotive_id = str(raw_block.get("locomotive_id", raw_block.get("train_id", raw_block.get("value", "")))).strip()
+                canonical_id = self._canonical_train_id(locomotive_id)
+                if not locomotive_id or not any(str(item.get("id")) == canonical_id for item in self.trains):
+                    raise ValueError("sync blocks must reference a known locomotive")
+                flow.append({"type": "sync", "locomotive_id": locomotive_id})
+            else:
+                raise ValueError("route flow block type must be node, routine, or sync")
+        return flow, node_ids
 
     def _route_path(self, source: Any, target: Any, algorithm: Any = "a_star", requested: Any = None) -> tuple[list[str], str]:
         """Validate a saved route path or calculate one through the live graph."""
@@ -3450,12 +3568,21 @@ class ControllerApplication:
                 route_id = str(route.get("id", "")).strip()
                 if not route_id or any(item.get("id") == route_id for item in self.routes):
                     raise ValueError("route ID is required and must be unique")
-                source = str(route.get("source_block_id", route.get("source", ""))).strip().upper()
-                target = str(route.get("target_block_id", route.get("target", ""))).strip().upper()
-                path, algorithm = self._route_path(source, target, route.get("algorithm", "a_star"), route.get("node_ids", route.get("path")))
+                flow, flow_nodes = self._normalize_route_flow(route.get("flow")) if "flow" in route else ([], [])
+                source = str(route.get("source_block_id") or route.get("source") or (flow_nodes[0] if flow_nodes else "")).strip().upper()
+                target = str(route.get("target_block_id") or route.get("target") or (flow_nodes[-1] if flow_nodes else "")).strip().upper()
+                requested = route.get("node_ids") or route.get("path") or (flow_nodes if flow_nodes else None)
+                if source or target or requested:
+                    path, algorithm = self._route_path(source, target, route.get("algorithm", "a_star"), requested)
+                else:
+                    if not flow:
+                        raise ValueError("route must contain at least one flow block")
+                    path, algorithm = [], "stationary"
                 saved = {"id": route_id, "name": str(route.get("name", route_id)).strip() or route_id,
-                         "source_block_id": source, "target_block_id": target, "node_ids": path,
+                         "source_block_id": source or None, "target_block_id": target or None, "node_ids": path,
                          "algorithm": algorithm, "enabled": bool(route.get("enabled", True))}
+                if "flow" in route:
+                    saved["flow"] = flow
                 self.routes.append(saved)
                 self._sync_runtime_from_ui()
                 self.events.append({"type": "route_added", "route_id": route_id, "route": deepcopy(saved)})
@@ -3465,13 +3592,22 @@ class ControllerApplication:
                 if route is None:
                     raise ValueError(f"Unknown route: {route_id}")
                 updates = dict(payload.get("route", {}))
-                source = str(updates.get("source_block_id", route.get("source_block_id", ""))).strip().upper()
-                target = str(updates.get("target_block_id", route.get("target_block_id", ""))).strip().upper()
-                path_requested = updates.get("node_ids", updates.get("path")) if any(key in updates for key in ("node_ids", "path", "source_block_id", "target_block_id", "source", "target")) else route.get("node_ids")
-                path, algorithm = self._route_path(source, target, updates.get("algorithm", route.get("algorithm", "a_star")), path_requested if any(key in updates for key in ("node_ids", "path")) else None)
+                flow_present = "flow" in updates
+                flow, flow_nodes = self._normalize_route_flow(updates.get("flow")) if flow_present else (list(route.get("flow", [])), [str(item).upper() for item in route.get("node_ids", ())])
+                source = str(updates.get("source_block_id") or updates.get("source") or (flow_nodes[0] if flow_nodes else route.get("source_block_id", "")) or "").strip().upper()
+                target = str(updates.get("target_block_id") or updates.get("target") or (flow_nodes[-1] if flow_nodes else route.get("target_block_id", "")) or "").strip().upper()
+                path_requested = updates.get("node_ids") or updates.get("path") or (flow_nodes if flow_nodes else None)
+                if source or target or path_requested:
+                    path, algorithm = self._route_path(source, target, updates.get("algorithm", route.get("algorithm", "a_star")), path_requested)
+                else:
+                    if flow_present and not flow:
+                        raise ValueError("route must contain at least one flow block")
+                    path, algorithm = [], "stationary"
                 route.update({"name": str(updates.get("name", route.get("name", route_id))).strip() or route_id,
-                              "source_block_id": source, "target_block_id": target, "node_ids": path,
+                              "source_block_id": source or None, "target_block_id": target or None, "node_ids": path,
                               "algorithm": algorithm, "enabled": bool(updates.get("enabled", route.get("enabled", True)))})
+                if flow_present:
+                    route["flow"] = flow
                 self._sync_runtime_from_ui()
                 self.events.append({"type": "route_updated", "route_id": route_id, "route": deepcopy(route)})
             elif kind == "remove_route":
@@ -3492,6 +3628,8 @@ class ControllerApplication:
                 if not route.get("enabled", True):
                     raise ValueError("cannot apply a disabled route")
                 path = tuple(str(item).upper() for item in route.get("node_ids", ()))
+                if not path:
+                    raise ValueError("stationary routes are reusable definitions and cannot be bound to a train yet")
                 self.runtime.route_updater.set_route(train_id, path)
                 if hasattr(self.runtime.track, "set_train_route"):
                     self.runtime.track.set_train_route(train_id, path)
@@ -3508,6 +3646,7 @@ class ControllerApplication:
                 schedule.setdefault("service", "New service")
                 schedule.setdefault("number", "NEW")
                 schedule.setdefault("state", "Draft")
+                self._validate_schedule_dispatch(schedule)
                 self._validate_schedule_coordinate(schedule)
                 self.schedules.append(schedule)
                 self._sync_runtime_from_ui()
@@ -3524,6 +3663,11 @@ class ControllerApplication:
                 if schedule is None:
                     raise ValueError(f"Unknown schedule: {schedule_id}")
                 updates = dict(payload.get("schedule", {}))
+                candidate = {**schedule, **updates}
+                self._validate_schedule_dispatch(candidate)
+                updates["dispatch_mode"] = candidate["dispatch_mode"]
+                updates["route_id"] = candidate.get("route_id")
+                updates["destination_coordinate"] = candidate.get("destination_coordinate")
                 self._validate_schedule_coordinate(updates)
                 schedule.update(updates)
                 self._sync_runtime_from_ui()
@@ -3774,7 +3918,7 @@ class ControllerHandler(BaseHTTPRequestHandler):
                     seconds = float(payload.get("seconds", 60))
                     rate = float(payload.get("rate", 1))
                     return self._send_json(self.application.advance_simulation(seconds, rate))
-                return self._send_json(self.application.tick(steps))
+                return self._send_json(self.application.tick(steps, force=True))
             if parsed.path == "/api/layouts" or parsed.path.startswith("/api/layouts/"):
                 payload = self._read_json()
                 path_layout_id = parsed.path.removeprefix("/api/layouts/").strip() if parsed.path != "/api/layouts" else ""

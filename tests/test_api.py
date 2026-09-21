@@ -520,6 +520,46 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_schedule_departure_binds_saved_route_to_train(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            result = app.command({
+                "type": "add_schedule",
+                "schedule": {
+                    "id": "route-departure", "time": "00:01", "service": "Yard move",
+                    "number": "3", "train_id": "train-3", "station_id": "ST02", "platform": "P02",
+                    "dispatch_mode": "route", "route_id": "r2",
+                },
+            })
+            schedule = next(item for item in result["schedules"] if item["id"] == "route-departure")
+            self.assertEqual(schedule["route_id"], "r2")
+            self.assertEqual(schedule["dispatch_mode"], "route")
+            app.runtime.scheduler.reset(tick=0)
+            app.runtime.scheduler.start()
+            app.tick(2)
+            train = next(item for item in app.state()["trains"] if item["id"] == "t2")
+            self.assertEqual(train["route"], ["B03", "B04"])
+            self.assertEqual(train["scheduled_route_id"], "r2")
+            self.assertTrue(any(event["type"] == "schedule_route_bound" for event in app.state()["events"]))
+        finally:
+            app.close()
+
+    def test_simulation_controls_pause_and_manual_tick(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            paused = app.command({"type": "pause_simulation"})
+            self.assertFalse(paused["simulation"]["running"])
+            advanced = app.advance_simulation(60, 1)
+            self.assertFalse(advanced["simulation"]["running"])
+            self.assertEqual(advanced["simulation"]["clock"], "00:01:00")
+            self.assertEqual(advanced["simulation"]["world_clock"], "01:00")
+            resumed = app.command({"type": "resume_simulation"})
+            self.assertTrue(resumed["simulation"]["running"])
+        finally:
+            app.close()
+
     def test_paired_locomotives_share_motion_commands(self) -> None:
         app = ControllerApplication.sample()
         app.stop_motion_clock()

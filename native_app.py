@@ -13,6 +13,7 @@ import webview
 
 from desktop_app import DesktopController, data_directory
 from native_connection import NativeConnectionAPI
+from app_metadata import PRODUCT_NAME, PUBLISHER, VERSION
 
 
 def main():
@@ -29,7 +30,7 @@ def main():
     webview.settings['OPEN_EXTERNAL_LINKS_IN_BROWSER'] = False
     window = None
     bridge = NativeConnectionAPI(lambda: window, lambda: controller, lambda physical: connect(physical, switching=True))
-    window = webview.create_window('H0 Control Desk', html='<html><body style="font-family:Segoe UI;padding:40px"><h1>H0 Control Desk</h1><p>Starting your railway workspace…</p></body></html>', width=1400, height=950, min_size=(800, 600), hidden=bool(args.smoke_test), js_api=bridge)
+    window = webview.create_window(f'{PRODUCT_NAME} — {VERSION}', html=f'<html><body style="font-family:Segoe UI;padding:40px"><h1>{PRODUCT_NAME}</h1><p>{PUBLISHER} · Starting your railway workspace…</p></body></html>', width=1400, height=950, min_size=(800, 600), hidden=bool(args.smoke_test), js_api=bridge)
 
     def notice(title, message):
         window.create_confirmation_dialog(title, message)
@@ -53,7 +54,7 @@ def main():
                 controller = DesktopController(directory, physical=physical, port=0)
                 if saved_layout:
                     controller.app.load_layout(saved_layout)
-                window.set_title('H0 Control Desk — ' + ('Z21' if physical else 'Simulation'))
+                window.set_title(f'{PRODUCT_NAME} — ' + ('Z21' if physical else 'Simulation'))
                 window.load_url(controller.url + ('/#settings' if switching else ''))
             except Exception as error:
                 if controller is not None:

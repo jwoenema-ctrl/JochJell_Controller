@@ -15,10 +15,17 @@ import webbrowser
 from backend.api.server import ControllerApplication, make_server, startup_z21_transport
 from backend.infrastructure.settings import SQLiteSettingsRepository
 from backend.infrastructure.wlan import WindowsRouteAPI
+from app_metadata import PRODUCT_NAME, PUBLISHER, VERSION
 
 
 def data_directory() -> Path:
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "H0 Control Desk"
+    root = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    preferred = root / PRODUCT_NAME
+    legacy = root / "H0 Control Desk"
+    # Keep existing installations usable after the product rename. New data
+    # uses the JochJell directory; legacy data remains untouched until the
+    # user explicitly migrates or removes it.
+    return legacy if legacy.exists() and not preferred.exists() else preferred
 
 
 class DesktopController:
@@ -153,13 +160,13 @@ def main():
         smoke_test(args.smoke_test)
         return
     root = tk.Tk()
-    root.title('H0 Control Desk')
+    root.title(f'{PRODUCT_NAME} — {VERSION}')
     root.geometry('480x320')
     root.resizable(False, False)
     pane = ttk.Frame(root, padding=28)
     pane.pack(fill='both', expand=True)
-    ttk.Label(pane, text='H0 Control Desk', font=('Segoe UI', 22)).pack(anchor='w')
-    ttk.Label(pane, text='Your railway controller · Windows edition').pack(anchor='w', pady=(5, 22))
+    ttk.Label(pane, text=PRODUCT_NAME, font=('Segoe UI', 22)).pack(anchor='w')
+    ttk.Label(pane, text=f'{PUBLISHER} · version {VERSION} · Windows edition').pack(anchor='w', pady=(5, 22))
     mode = tk.StringVar(value='Simulation')
     selector = ttk.Combobox(pane, textvariable=mode, values=('Simulation', 'Z21 · saved IP address'), state='readonly')
     selector.pack(fill='x')
