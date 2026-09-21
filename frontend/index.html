@@ -128,6 +128,7 @@
             <span><i class="mini-icon">◷</i><span id="simulation-date">Tuesday · 14 May</span></span>
             <span><i class="mini-icon">1×</i><span id="simulation-rate">Real time</span></span>
           </div>
+<div class="world-clock-strip" aria-label="World clock"><div><p class="eyebrow">WORLD CLOCK</p><h3 id="world-clock">00:00</h3></div><div class="world-clock-detail"><strong>Model time</strong><small id="world-clock-rate">1 real min = 1 world hour</small></div></div>
           <div class="simulation-actions">
             <button class="button button-soft" id="simulation-toggle">Pause</button>
             <button class="button button-soft" id="simulation-tick">Tick +1 min</button>
@@ -210,7 +211,7 @@
             </div>
           </div>
           <div class="graph-editor-tools" id="graph-editor-tools"><span class="graph-editor-label">Connections</span><select id="connection-from" aria-label="Connection source block"></select><span class="graph-editor-arrow">↔</span><select id="connection-to" aria-label="Connection target block"></select><button class="button button-soft editor-action" id="connect-blocks">Connect</button><button class="button button-soft editor-action" id="disconnect-blocks">Disconnect</button></div>
-          <div class="pinboard-placement-tools is-hidden" id="pinboard-placement-tools"><span class="graph-editor-label">Place on track</span><select id="pinboard-train-select" aria-label="Train or locomotive to place"></select><button type="button" class="button button-soft" id="place-pinboard-train">Place train</button><span class="settings-help" id="pinboard-placement-status" role="status">Choose a train or locomotive, then click a rail.</span></div>
+          <div class="pinboard-placement-tools is-hidden" id="pinboard-placement-tools"><span class="graph-editor-label">Graph membership</span><select id="pinboard-train-select" aria-label="Train or locomotive to place"></select><button type="button" class="button button-soft" id="place-pinboard-train">Add / place train</button><button type="button" class="button button-soft" id="remove-pinboard-train">Remove from graph</button><span class="settings-help" id="pinboard-placement-status" role="status">Choose a train or locomotive, then click a rail.</span></div>
           <div class="connection-limit-editor is-hidden" id="connection-limit-editor">
             <div><strong>Connection speed limit</strong><p class="settings-help">Applies in the selected direction: source → target. Save layout to keep changes.</p></div>
             <label>Applies to <select id="connection-limit-train" aria-label="Speed limit train"><option value="">All trains (default)</option></select></label>
@@ -308,10 +309,28 @@
             <div class="field-grid">
               <div class="field"><label for="route-id">Route ID</label><input id="route-id" required maxlength="48" placeholder="yard-to-platform"></div>
               <div class="field"><label for="route-name">Name</label><input id="route-name" required placeholder="Yard to platform"></div>
-              <div class="field"><label for="route-source">From node</label><select id="route-source"></select></div>
-              <div class="field"><label for="route-target">To node</label><select id="route-target"></select></div>
               <div class="field"><label for="route-train">Apply to train</label><select id="route-train"></select></div>
               <div class="field"><label for="route-algorithm">Planner</label><select id="route-algorithm"><option value="a_star">A* cost-aware</option><option value="bfs">Breadth-first</option></select></div>
+            </div>
+            <div class="route-flow-builder">
+              <aside class="route-block-catalogue">
+                <p class="eyebrow">FLOW BLOCKS</p>
+                <h3>Build the route</h3>
+                <p>Drag track nodes and routines into the flow, or click a block to add it.</p>
+                <div class="route-palette-group" id="route-node-catalogue"></div>
+                <div class="route-palette-group" id="route-routine-catalogue"></div>
+              </aside>
+              <section class="route-flow-panel">
+                <div class="route-flow-heading"><div><p class="eyebrow">ROUTE FLOW</p><h3>Track path & actions</h3></div><span class="route-flow-count" id="route-flow-count">0 blocks</span></div>
+                <div class="route-flow-dropzone" id="route-flow-dropzone">
+                  <div class="route-flow" id="route-flow" aria-live="polite"></div>
+                  <div class="route-flow-empty" id="route-flow-empty">Drag a track node or routine here to start the route.</div>
+                </div>
+              </section>
+            </div>
+            <div class="route-legacy-fields" aria-hidden="true">
+              <label for="route-source">From node</label><select id="route-source"></select>
+              <label for="route-target">To node</label><select id="route-target"></select>
             </div>
             <div class="button-row"><button type="button" class="button button-primary" id="save-route">Save route</button><button type="button" class="button button-soft" id="cancel-route">Clear</button><button type="button" class="button button-soft" id="apply-route">Apply to selected train</button></div>
             <p class="settings-status" id="route-status" role="status" aria-live="polite">Create a named path from the current layout graph.</p>
@@ -436,40 +455,55 @@
     </main>
 
     <section id="settings-page" class="is-hidden" aria-labelledby="settings-title">
-      <header class="settings-header"><p class="eyebrow">WORKSPACE PREFERENCES</p><h2 id="settings-title" tabindex="-1">Settings</h2><p class="settings-intro">Make this control desk your own. Changes are saved on your controller.</p></header>
-      <form id="app-settings-form" class="settings-form">
-        <section class="settings-section" aria-labelledby="appearance-heading">
-          <div class="settings-section-heading"><h3 id="appearance-heading">Appearance</h3><p>A quieter workspace, day or night.</p></div>
-          <div class="settings-row"><div><label for="setting-theme">Theme</label><p class="settings-help">System follows your device. Preview changes instantly.</p></div><div class="settings-control"><select id="setting-theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
-          <div class="settings-row"><div><label for="setting-ui-refresh">Status refresh</label><p class="settings-help">How often the interface checks the controller.</p></div><div class="settings-control"><input id="setting-ui-refresh" type="number" min="1" max="60" step="1" required><span>seconds</span></div></div>
+      <header class="settings-header">
+        <div class="settings-header-copy"><p class="eyebrow">WORKSPACE PREFERENCES</p><h2 id="settings-title" tabindex="-1">Settings</h2><p class="settings-intro">Tune the desk for your layout, your hardware and the way you operate.</p></div>
+        <div class="settings-header-meta"><span class="settings-status-chip"><span class="settings-status-dot"></span>Local controller</span><span>Changes stay on this controller until you save them.</span></div>
+      </header>
+      <nav class="settings-nav" aria-label="Settings sections">
+        <a href="#settings-appearance">Appearance</a><a href="#settings-connection">Connection</a><a href="#settings-routing">Routing</a><a href="#settings-operations">Operations</a><a href="#workspace-layout-settings">Workspace</a><a href="#settings-photos">Photo scans</a>
+      </nav>
+      <div class="settings-content">
+        <form id="app-settings-form" class="settings-form">
+          <section class="settings-section settings-card" id="settings-appearance" aria-labelledby="appearance-heading">
+            <div class="settings-section-heading"><div><p class="eyebrow">LOOK &amp; FEEL</p><h3 id="appearance-heading">Appearance</h3><p>Make long operating sessions easier on your eyes.</p></div><span class="settings-section-index">01</span></div>
+            <div class="settings-row"><div><label for="setting-theme">Theme</label><p class="settings-help">System follows your device. Preview changes instantly.</p></div><div class="settings-control"><select id="setting-theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
+            <div class="settings-row"><div><label for="setting-interface-density">Interface density</label><p class="settings-help">Compact fits more trains and panels on screen; comfortable adds breathing room.</p></div><div class="settings-control"><select id="setting-interface-density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></div></div>
+            <div class="settings-row"><div><label for="setting-ui-refresh">Status refresh</label><p class="settings-help">How often the interface checks the controller.</p></div><div class="settings-control"><input id="setting-ui-refresh" type="number" min="1" max="60" step="1" required><span>seconds</span></div></div>
+            <div class="settings-row"><div><label for="setting-show-connection-detail">Show connection detail</label><p class="settings-help">Keep the current transport detail visible in the top bar.</p></div><div class="settings-control"><input id="setting-show-connection-detail" type="checkbox" role="switch"></div></div>
+            <div class="settings-row"><div><label for="setting-reduce-motion">Reduce motion</label><p class="settings-help">Tone down animated layout markers and transitions.</p></div><div class="settings-control"><input id="setting-reduce-motion" type="checkbox" role="switch"></div></div>
+          </section>
+          <section class="settings-section settings-card" id="settings-connection" aria-labelledby="connection-heading">
+            <div class="settings-section-heading"><div><p class="eyebrow">COMMAND STATION</p><h3 id="connection-heading">Z21 connection</h3><p>Configure the command station on your local network.</p></div><span class="settings-section-index">02</span></div>
+            <div class="settings-row"><div><label for="setting-z21-host">IP address</label><p class="settings-help">Saving an address does not connect or enable track power.</p></div><div class="settings-control"><input id="setting-z21-host" type="text" placeholder="192.168.0.111" spellcheck="false" autocomplete="off" required></div></div>
+            <div class="settings-row"><div><label for="setting-z21-port">UDP port</label><p class="settings-help">The standard Z21 port is 21105.</p></div><div class="settings-control"><input id="setting-z21-port" type="number" min="1" max="65535" step="1" required></div></div>
+            <div class="settings-row settings-wlan-row"><div><label for="setting-z21-wlan">Use Roco 10814 WLAN</label><p class="settings-help" id="setting-z21-wlan-help">The 10814 provides the Wi-Fi router and Z21 unlock; train commands still use the same UDP connection. Connect Windows to the Z21 Wi-Fi first. This app does not join Wi-Fi and never stores its password. The usual Z21 address is 192.168.0.111, while a custom IP address above is retained.</p></div><div class="settings-control"><input id="setting-z21-wlan" name="z21_wlan_enabled" type="checkbox" role="switch" aria-describedby="setting-z21-wlan-help settings-transport-status"></div></div>
+            <p class="settings-status settings-transport-status" id="settings-transport-status" role="status" aria-live="polite">Selected profile: direct LAN over UDP.</p>
+            <p class="settings-help" id="settings-connection-note">The controller starts in simulation unless real Z21 operation is explicitly enabled.</p>
+            <div class="settings-native-actions"><button type="button" class="button button-primary" id="settings-connect-z21" disabled>Connect to real Z21</button><button type="button" class="button button-soft" id="settings-use-simulation" disabled>Use simulation</button></div>
+            <p class="settings-status" id="settings-native-status" role="status">Available in the desktop app. Browser users must restart the controller to change connection mode.</p>
+          </section>
+          <section class="settings-section settings-card" id="settings-routing" aria-labelledby="routing-heading">
+            <div class="settings-section-heading"><div><p class="eyebrow">PLANNING ENGINE</p><h3 id="routing-heading">Routing</h3><p>Keep route plans in step with your layout without over-polling a quiet railway.</p></div><span class="settings-section-index">03</span></div>
+            <div class="settings-row"><div><label for="setting-routing-adaptive">Adaptive refresh</label><p class="settings-help">Use the active interval for moving trains or active schedules, and the idle interval when the layout is quiet.</p></div><div class="settings-control"><input id="setting-routing-adaptive" type="checkbox" role="switch"></div></div>
+            <div class="settings-row"><div><label for="setting-routing-busy">Active interval</label><p class="settings-help">Also used as the fixed interval when adaptive refresh is off.</p></div><div class="settings-control"><input id="setting-routing-busy" type="number" min="0.25" max="60" step="0.25" required><span>seconds</span></div></div>
+            <div class="settings-row"><div><label for="setting-routing-idle">Idle interval</label><p class="settings-help">Layout edits still invalidate route plans immediately.</p></div><div class="settings-control"><input id="setting-routing-idle" type="number" min="0.25" max="60" step="0.25" required><span>seconds</span></div></div>
+            <p class="settings-help" id="settings-routing-status">Route refresh recalculates plans; it does not advance simulation or send movement commands.</p>
+          </section>
+          <section class="settings-section settings-card" id="settings-operations" aria-labelledby="operations-heading">
+            <div class="settings-section-heading"><div><p class="eyebrow">RUNNING THE RAILWAY</p><h3 id="operations-heading">Operations</h3><p>Choose the defaults that make everyday control predictable.</p></div><span class="settings-section-index">04</span></div>
+            <div class="settings-row"><div><label for="setting-default-simulation-rate">Default simulation rate</label><p class="settings-help">The fast-forward multiplier selected when the desk starts.</p></div><div class="settings-control"><select id="setting-default-simulation-rate"><option value="1">1× · Real time</option><option value="5">5× · Quick test</option><option value="15">15× · Scenario</option><option value="60">60× · Timetable</option></select></div></div>
+            <div class="settings-row"><div><label for="setting-confirm-power-actions">Confirm track power changes</label><p class="settings-help">Ask before turning power on or off for the whole layout.</p></div><div class="settings-control"><input id="setting-confirm-power-actions" type="checkbox" role="switch"></div></div>
+          </section>
+          <div class="settings-actions"><p class="settings-status" id="settings-save-status" role="status" aria-live="polite">Loading saved preferences…</p><button type="button" class="button button-soft" id="settings-discard">Discard changes</button><button type="submit" class="button button-primary" id="settings-save">Save changes</button></div>
+        </form>
+        <section class="settings-section settings-card settings-upload" id="settings-photos" aria-labelledby="photos-heading">
+          <div class="settings-section-heading"><div><p class="eyebrow">LAYOUT CONTEXT</p><h3 id="photos-heading">Photo scans</h3><p>Add a layout photograph to your 3D workspace. Uploaded images stay on this controller.</p></div><span class="settings-section-index">05</span></div>
+          <p class="settings-help">PNG, JPEG or WebP, up to 10 MB. A photo is displayed on a 3D surface; this does not reconstruct a full 3D model from photographs.</p>
+          <div class="settings-row"><div><label for="settings-scan-file">Layout photograph</label><input id="settings-scan-file" type="file" accept="image/png,image/jpeg,image/webp" aria-describedby="settings-upload-status"></div><button type="button" class="button button-primary" id="settings-upload-scan">Upload photo</button></div>
+          <p class="settings-status" id="settings-upload-status" role="status" aria-live="polite">Choose a photograph to add it to your library.</p>
+          <div class="settings-library" id="settings-scan-library"></div>
         </section>
-        <section class="settings-section" aria-labelledby="connection-heading">
-          <div class="settings-section-heading"><h3 id="connection-heading">Z21 connection</h3><p>Configure the command station on your local network.</p></div>
-          <div class="settings-row"><div><label for="setting-z21-host">IP address</label><p class="settings-help">Saving an address does not connect or enable track power.</p></div><div class="settings-control"><input id="setting-z21-host" type="text" placeholder="192.168.0.111" spellcheck="false" autocomplete="off" required></div></div>
-          <div class="settings-row"><div><label for="setting-z21-port">UDP port</label><p class="settings-help">The standard Z21 port is 21105.</p></div><div class="settings-control"><input id="setting-z21-port" type="number" min="1" max="65535" step="1" required></div></div>
-          <div class="settings-row settings-wlan-row"><div><label for="setting-z21-wlan">Use Roco 10814 WLAN</label><p class="settings-help" id="setting-z21-wlan-help">The 10814 provides the Wi-Fi router and Z21 unlock; train commands still use the same UDP connection. Connect Windows to the Z21 Wi-Fi first. This app does not join Wi-Fi and never stores its password. The usual Z21 address is 192.168.0.111, while a custom IP address above is retained.</p></div><div class="settings-control"><input id="setting-z21-wlan" name="z21_wlan_enabled" type="checkbox" role="switch" aria-describedby="setting-z21-wlan-help settings-transport-status"></div></div>
-          <p class="settings-status settings-transport-status" id="settings-transport-status" role="status" aria-live="polite">Selected profile: direct LAN over UDP.</p>
-          <p class="settings-help" id="settings-connection-note">The controller starts in simulation unless real Z21 operation is explicitly enabled.</p>
-          <p class="settings-help">Save your connection settings first. Connecting uses the saved address and asks for confirmation in the desktop app.</p>
-          <div class="settings-native-actions"><button type="button" class="button button-primary" id="settings-connect-z21" disabled>Connect to real Z21</button><button type="button" class="button button-soft" id="settings-use-simulation" disabled>Use simulation</button></div>
-          <p class="settings-status" id="settings-native-status" role="status">Available in the desktop app. Browser users must restart the controller to change connection mode.</p>
-        </section>
-        <section class="settings-section" aria-labelledby="routing-heading">
-          <div class="settings-section-heading"><h3 id="routing-heading">Routing</h3><p>Keep route plans in step with your layout.</p></div>
-          <div class="settings-row"><div><label for="setting-routing-adaptive">Adaptive refresh</label><p class="settings-help">Use the active interval for moving trains or active schedules, and the idle interval when the layout is quiet.</p></div><div class="settings-control"><input id="setting-routing-adaptive" type="checkbox" role="switch"></div></div>
-          <div class="settings-row"><div><label for="setting-routing-busy">Active interval</label><p class="settings-help">Also used as the fixed interval when adaptive refresh is off.</p></div><div class="settings-control"><input id="setting-routing-busy" type="number" min="0.25" max="60" step="0.25" required><span>seconds</span></div></div>
-          <div class="settings-row"><div><label for="setting-routing-idle">Idle interval</label><p class="settings-help">Layout edits still invalidate route plans immediately.</p></div><div class="settings-control"><input id="setting-routing-idle" type="number" min="0.25" max="60" step="0.25" required><span>seconds</span></div></div>
-          <p class="settings-help" id="settings-routing-status">Route refresh recalculates plans; it does not advance simulation or send movement commands.</p>
-        </section>
-        <div class="settings-actions"><p class="settings-status" id="settings-save-status" role="status" aria-live="polite">Loading saved preferences…</p><button type="button" class="button button-soft" id="settings-discard">Discard changes</button><button type="submit" class="button button-primary" id="settings-save">Save changes</button></div>
-      </form>
-      <section class="settings-section settings-upload" aria-labelledby="photos-heading">
-        <div class="settings-section-heading"><h3 id="photos-heading">Photo scans</h3><p>Add a layout photograph to your 3D workspace. Uploaded images stay on this controller.</p></div>
-        <p class="settings-help">PNG, JPEG or WebP, up to 10 MB. A photo is displayed on a 3D surface; this does not reconstruct a full 3D model from photographs.</p>
-        <div class="settings-row"><div><label for="settings-scan-file">Layout photograph</label><input id="settings-scan-file" type="file" accept="image/png,image/jpeg,image/webp" aria-describedby="settings-upload-status"></div><button type="button" class="button button-primary" id="settings-upload-scan">Upload photo</button></div>
-        <p class="settings-status" id="settings-upload-status" role="status" aria-live="polite">Choose a photograph to add it to your library.</p>
-        <div class="settings-library" id="settings-scan-library"></div>
-      </section>
+      </div>
     </section>
 
     <footer class="footer-bar">

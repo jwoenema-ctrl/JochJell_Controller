@@ -138,6 +138,7 @@ class ControllerApplication:
     _motion_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _motion_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _scheduler_remainder_seconds: float = field(default=0.0, init=False, repr=False)
+    _world_clock_seconds: float = field(default=0.0, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _presence_state: dict[str, Any] = field(default_factory=lambda: {
         "results": [],
@@ -191,6 +192,8 @@ class ControllerApplication:
         for train in self.trains:
             details = self.runtime.train_database.get(str(train.get("id", "")))
             metadata = dict(details.metadata) if details is not None else {}
+            if "graph_enabled" in metadata:
+                train["graph_enabled"] = bool(metadata["graph_enabled"])
             raw_ids = metadata.get("locomotive_ids", ())
             if isinstance(raw_ids, (list, tuple)):
                 train["locomotive_ids"] = [self._canonical_train_id(str(item)) for item in raw_ids if str(item)]
@@ -612,6 +615,12 @@ class ControllerApplication:
         for train in self.trains:
             train_id = str(train["id"])
             block_id = str(train.get("block_id", "B01"))
+            if not train.get("graph_enabled", True):
+                if train_id in self.runtime.dispatcher.trains:
+                    if hasattr(self.runtime.track, "remove_train"):
+                        self.runtime.track.remove_train(train_id)
+                    self.runtime.dispatcher.unregister_train(train_id)
+                continue
             if self.z21_host and train.get("address") in (None, ""):
                 # A catalogue record may be known before a decoder address is
                 # assigned. Keep it in the database/UI, but never register an
@@ -643,7 +652,13 @@ class ControllerApplication:
                 self.runtime.add_train(train_id, block_id, route=route, address=train.get("address"))
             mode_value = str(train.get("mode", "manual")).lower()
             mode = ControlMode.AUTOMATIC if mode_value == "automatic" else ControlMode.STOPPED if mode_value in {"stopped", "safe", "stop"} else ControlMode.MANUAL
-            desired_route = tuple(str(item).upper() for item in train.get("route", ()) if str(item)) or tuple(self.runtime.route_updater.desired_routes.get(train_id, ()))
+            reserve_route = mode is ControlMode.AUTOMATIC or bool(train.get("target_coordinate"))
+            if not reserve_route:
+                self.runtime.route_updater.release_train(train_id)
+            desired_route = (
+                tuple(str(item).upper() for item in train.get("route", ()) if str(item))
+                or tuple(self.runtime.route_updater.desired_routes.get(train_id, ()))
+            ) if reserve_route else ()
             route_usable = all(
                 graph.node(left) is not None
                 and any(edge.target_id == right for edge in graph.neighbors(left))
@@ -698,6 +713,7 @@ class ControllerApplication:
         if self.runtime is None:
             return
         current_tick = self.runtime.scheduler.current_tick
+        current_world_tick = getattr(self.runtime.scheduler, "world_current_tick", current_tick)
         was_running = self.runtime.scheduler.running
         self.runtime.scheduler.clear()
         for row in self.schedules:
@@ -722,7 +738,7 @@ class ControllerApplication:
                 arrival_tick = _schedule_tick(None, row.get("time", "00:00"), 0)
                 self.runtime.scheduler.add_stop(RuntimeScheduleStop(schedule_id, train_id, station_id, arrival_tick, arrival_tick + 1, str(row.get("platform", "")) or None))
         if was_running or self.simulation_running:
-            self.runtime.scheduler.start(tick=current_tick)
+            self.runtime.scheduler.start(tick=current_tick, world_tick=current_world_tick)
 
     def _apply_speed_policy(self, snapshot: LayoutSnapshot) -> None:
         try:
@@ -760,6 +776,7 @@ class ControllerApplication:
                         "destination": train.get("destination", ""),
                         "consist": train.get("consist", []),
                         "locomotive_ids": list(train.get("locomotive_ids", ())),
+                        "graph_enabled": bool(train.get("graph_enabled", True)),
                     },
                 )
             )
@@ -1705,7 +1722,11 @@ class ControllerApplication:
     def layout_info(self) -> dict[str, Any]:
         """Controller positions, occupancy and executing operations, not catalogue totals."""
         block_ids = {str(block["id"]).upper() for block in self.blocks}
-        trains = [train for train in self.trains if str(train.get("block_id", "")).upper() in block_ids]
+        trains = [
+            train for train in self.trains
+            if train.get("graph_enabled", True)
+            and str(train.get("block_id", "")).upper() in block_ids
+        ]
         if not self.simulation_mode:
             reported = {motion.train_id for motion in self.runtime.track.get_snapshot().trains}
             trains = [train for train in trains if train["id"] in reported]
@@ -1753,6 +1774,10 @@ class ControllerApplication:
     def _ui_snapshot(self) -> dict[str, Any]:
         snapshot = self._snapshot()
         elapsed_seconds = int(self.runtime.track.get_snapshot().time_seconds)
+        world_elapsed_seconds = int(self._world_clock_seconds) % 86400
+        world_hours = world_elapsed_seconds // 3600
+        world_minutes = (world_elapsed_seconds % 3600) // 60
+        world_clock = f"{world_hours:02d}:{world_minutes:02d}"
         return {
             "simulation_mode": snapshot["simulation_mode"],
             "mode": "simulation" if self.simulation_mode else "manual",
@@ -1769,7 +1794,9 @@ class ControllerApplication:
                 "rate": 1,
                 "clock": f"{(elapsed_seconds // 3600) % 24:02d}:{(elapsed_seconds // 60) % 60:02d}:{elapsed_seconds % 60:02d}",
                 "elapsed_seconds": self.runtime.track.get_snapshot().time_seconds,
-                "schedule_minutes": self.runtime.scheduler.current_tick,
+                "schedule_minutes": self.runtime.scheduler.world_current_tick,
+                "world_clock": world_clock,
+                "world_clock_seconds": self._world_clock_seconds,
                 "date": "Simulation",
             },
             "tick": snapshot["tick"],
@@ -1821,7 +1848,10 @@ class ControllerApplication:
         result = []
         for block in self.blocks:
             block_id = str(block["id"])
-            occupants = [train["id"] for train in self.trains if train.get("block_id") == block_id]
+            occupants = [
+                train["id"] for train in self.trains
+                if train.get("graph_enabled", True) and train.get("block_id") == block_id
+            ]
             if not self.simulation_mode:
                 occupants = [motion.train_id for motion in self.runtime.track.get_snapshot().trains if motion.block_id == block_id]
             feedback_occupants = list(self.feedback_occupancy.get(block_id, ()))
@@ -2046,7 +2076,13 @@ class ControllerApplication:
                 "class": "Automatic" if train.get("mode") == "automatic" else "Stopped" if train.get("mode") in {"stopped", "safe", "stop"} else "Manual",
                 "status": "Stopped" if train.get("mode") in {"stopped", "safe", "stop"} else "Running" if train.get("speed", 0) else "Ready",
                 "speed": train.get("speed", 0),
-                "position": train.get("block_id", "—") if self.simulation_mode or any(m.train_id == train["id"] for m in self.runtime.track.get_snapshot().trains) else "—",
+                "position": (
+                    "Off graph" if not train.get("graph_enabled", True)
+                    else train.get("block_id", "—")
+                    if self.simulation_mode or any(m.train_id == train["id"] for m in self.runtime.track.get_snapshot().trains)
+                    else "—"
+                ),
+                "graph_enabled": bool(train.get("graph_enabled", True)),
                 "route": train.get("route", []),
                 "destination_block_id": train.get("destination_block_id"),
                 "origin": train.get("origin", "Layout"),
@@ -2093,16 +2129,29 @@ class ControllerApplication:
                 return self._ui_snapshot()
             if self.runtime is not None:
                 self.runtime.tick(safe_steps)
-                schedule_steps = safe_steps
-                if elapsed_seconds is not None:
-                    # Timetable service uses minute ticks. The shared 10 Hz
-                    # motion clock must not advance a timetable minute per frame.
+                if elapsed_seconds is None:
+                    self._world_clock_seconds += safe_steps * 60
+                    if self.runtime.scheduler.running:
+                        self.runtime.scheduler.advance(safe_steps)
+                        schedule_events = self.runtime.scheduler.advance_world(safe_steps)
+                    else:
+                        schedule_events = ()
+                else:
+                    # One real second advances the model world by one minute.
+                    # That produces a 24-minute model day while the simulation
+                    # clock continues to show ordinary elapsed seconds.
+                    self._world_clock_seconds += max(0.0, elapsed_seconds) * 60
                     schedule_steps = 0
                     if self.runtime.scheduler.running:
                         self._scheduler_remainder_seconds += elapsed_seconds
                         schedule_steps = int((self._scheduler_remainder_seconds + 1e-9) // 60)
                         self._scheduler_remainder_seconds -= schedule_steps * 60
-                schedule_events = self.runtime.scheduler.advance(schedule_steps) if self.runtime.scheduler.running else ()
+                        # Keep the legacy simulation-minute counter available
+                        # for explicit diagnostics and existing integrations.
+                        self.runtime.scheduler.advance(schedule_steps)
+                    world_target_tick = int(self._world_clock_seconds // 60)
+                    world_steps = max(0, world_target_tick - self.runtime.scheduler.world_current_tick)
+                    schedule_events = self.runtime.scheduler.advance_world(world_steps) if self.runtime.scheduler.running else ()
                 for schedule_event in schedule_events:
                     state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
                     schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]
@@ -2602,6 +2651,7 @@ class ControllerApplication:
                     "speed": 0,
                     "requested_speed_kmh": 0,
                     "target_coordinate": None,
+                    "graph_enabled": True,
                 })
                 self.events.append({
                     "type": "train_placed_on_track",
@@ -2943,6 +2993,38 @@ class ControllerApplication:
                 if "number" in updates and str(updates["number"]).strip().isdigit():
                     train["address"] = int(updates["number"])
                 self._sync_runtime_from_ui()
+            elif kind in {"set_train_graph_membership", "set_train_graph", "toggle_train_graph"}:
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((item for item in self.trains if item["id"] == train_id), None)
+                if train is None:
+                    raise ValueError(f"Unknown train: {train_id}")
+                enabled = bool(payload.get("enabled", payload.get("on_graph", True)))
+                if not enabled:
+                    motion = next(
+                        (item for item in self.runtime.track.get_snapshot().trains if item.train_id == train_id),
+                        None,
+                    ) if self.runtime is not None else None
+                    control = self.runtime.dispatcher.trains.get(train_id) if self.runtime is not None else None
+                    if (
+                        float(train.get("speed", 0) or 0) > 0
+                        or (control is not None and control.desired_speed > 0)
+                        or (motion is not None and (motion.speed > 0 or motion.target_speed > 0))
+                    ):
+                        raise ValueError("stop the train before removing it from the node graph")
+                    train["route"] = []
+                    train["target_coordinate"] = None
+                    train.update({
+                        "mode": ControlMode.STOPPED.value,
+                        "speed": 0,
+                        "requested_speed_kmh": 0,
+                    })
+                train["graph_enabled"] = enabled
+                self._sync_runtime_from_ui()
+                self.events.append({
+                    "type": "train_graph_membership_changed",
+                    "train_id": train_id,
+                    "enabled": enabled,
+                })
             elif kind == "add_train":
                 train = dict(payload.get("train", {}))
                 train_id = str(train.get("id", "")).strip()
@@ -2952,6 +3034,7 @@ class ControllerApplication:
                 train.setdefault("address", None)
                 train.setdefault("mode", "manual")
                 train.setdefault("speed", 0)
+                train.setdefault("graph_enabled", True)
                 train.setdefault("block_id", self.blocks[0]["id"] if self.blocks else "B01")
                 train.setdefault("length_mm", 0)
                 train.setdefault("maxSpeed", 120)
@@ -3463,7 +3546,7 @@ class ControllerApplication:
             elif kind == "simulate_schedule":
                 if self.runtime is None:
                     raise ValueError("runtime is not available")
-                current_tick = self.runtime.scheduler.current_tick
+                current_tick = self.runtime.scheduler.world_current_tick
                 if "until_tick" in payload:
                     until_tick = int(payload["until_tick"])
                 else:
@@ -3474,7 +3557,9 @@ class ControllerApplication:
                         if tick > current_tick
                     ]
                     until_tick = min(future_ticks) if future_ticks else current_tick + 1
-                schedule_events = self.runtime.scheduler.simulate(until_tick) if self.runtime is not None else ()
+                schedule_events = self.runtime.scheduler.simulate_world(until_tick) if self.runtime is not None else ()
+                self.runtime.scheduler.current_tick = until_tick
+                self._world_clock_seconds = max(self._world_clock_seconds, until_tick * 60)
                 for schedule_event in schedule_events:
                     state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
                     schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]

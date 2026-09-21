@@ -80,7 +80,8 @@
       <div class="workspace-layout-actions"><button type="button" class="button button-soft" data-layout-action="reset-page">Reset this page</button><button type="button" class="button button-soft" data-layout-action="reset-all">Reset all pages</button><button type="button" class="button button-soft" data-layout-action="discard">Discard arrangement changes</button><button type="button" class="button button-primary" data-layout-action="save">Save arrangement</button></div>
       <p id="workspace-layout-status" class="settings-status" role="status" aria-live="polite">Loading panel arrangement…</p><button type="button" class="button button-soft" data-layout-retry hidden>Retry loading arrangement</button>`;
     // Outside the application's settings form: independent draft/save lifecycle.
-    host.insertBefore(section, root.querySelector('.settings-upload'));
+    const settingsContent = root.querySelector('.settings-content') || host;
+    settingsContent.insertBefore(section, settingsContent.querySelector('.settings-upload'));
     const query = selector => section.querySelector(selector);
     const status = query('#workspace-layout-status');
     for (const [page, label] of Object.entries(PAGE_LABELS)) {

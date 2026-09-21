@@ -80,6 +80,15 @@ def validate_workspace_layout(value: Any, current: Mapping[str, Any] | None = No
 
 DEFAULT_SETTINGS = {
     "theme": "system",
+    "interface": {
+        "density": "comfortable",
+        "show_connection_detail": True,
+        "reduce_motion": False,
+    },
+    "operations": {
+        "confirm_power_actions": False,
+        "default_simulation_rate": 1,
+    },
     "z21_host": "192.168.0.111",
     "z21_port": 21105,
     "z21_wlan_enabled": False,
@@ -106,8 +115,16 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
     if set(routing) - set(DEFAULT_SETTINGS["routing"]):
         raise ValueError("unknown routing setting")
     result["workspace_layout"] = validate_workspace_layout(value.get("workspace_layout", {}), result["workspace_layout"])
-    result.update({key: item for key, item in value.items() if key not in ("routing", "workspace_layout")})
+    result.update({key: item for key, item in value.items() if key not in ("routing", "workspace_layout", "interface", "operations")})
     result["routing"].update(routing)
+    interface = value.get("interface", {})
+    if not isinstance(interface, dict) or set(interface) - set(DEFAULT_SETTINGS["interface"]):
+        raise ValueError("interface must contain only known settings")
+    result["interface"].update(interface)
+    operations = value.get("operations", {})
+    if not isinstance(operations, dict) or set(operations) - set(DEFAULT_SETTINGS["operations"]):
+        raise ValueError("operations must contain only known settings")
+    result["operations"].update(operations)
     if result["theme"] not in ("system", "light", "dark"):
         raise ValueError("theme must be system, light, or dark")
     try:
@@ -123,6 +140,15 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
             raise ValueError(f"{key} must be an integer between {low} and {high}")
     if type(result["z21_wlan_enabled"]) is not bool:
         raise ValueError("z21_wlan_enabled must be a boolean")
+    if result["interface"]["density"] not in ("comfortable", "compact"):
+        raise ValueError("interface.density must be comfortable or compact")
+    for key in ("show_connection_detail", "reduce_motion"):
+        if type(result["interface"][key]) is not bool:
+            raise ValueError(f"interface.{key} must be a boolean")
+    if type(result["operations"]["confirm_power_actions"]) is not bool:
+        raise ValueError("operations.confirm_power_actions must be a boolean")
+    if type(result["operations"]["default_simulation_rate"]) is not int or result["operations"]["default_simulation_rate"] not in (1, 5, 15, 60):
+        raise ValueError("operations.default_simulation_rate must be one of 1, 5, 15, or 60")
     if type(result["routing"]["adaptive"]) is not bool:
         raise ValueError("routing.adaptive must be a boolean")
     for key in ("busy_interval_ms", "idle_interval_ms"):

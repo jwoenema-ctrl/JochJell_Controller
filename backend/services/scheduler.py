@@ -45,6 +45,7 @@ class TimetableService:
 
     def __init__(self) -> None:
         self.current_tick = 0
+        self.world_current_tick = 0
         self._stops: dict[str, ScheduleStop] = {}
         self._running = False
 
@@ -78,13 +79,17 @@ class TimetableService:
         self._stops.clear()
         self.reset()
 
-    def start(self, *, tick: int | None = None) -> None:
-        """Start advancing from the current tick or an explicit tick."""
+    def start(self, *, tick: int | None = None, world_tick: int | None = None) -> None:
+        """Start advancing from the current tick or explicit schedule/world ticks."""
 
         if tick is not None:
             if tick < 0:
                 raise ValueError("tick cannot be negative")
             self.current_tick = tick
+        if world_tick is not None:
+            if world_tick < 0:
+                raise ValueError("world_tick cannot be negative")
+            self.world_current_tick = world_tick
         self._running = True
 
     def pause(self) -> None:
@@ -92,12 +97,15 @@ class TimetableService:
 
         self._running = False
 
-    def reset(self, *, tick: int = 0) -> None:
+    def reset(self, *, tick: int = 0, world_tick: int | None = None) -> None:
         """Reset time without changing the timetable."""
 
         if tick < 0:
             raise ValueError("tick cannot be negative")
+        if world_tick is not None and world_tick < 0:
+            raise ValueError("world_tick cannot be negative")
         self.current_tick = tick
+        self.world_current_tick = tick if world_tick is None else world_tick
         self._running = False
 
     def advance(self, count: int = 1) -> tuple[ScheduleEvent, ...]:
@@ -112,6 +120,19 @@ class TimetableService:
         return self.events_between(previous, self.current_tick)
 
     tick = advance
+
+    def advance_world(self, count: int = 1) -> tuple[ScheduleEvent, ...]:
+        """Advance the accelerated model-world clock by timetable minutes."""
+
+        if count < 0:
+            raise ValueError("count cannot be negative")
+        if not self._running or count == 0:
+            return ()
+        previous = self.world_current_tick
+        self.world_current_tick += count
+        return self.events_between(previous, self.world_current_tick)
+
+    world_tick = advance_world
 
     def events_at(self, tick: int) -> tuple[ScheduleEvent, ...]:
         """Return all arrival/departure events exactly at a tick."""
@@ -137,6 +158,17 @@ class TimetableService:
             for event in self.events_at(tick)
         ]
         return tuple(events)
+
+    def simulate_world(self, until_tick: int) -> tuple[ScheduleEvent, ...]:
+        """Run the model-world timetable until an absolute world minute."""
+
+        if until_tick < self.world_current_tick:
+            raise ValueError("until_tick cannot be before world_current_tick")
+        was_running = self._running
+        self._running = True
+        events = self.advance_world(until_tick - self.world_current_tick)
+        self._running = was_running
+        return events
 
     def simulate(self, until_tick: int) -> tuple[ScheduleEvent, ...]:
         """Run a deterministic schedule simulation until an absolute tick."""

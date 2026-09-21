@@ -11,7 +11,7 @@
     track_power: true,
     connection: { connected: false, simulated: true, label: 'Simulation fallback', detail: 'Local sample state' },
     feedback: { healthy: true, error: '', mapped_contacts: 0 },
-    simulation: { running: true, rate: 1, clock: '10:42:16', date: 'Tuesday · 14 May' },
+    simulation: { running: true, rate: 1, clock: '10:42:16', world_clock: '00:00', date: 'Tuesday · 14 May' },
     layout: {
       name: 'West yard',
       blocks: [
@@ -100,6 +100,7 @@
     editingScheduleId: null,
     editingRouteId: null,
     routeEditorDirty: false,
+    routeFlow: [],
     editingTrainData: null,
     scanViewer: null,
     selectedScanId: 'sample-yard',
@@ -117,7 +118,8 @@
     pinboardTrainDrag: null,
     automationDraft: { id: null, name: 'New train routine', trainId: '', blocks: [] },
     automationSelectedBlockId: null,
-    automationPrograms: []
+    automationPrograms: [],
+    routeFlowSelectedId: null
   };
   app.state.trains.forEach((train) => {
     if (train.length_mm == null && Number.isFinite(Number(train.length))) train.length_mm = Number(train.length) * 1000;
@@ -204,7 +206,7 @@
     });
   }
 
-  const DEFAULT_SETTINGS = { theme: 'system', z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
+  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1 }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
   app.settings = clone(DEFAULT_SETTINGS);
   app.settingsDirty = false;
   app.settingsLoaded = false;
@@ -508,6 +510,13 @@
     $('meta[name="theme-color"]').content = resolved === 'dark' ? '#212121' : '#ffffff';
   }
 
+  function applyInterfaceSettings(settings) {
+    const interfaceSettings = settings?.interface || DEFAULT_SETTINGS.interface;
+    document.body.dataset.density = interfaceSettings.density || 'comfortable';
+    document.body.dataset.connectionDetail = interfaceSettings.show_connection_detail === false ? 'hidden' : 'visible';
+    document.documentElement.dataset.reduceMotion = interfaceSettings.reduce_motion ? 'true' : 'false';
+  }
+
   function schedulePolling() {
     window.clearTimeout(app.pollTimer);
     app.pollTimer = window.setTimeout(async () => {
@@ -519,6 +528,13 @@
     const settings = app.settings;
     $('#setting-theme').value = settings.theme;
     $('#setting-ui-refresh').value = settings.ui_refresh_ms / 1000;
+    $('#setting-interface-density').value = settings.interface.density;
+    $('#setting-show-connection-detail').checked = settings.interface.show_connection_detail;
+    $('#setting-reduce-motion').checked = settings.interface.reduce_motion;
+    $('#setting-confirm-power-actions').checked = settings.operations.confirm_power_actions;
+    $('#setting-default-simulation-rate').value = String(settings.operations.default_simulation_rate);
+    app.simRate = Number(settings.operations.default_simulation_rate) || 1;
+    applyInterfaceSettings(settings);
     $('#setting-z21-host').value = settings.z21_host;
     $('#setting-z21-port').value = settings.z21_port;
     $('#setting-z21-wlan').checked = Boolean(settings.z21_wlan_enabled);
@@ -615,11 +631,11 @@
   async function loadAppSettings() {
     try {
       const response = await fetchJson('/api/settings');
-      app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
+      app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, interface: { ...DEFAULT_SETTINGS.interface, ...(response.settings || {}).interface }, operations: { ...DEFAULT_SETTINGS.operations, ...(response.settings || {}).operations }, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
       app.settingsLoaded = true;
       workspaceLayout?.receiveSettings(response.settings);
       if (!app.settingsDirty) {
-        renderSettings(); applyTheme(app.settings.theme);
+        renderSettings(); applyTheme(app.settings.theme); applyInterfaceSettings(app.settings);
         $('#settings-save-status').textContent = 'Preferences are up to date.';
       }
       showSettingsRuntime(response.runtime);
@@ -638,16 +654,18 @@
       z21_port: Number($('#setting-z21-port').value),
       z21_wlan_enabled: $('#setting-z21-wlan').checked,
       ui_refresh_ms: Number($('#setting-ui-refresh').value) * 1000,
+      interface: { density: $('#setting-interface-density').value, show_connection_detail: $('#setting-show-connection-detail').checked, reduce_motion: $('#setting-reduce-motion').checked },
+      operations: { confirm_power_actions: $('#setting-confirm-power-actions').checked, default_simulation_rate: Number($('#setting-default-simulation-rate').value) },
       routing: { adaptive: $('#setting-routing-adaptive').checked, busy_interval_ms: Number($('#setting-routing-busy').value) * 1000, idle_interval_ms: Number($('#setting-routing-idle').value) * 1000 }
     };
     button.disabled = true;
     $('#settings-save-status').textContent = 'Saving preferences…';
     try {
       const response = await fetchJson('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
-      app.settings = response.settings;
+      app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, interface: { ...DEFAULT_SETTINGS.interface, ...(response.settings || {}).interface }, operations: { ...DEFAULT_SETTINGS.operations, ...(response.settings || {}).operations }, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
       workspaceLayout?.receiveSettings(response.settings);
       app.settingsLoaded = true; app.settingsDirty = false;
-      applyTheme(app.settings.theme); renderSettings(); schedulePolling(); showSettingsRuntime(response.runtime);
+      applyTheme(app.settings.theme); applyInterfaceSettings(app.settings); renderSettings(); schedulePolling(); showSettingsRuntime(response.runtime);
       $('#settings-save-status').textContent = 'Saved on this controller.';
       showToast('Settings saved', 'success');
     } catch (error) {
@@ -1238,6 +1256,7 @@
     const genericLabel = !connection.label || /^(Z21 connected|Controller online)$/i.test(connection.label);
     $('#connection-label').textContent = connectedViaWlan && genericLabel ? 'Z21 via WLAN' : connection.label || (connection.connected ? 'Controller online' : 'Simulation fallback');
     $('#connection-detail').textContent = connection.detail || '';
+    $('#connection-detail').hidden = app.settings.interface.show_connection_detail === false;
     const feedback = app.state.feedback || {};
     const feedbackFailed = feedback.healthy === false;
     $('#health-score').textContent = feedbackFailed ? 'Check' : connection.simulated ? 'Simulation' : connection.connected ? 'Online' : 'Offline';
@@ -1270,6 +1289,8 @@
     $('#speed-command-status').textContent = `${train.actual_speed_kmh == null ? 'Commanded' : 'Actual'} ${Math.round(Number(train.actual_speed_kmh ?? train.speed) || 0)} km/h${train.speed_limit_kmh == null ? '' : ` · limit ${train.speed_limit_kmh} km/h`} · auto-applies`;
     renderSelectedTrainFunctions(train);
     $('#simulation-clock').textContent = app.state.simulation.clock || '00:00:00';
+    $('#world-clock').textContent = app.state.simulation.world_clock || '00:00';
+    $('#world-clock-rate').textContent = '1 real min = 1 world hour';
     $('#simulation-date').textContent = app.state.simulation.date || 'Simulation date';
     $('#simulation-rate').textContent = app.simRate === 1 ? 'Real time' : `Real time · ${app.simRate}× step`;
     $('#simulation-state').textContent = app.state.simulation.running ? 'RUNNING' : 'PAUSED';
@@ -1485,7 +1506,7 @@
       const x = Number(turntable.x || 0); const y = Number(turntable.y || 0);
       return `<g class="turntable-node" data-turntable-id="${escapeHtml(turntable.id)}" tabindex="0" role="button" aria-label="Align turntable ${escapeHtml(turntable.name || turntable.id)}"><circle cx="${x}" cy="${y}" r="18"></circle><line x1="${x - 13}" y1="${y}" x2="${x + 13}" y2="${y}"></line><text class="meta" x="${x + 23}" y="${y + 3}">${escapeHtml(turntable.name || turntable.id)}</text></g>`;
     }).join('');
-    const markers = app.state.trains.map((train) => {
+    const markers = app.state.trains.filter((train) => train.graph_enabled !== false).map((train) => {
       const motion = train.motion || {};
       const from = blockMap[String(motion.from_block_id || motion.block_id || train.position || '').toLowerCase()];
       if (!from) return '';
@@ -1613,6 +1634,9 @@
     app.pinboardPlacementSelection = select.value;
     const button = $('#place-pinboard-train');
     if (button) button.disabled = !select.value;
+    const removeButton = $("#remove-pinboard-train");
+    const selectedTrain = (trains || []).find((train) => train.id === String(select.value || "").replace(/^train:/, ""));
+    if (removeButton) removeButton.disabled = !selectedTrain || selectedTrain.graph_enabled === false;
     const status = $('#pinboard-placement-status');
     if (status) status.textContent = app.pendingPinboardTrain ? 'Click a rail to place the selected vehicle.' : 'Choose a train or locomotive, then click a rail.';
   }
@@ -1642,6 +1666,28 @@
     app.pendingPinboardTrain = selection;
     renderPinboardTrainPicker();
     showToast('Click a rail to place the selected vehicle.', 'success');
+  }
+
+  async function removeSelectedTrainFromGraph() {
+    const selection = $("#pinboard-train-select")?.value || app.pinboardPlacementSelection;
+    const trainId = selection && selection.startsWith("train:") ? selection.slice(6) : "";
+    if (!trainId) {
+      showToast("Choose a registered train first.", "warning");
+      return;
+    }
+    const train = (app.state.trains || []).find((item) => item.id === trainId);
+    if (!train) return;
+    if (train.graph_enabled === false) {
+      showToast("That train is already registry-only.", "warning");
+      return;
+    }
+    if (!window.confirm("Remove " + (train.name || train.id) + " from the node graph? It will stay in the train registry.")) return;
+    const response = await sendCommand({ type: "set_train_graph_membership", train_id: trainId, enabled: false });
+    if (response) {
+      app.pendingPinboardTrain = null;
+      renderPinboardTrainPicker();
+      showToast((train.name || train.id) + " removed from the node graph.", "success");
+    }
   }
 
   async function placePinboardTrainAtPoint(coordinate) {
@@ -1705,7 +1751,7 @@
       const x = Number(waypoint.x || 0); const y = Number(waypoint.y || 0);
       return '<g class="pinboard-spline-point" data-waypoint-id="' + escapeHtml(waypoint.id) + '" tabindex="0" role="button" aria-label="Spline control point ' + escapeHtml(waypoint.name || waypoint.id) + '"><circle cx="' + x + '" cy="' + y + '" r="6"></circle><text x="' + (x + 11) + '" y="' + (y - 9) + '">' + escapeHtml(waypoint.name || waypoint.id) + '</text><title>' + escapeHtml(waypoint.name || waypoint.id) + ' · X ' + x.toFixed(1) + ' · Y ' + y.toFixed(1) + '</title></g>';
     }).join('');
-    const trainMarkup = app.state.trains.map((train) => {
+    const trainMarkup = app.state.trains.filter((train) => train.graph_enabled !== false).map((train) => {
       const point = pinboardTrainPoint(train, blockMap, edges);
       if (!point) return '';
       const angle = Math.atan2(point.dy, point.dx) * 180 / Math.PI;
@@ -2430,9 +2476,69 @@
     }, []);
   }
 
+  function routeFlowBlock(type, value) {
+    const id = `route-flow-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    return type === 'routine' ? { id, type, program_id: value } : { id, type: 'node', node_id: String(value || '').toUpperCase() };
+  }
+
+  function routeFlowNodeIds(flow = app.routeFlow) {
+    return (Array.isArray(flow) ? flow : [])
+      .filter((block) => (block.type || block.kind) === 'node')
+      .map((block) => String(block.node_id || block.value || '').trim().toUpperCase())
+      .filter(Boolean);
+  }
+
+  function renderRouteFlow() {
+    const nodeCatalogue = $('#route-node-catalogue');
+    const routineCatalogue = $('#route-routine-catalogue');
+    const flow = $('#route-flow');
+    const empty = $('#route-flow-empty');
+    const count = $('#route-flow-count');
+    if (!nodeCatalogue || !routineCatalogue || !flow) return;
+    const nodes = routeGraphNodes();
+    nodeCatalogue.innerHTML = `<p class="eyebrow">TRACK NODES</p>${nodes.length ? nodes.map((node) => `<button type="button" class="route-palette-button" draggable="true" data-route-palette-type="node" data-route-palette-value="${escapeHtml(node.value)}"><strong>${escapeHtml(node.label.split(' · ')[0])}</strong><small>${escapeHtml(node.value)}</small></button>`).join('') : '<p class="settings-help">No track nodes configured.</p>'}`;
+    routineCatalogue.innerHTML = `<p class="eyebrow">ROUTINES</p>${app.automationPrograms.length ? app.automationPrograms.map((program) => `<button type="button" class="route-palette-button" draggable="true" data-route-palette-type="routine" data-route-palette-value="${escapeHtml(program.id)}"><strong>${escapeHtml(program.name || program.id)}</strong><small>${escapeHtml(String((program.blocks || []).length))} action blocks</small></button>`).join('') : '<p class="settings-help">Save a routine to use it here.</p>'}`;
+    flow.innerHTML = (app.routeFlow || []).map((block, index) => {
+      const kind = block.type || block.kind;
+      const isRoutine = kind === 'routine' || kind === 'program';
+      const program = isRoutine ? app.automationPrograms.find((item) => item.id === (block.program_id || block.id)) : null;
+      const node = !isRoutine ? nodes.find((item) => item.value === String(block.node_id || block.value || '').toUpperCase()) : null;
+      const label = isRoutine ? (block.name || program?.name || block.program_id || 'Routine') : (node?.label?.split(' · ')[0] || block.node_id || 'Track node');
+      const detail = isRoutine ? `Routine · ${program ? `${(program.blocks || []).length} blocks` : 'reference'}` : `Track node · ${String(block.node_id || block.value || '').toUpperCase()}`;
+      return `<article class="route-flow-block" data-route-flow-index="${index}" data-route-flow-kind="${escapeHtml(isRoutine ? 'routine' : 'node')}" draggable="true"><span class="route-flow-index">${index + 1}</span><div class="route-flow-copy"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></div><div class="route-flow-actions"><button type="button" class="icon-button small" data-route-flow-action="up" data-route-flow-index="${index}" aria-label="Move block up">Up</button><button type="button" class="icon-button small" data-route-flow-action="down" data-route-flow-index="${index}" aria-label="Move block down">Down</button><button type="button" class="icon-button small" data-route-flow-action="delete" data-route-flow-index="${index}" aria-label="Remove block">Delete</button></div></article>`;
+    }).join('<div class="route-flow-connector" aria-hidden="true"></div>');
+    if (empty) empty.classList.toggle('is-hidden', Boolean(app.routeFlow.length));
+    if (count) count.textContent = `${app.routeFlow.length} block${app.routeFlow.length === 1 ? '' : 's'}`;
+    const nodeIds = routeFlowNodeIds();
+    if (nodeIds.length) {
+      const source = $('#route-source');
+      const target = $('#route-target');
+      if (source) source.value = nodeIds[0];
+      if (target) target.value = nodeIds[nodeIds.length - 1];
+    }
+  }
+
+  function addRouteFlowBlock(type, value) {
+    if (!value || (type !== 'node' && type !== 'routine')) return;
+    app.routeFlow.push(routeFlowBlock(type, value));
+    app.routeEditorDirty = true;
+    renderRouteFlow();
+  }
+
+  function routeFlowAction(action, index) {
+    const blocks = app.routeFlow;
+    if (!blocks[index]) return;
+    if (action === 'delete') blocks.splice(index, 1);
+    if (action === 'up' && index > 0) [blocks[index - 1], blocks[index]] = [blocks[index], blocks[index - 1]];
+    if (action === 'down' && index < blocks.length - 1) [blocks[index + 1], blocks[index]] = [blocks[index], blocks[index + 1]];
+    app.routeEditorDirty = true;
+    renderRouteFlow();
+  }
   function clearRouteEditor() {
     app.editingRouteId = null;
     app.routeEditorDirty = false;
+    app.routeFlow = [];
+    app.routeFlowSelectedId = null;
     $('#route-id').value = '';
     $('#route-id').disabled = false;
     $('#route-name').value = '';
@@ -2441,12 +2547,16 @@
     fillScheduleSelect($('#route-source'), nodes, nodes[0]?.value || '', 'No graph nodes configured');
     fillScheduleSelect($('#route-target'), nodes, nodes[1]?.value || nodes[0]?.value || '', 'No graph nodes configured');
     $('#route-status').textContent = 'Create a named path from the current layout graph.';
+    renderRouteFlow();
   }
 
   function openRouteEditor(route) {
     const current = route || {};
     app.editingRouteId = current.id || null;
     app.routeEditorDirty = false;
+    app.routeFlow = Array.isArray(current.flow) && current.flow.length
+      ? clone(current.flow)
+      : (Array.isArray(current.node_ids) ? current.node_ids : [current.source_block_id || current.source, current.target_block_id || current.target]).filter(Boolean).map((nodeId) => routeFlowBlock('node', nodeId));
     $('#route-id').value = current.id || '';
     $('#route-id').disabled = Boolean(current.id);
     $('#route-name').value = current.name || '';
@@ -2467,6 +2577,7 @@
     const trains = (app.state.trains || []).map((train) => ({ value: train.id, label: `${train.name || train.id} · #${train.number || '—'}` }));
     fillScheduleSelect($('#route-train'), trains, app.selectedTrainId, 'No trains configured');
     if (!app.routeEditorDirty && !app.editingRouteId && !$('#route-name').value) clearRouteEditor();
+    renderRouteFlow();
     list.innerHTML = routes.length ? routes.map((route) => {
       const path = Array.isArray(route.node_ids) ? route.node_ids.join(' → ') : `${route.source_block_id} → ${route.target_block_id}`;
       return `<div class="route-row" data-route-id="${escapeHtml(route.id)}"><span class="route-row-main"><strong>${escapeHtml(route.name || route.id)}</strong><small>${escapeHtml(route.id)} · ${escapeHtml(path)}</small></span><span class="route-row-meta">${escapeHtml(route.algorithm || 'a_star')}${route.enabled === false ? ' · disabled' : ''}</span><span class="route-row-actions"><button type="button" class="icon-button small" data-route-action="edit" title="Edit route">✎</button><button type="button" class="icon-button small" data-route-action="delete" title="Delete route">×</button></span></div>`;
@@ -2476,11 +2587,17 @@
   async function saveRouteEditor() {
     const id = $('#route-id').value.trim();
     const name = $('#route-name').value.trim();
-    const source = $('#route-source').value;
-    const target = $('#route-target').value;
+    const flowNodes = routeFlowNodeIds();
+    const source = flowNodes[0] || $('#route-source').value;
+    const target = flowNodes[flowNodes.length - 1] || $('#route-target').value;
     if (!id || !name || !source || !target) {
-      $('#route-status').textContent = 'Route ID, name, source, and target are required.';
-      showToast('Complete the route fields first.', 'warning');
+      $('#route-status').textContent = 'Route ID, name, and at least two track nodes are required.';
+      showToast('Add a route name and two track nodes first.', 'warning');
+      return;
+    }
+    if (app.routeFlow.length && flowNodes.length < 2) {
+      $('#route-status').textContent = 'Add at least two track node blocks to define the path.';
+      showToast('A route needs a start and end track node.', 'warning');
       return;
     }
     if (source === target) {
@@ -2489,6 +2606,8 @@
       return;
     }
     const route = { id, name, source_block_id: source, target_block_id: target, algorithm: $('#route-algorithm').value, enabled: true };
+    if (app.routeFlow.length) route.flow = app.routeFlow.map((block) => { const { id: _blockId, ...savedBlock } = block; return savedBlock; });
+    if (flowNodes.length >= 2) route.node_ids = flowNodes;
     const editing = app.editingRouteId;
     if (editing) {
       const existing = app.state.routes.find((item) => item.id === editing);
@@ -2505,7 +2624,6 @@
     app.routeEditorDirty = false;
     renderRoutes();
   }
-
   async function deleteRoute(routeId) {
     const route = app.state.routes.find((item) => item.id === routeId);
     if (!route || !window.confirm(`Delete ${route.name || route.id}?`)) return;
@@ -3232,6 +3350,10 @@
     const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
     const remainder = String(seconds % 60).padStart(2, '0');
     app.state.simulation.clock = `${hours}:${minutes}:${remainder}`;
+    const worldParts = String(app.state.simulation.world_clock || '00:00').split(':').map(Number);
+    let worldMinutes = (worldParts[0] * 60) + worldParts[1] + app.simRate * 60;
+    worldMinutes %= 1440;
+    app.state.simulation.world_clock = String(Math.floor(worldMinutes / 60)).padStart(2, '0') + ':' + String(worldMinutes % 60).padStart(2, '0');
     app.state.schedules.slice(0, 1).forEach((schedule) => { if (schedule.state === 'Boarding') schedule.state = 'Departing'; });
     renderSidebar(); renderSchedules();
   }
@@ -3304,6 +3426,10 @@
 
   async function toggleTrackPower() {
     if (app.powerPending) return;
+    if (app.settings.operations.confirm_power_actions) {
+      const nextState = app.state.track_power === false ? 'on' : 'off';
+      if (!window.confirm('Change track power ' + nextState + '? This affects every train on the layout.')) return;
+    }
     cancelSpeedDraft();
     const enabled = app.state.track_power === false;
     app.powerPending = true;
@@ -3407,6 +3533,10 @@
     $('#app-settings-form').addEventListener('submit', saveAppSettings);
     $('#app-settings-form').addEventListener('input', () => { app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; renderWlanPresentation(app.settingsRuntime); updateNativeControls(); });
     $('#setting-theme').addEventListener('change', (event) => applyTheme(event.target.value));
+    const previewInterface = () => applyInterfaceSettings({ interface: { density: $('#setting-interface-density').value, show_connection_detail: $('#setting-show-connection-detail').checked, reduce_motion: $('#setting-reduce-motion').checked } });
+    $('#setting-interface-density').addEventListener('change', previewInterface);
+    $('#setting-show-connection-detail').addEventListener('change', previewInterface);
+    $('#setting-reduce-motion').addEventListener('change', previewInterface);
     $('#setting-routing-adaptive').addEventListener('change', (event) => { $('#setting-routing-idle').disabled = !event.target.checked; });
     $('#settings-discard').addEventListener('click', () => { app.settingsDirty = false; renderSettings(); applyTheme(app.settings.theme); $('#settings-save-status').textContent = app.settingsLoaded ? 'Changes discarded.' : 'Controller settings have not loaded yet.'; });
     $('#settings-scan-library').addEventListener('click', (event) => {
@@ -3567,6 +3697,13 @@
     $('#cancel-route').addEventListener('click', clearRouteEditor);
     $('#apply-route').addEventListener('click', applySelectedRoute);
     ['#route-id', '#route-name', '#route-source', '#route-target', '#route-algorithm'].forEach((selector) => $(selector).addEventListener('input', () => { app.routeEditorDirty = true; }));
+    $('#route-node-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (button) addRouteFlowBlock(button.dataset.routePaletteType, button.dataset.routePaletteValue); });
+    $('#route-routine-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (button) addRouteFlowBlock(button.dataset.routePaletteType, button.dataset.routePaletteValue); });
+    ['#route-node-catalogue', '#route-routine-catalogue'].forEach((selector) => $(selector).addEventListener('dragstart', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (!button) return; event.dataTransfer.setData('application/x-route-flow', JSON.stringify({ type: button.dataset.routePaletteType, value: button.dataset.routePaletteValue })); event.dataTransfer.effectAllowed = 'copy'; }));
+    $('#route-flow-dropzone').addEventListener('dragover', (event) => { event.preventDefault(); $('#route-flow-dropzone').classList.add('is-dragging'); });
+    $('#route-flow-dropzone').addEventListener('dragleave', () => $('#route-flow-dropzone').classList.remove('is-dragging'));
+    $('#route-flow-dropzone').addEventListener('drop', (event) => { event.preventDefault(); $('#route-flow-dropzone').classList.remove('is-dragging'); const raw = event.dataTransfer.getData('application/x-route-flow'); if (!raw) return; try { const item = JSON.parse(raw); addRouteFlowBlock(item.type, item.value); } catch { showToast('That flow block could not be added.', 'warning'); } });
+    $('#route-flow').addEventListener('click', (event) => { const button = event.target.closest('[data-route-flow-action]'); if (button) routeFlowAction(button.dataset.routeFlowAction, Number(button.dataset.routeFlowIndex)); });
     $('#route-list').addEventListener('click', (event) => {
       const row = event.target.closest('[data-route-id]');
       const action = event.target.closest('[data-route-action]')?.dataset.routeAction;
