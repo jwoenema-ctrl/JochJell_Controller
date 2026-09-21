@@ -1471,7 +1471,7 @@ class ControllerApplication:
         schedule["dispatch_mode"] = raw_mode
 
     def _schedule_route_target(self, schedule: dict[str, Any], stop_id: str, train_id: str) -> dict[str, Any] | None:
-        """Bind a saved route to the assigned train when a service departs."""
+        """Bind and start a saved route when the assigned service departs."""
 
         route_id = str(schedule.get("route_id", "") or "").strip()
         if not route_id:
@@ -1496,6 +1496,7 @@ class ControllerApplication:
                 result = self.runtime.track.set_train_route(canonical_train_id, path)
                 if hasattr(result, "accepted") and not result.accepted:
                     raise ValueError(result.detail or "scheduled route was rejected")
+            self._start_scheduled_movement(canonical_train_id, train)
             train["destination_block_id"] = path[-1]
             train["route"] = list(path)
             self._publish_domain_event(RouteChanged(train_id=canonical_train_id, route=path))
@@ -1512,6 +1513,29 @@ class ControllerApplication:
         })
         return target
 
+    def _start_scheduled_movement(self, train_id: str, train: dict[str, Any]) -> None:
+        """Put a departing scheduled train in automatic control and command motion.
+
+        A route target alone only updates the planner. The dispatcher must also
+        receive a non-zero automatic speed so both the simulator and a physical
+        Z21 train actually start moving.
+        """
+
+        if self.runtime is None:
+            raise ValueError("controller runtime unavailable")
+        if not self.simulation_mode and not self.track_power:
+            raise ValueError("switch track power on before scheduled movement")
+        if str(train.get("mode", "manual")).lower() != ControlMode.AUTOMATIC.value:
+            result = self.runtime.mode_switcher.switch(train_id, ControlMode.AUTOMATIC)
+            if not result.accepted:
+                raise ValueError(f"scheduled automatic movement was rejected: {train_id}")
+            train["mode"] = ControlMode.AUTOMATIC.value
+        maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
+        requested = float(train.get("requested_speed_kmh", train.get("speed", 10)) or 10)
+        speed = max(0.0, min(1.0, requested / maximum))
+        result = self.runtime.dispatcher.automatic_speed(train_id, speed)
+        if hasattr(result, "accepted") and not result.accepted:
+            raise ValueError(result.detail or "scheduled automatic movement was rejected")
     def _schedule_coordinate_target(self, schedule: dict[str, Any], stop_id: str, train_id: str) -> dict[str, Any] | None:
         """Plan a calibrated destination for a timetable departure.
 

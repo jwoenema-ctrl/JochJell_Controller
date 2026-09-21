@@ -66,6 +66,44 @@ class ConnectionApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_scheduled_saved_route_departure_sends_physical_movement(self):
+        transport = Mock()
+        connected = ConnectionStatus(ConnectionState.CONNECTED, "fake-z21")
+        transport.check_connection.return_value = connected
+        transport.connection_status.return_value = connected
+        transport.send_dataset.return_value = CommandResult(True, "z21", "accepted")
+        track = Z21TrackSystem(transport)
+        runtime = ControllerRuntime._compose(track, database_path=":memory:", connection=ConnectionChecker(track))
+        app = ControllerApplication(
+            runtime=runtime,
+            z21_host="fake-z21",
+            simulation_mode=False,
+            blocks=[{"id": "A", "neighbor_ids": ["B"]}, {"id": "B", "neighbor_ids": ["A"]}],
+            trains=[{"id": "engine", "name": "Engine", "address": 7, "block_id": "A", "mode": "stopped", "speed": 0}],
+            turnouts=[], schedules=[],
+            routes=[{"id": "route-1", "name": "Yard route", "node_ids": ["A", "B"], "enabled": True}],
+        )
+        try:
+            app.stop_motion_clock()
+            app.command({"type": "track_power", "enabled": True})
+            app.command({"type": "add_schedule", "schedule": {
+                "id": "physical-route-departure", "time": "00:01", "service": "Yard move",
+                "number": "7", "train_id": "engine", "station_id": "ST01",
+                "dispatch_mode": "route", "route_id": "route-1",
+            }})
+            app.runtime.scheduler.reset(tick=0)
+            app.runtime.scheduler.start()
+            transport.reset_mock()
+            app.tick(2)
+            movement_packets = [
+                call for call in transport.send_dataset.call_args_list
+                if call.kwargs.get("command") == "set_loco_drive"
+            ]
+            self.assertTrue(movement_packets, "scheduled departure did not send a Z21 movement packet")
+            self.assertGreater(track.get_effective_speed("engine"), 0)
+            self.assertEqual(app.state()["trains"][0]["scheduled_route_id"], "route-1")
+        finally:
+            app.close()
     def test_default_override_and_clear_are_directed(self):
         self.limit(speed_limit_kmh=40)
         state = self.limit(train_id="engine", speed_limit_kmh=20)
