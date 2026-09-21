@@ -62,7 +62,7 @@ async function shot(page, name) {
   await page.waitForFunction(() => document.querySelector('#train-panel').classList.contains('is-hidden') === false);
   await page.waitForFunction(() => {
     const navigation = document.querySelector('.trains-subnav')?.getBoundingClientRect();
-    const panel = document.querySelector('#train-panel')?.getBoundingClientRect();
+    const panel = document.querySelector('#train-editor-panel')?.getBoundingClientRect();
     return navigation && panel && panel.top >= navigation.bottom - 1;
   });
   assert.equal(await page.locator('.trains-subnav').evaluate(node => getComputedStyle(node).position), 'sticky', 'Train navigation should stay above its selected panel');
