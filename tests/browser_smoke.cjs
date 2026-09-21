@@ -47,25 +47,10 @@ async function shot(page, name) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light' });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  await page.addInitScript(() => {
-    window.__browserUnhandledRejections = [];
-    window.addEventListener('unhandledrejection', event => {
-      const reason = event.reason;
-      window.__browserUnhandledRejections.push(String(reason && (reason.stack || reason.message) || reason));
-    });
-  });
   const stateBootstrap = page.waitForResponse(response => response.url().endsWith('/api/state') && response.ok(), { timeout: 30000 });
   await page.goto(url);
   await stateBootstrap;
-  try {
-    await page.waitForFunction(() => document.querySelector('.train-row')?.textContent.includes('ICE 3'), { timeout: 30000 });
-  } catch (error) {
-    const unhandled = await page.evaluate(() => window.__browserUnhandledRejections || []);
-    const trainList = await page.locator('#train-list').textContent().catch(() => '<missing>');
-    const syncMessage = await page.locator('#sync-message').textContent().catch(() => '<missing>');
-    console.error(`Smoke-test bootstrap snapshot: sync=${syncMessage}; trains=${trainList}`);
-    throw new Error(`${error.message}; browser errors: ${errors.join(' | ') || 'none'}; unhandled rejections: ${unhandled.join(' | ') || 'none'}`);
-  }
+  await page.waitForFunction(() => Array.from(document.querySelectorAll('.train-row')).some(row => row.textContent.includes('ICE 3')), { timeout: 30000 });
   assert.equal(await page.locator('#direction-reverse').isDisabled(), true, 'Automatic train direction is locked');
   await page.locator('.train-row').filter({ hasText: 'ICE 3' }).click();
   await page.locator('#direction-reverse').click();
