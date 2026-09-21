@@ -47,11 +47,10 @@ async function shot(page, name) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light' });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  const stateBootstrap = page.waitForResponse(response => response.url().endsWith('/api/state') && response.ok(), { timeout: 30000 });
   await page.goto(url);
-  await page.waitForFunction(() => {
-    const message = document.querySelector('#sync-message')?.textContent || '';
-    return /online|state refreshed/i.test(message);
-  });
+  await stateBootstrap;
+  await page.waitForFunction(() => document.querySelector('.train-row')?.textContent.includes('ICE 3'), { timeout: 30000 });
   assert.equal(await page.locator('#direction-reverse').isDisabled(), true, 'Automatic train direction is locked');
   await page.locator('.train-row').filter({ hasText: 'ICE 3' }).click();
   await page.locator('#direction-reverse').click();
