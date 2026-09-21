@@ -48,7 +48,10 @@ async function shot(page, name) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(url);
-  await page.waitForFunction(() => document.querySelector('#sync-message').textContent.includes('online'));
+  await page.waitForFunction(() => {
+    const message = document.querySelector('#sync-message')?.textContent || '';
+    return /online|state refreshed/i.test(message);
+  });
   assert.equal(await page.locator('#direction-reverse').isDisabled(), true, 'Automatic train direction is locked');
   await page.locator('.train-row').filter({ hasText: 'ICE 3' }).click();
   await page.locator('#direction-reverse').click();

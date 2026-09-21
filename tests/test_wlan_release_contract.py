@@ -68,6 +68,7 @@ class WlanReleaseContractTests(unittest.TestCase):
             self.assertIn(required, workflow)
 
         self.assertNotIn("--clobber", workflow)
+        self.assertIn("name: JochJell-Controller-Native-Windows-x64", workflow)
         self.assertLess(
             workflow.index("Test embedded app window"),
             workflow.index("release:"),

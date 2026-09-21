@@ -97,7 +97,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: H0-Control-Desk-Native-Windows-x64
+          name: JochJell-Controller-Native-Windows-x64
           path: dist
       - name: Publish standalone Windows release assets
         shell: bash
