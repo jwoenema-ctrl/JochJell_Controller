@@ -61,6 +61,9 @@ async function shot(page, name) {
     await page.waitForFunction(() => document.querySelector('.train-row')?.textContent.includes('ICE 3'), { timeout: 30000 });
   } catch (error) {
     const unhandled = await page.evaluate(() => window.__browserUnhandledRejections || []);
+    const trainList = await page.locator('#train-list').textContent().catch(() => '<missing>');
+    const syncMessage = await page.locator('#sync-message').textContent().catch(() => '<missing>');
+    console.error(`Smoke-test bootstrap snapshot: sync=${syncMessage}; trains=${trainList}`);
     throw new Error(`${error.message}; browser errors: ${errors.join(' | ') || 'none'}; unhandled rejections: ${unhandled.join(' | ') || 'none'}`);
   }
   assert.equal(await page.locator('#direction-reverse').isDisabled(), true, 'Automatic train direction is locked');
