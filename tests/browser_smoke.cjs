@@ -50,7 +50,11 @@ async function shot(page, name) {
   const stateBootstrap = page.waitForResponse(response => response.url().endsWith('/api/state') && response.ok(), { timeout: 30000 });
   await page.goto(url);
   await stateBootstrap;
-  await page.waitForFunction(() => document.querySelector('.train-row')?.textContent.includes('ICE 3'), { timeout: 30000 });
+  try {
+    await page.waitForFunction(() => document.querySelector('.train-row')?.textContent.includes('ICE 3'), { timeout: 30000 });
+  } catch (error) {
+    throw new Error(`${error.message}; browser errors: ${errors.join(' | ') || 'none'}`);
+  }
   assert.equal(await page.locator('#direction-reverse').isDisabled(), true, 'Automatic train direction is locked');
   await page.locator('.train-row').filter({ hasText: 'ICE 3' }).click();
   await page.locator('#direction-reverse').click();
