@@ -47,13 +47,21 @@ async function shot(page, name) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, colorScheme: 'light' });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  await page.addInitScript(() => {
+    window.__browserUnhandledRejections = [];
+    window.addEventListener('unhandledrejection', event => {
+      const reason = event.reason;
+      window.__browserUnhandledRejections.push(String(reason && (reason.stack || reason.message) || reason));
+    });
+  });
   const stateBootstrap = page.waitForResponse(response => response.url().endsWith('/api/state') && response.ok(), { timeout: 30000 });
   await page.goto(url);
   await stateBootstrap;
   try {
     await page.waitForFunction(() => document.querySelector('.train-row')?.textContent.includes('ICE 3'), { timeout: 30000 });
   } catch (error) {
-    throw new Error(`${error.message}; browser errors: ${errors.join(' | ') || 'none'}`);
+    const unhandled = await page.evaluate(() => window.__browserUnhandledRejections || []);
+    throw new Error(`${error.message}; browser errors: ${errors.join(' | ') || 'none'}; unhandled rejections: ${unhandled.join(' | ') || 'none'}`);
   }
   assert.equal(await page.locator('#direction-reverse').isDisabled(), true, 'Automatic train direction is locked');
   await page.locator('.train-row').filter({ hasText: 'ICE 3' }).click();
