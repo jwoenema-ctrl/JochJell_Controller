@@ -177,7 +177,7 @@ async function shot(page, name) {
   }
   await page.locator('#route-node-picker').selectOption('B01');
   await page.locator('#route-node-catalogue .route-picker-add').click();
-  await page.locator('#route-node-picker').selectOption('B04');
+  await page.locator('#route-node-picker').selectOption('B02');
   await page.locator('#route-node-catalogue .route-picker-add').click();
   await page.locator('#save-route').click();
   await page.waitForFunction(() => document.querySelector('#route-list').textContent.includes('Smoke route'));
