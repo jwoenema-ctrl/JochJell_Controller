@@ -2686,10 +2686,11 @@
   async function deleteRoute(routeId) {
     const route = app.state.routes.find((item) => item.id === routeId);
     if (!route || !window.confirm(`Delete ${route.name || route.id}?`)) return;
+    const response = await sendCommand({ type: 'remove_route', route_id: routeId });
+    if (!response) return;
     app.state.routes = app.state.routes.filter((item) => item.id !== routeId);
     if (app.editingRouteId === routeId) clearRouteEditor();
     renderRoutes();
-    await sendCommand({ type: 'remove_route', route_id: routeId });
     showToast(`${route.name || route.id} deleted`, 'success');
   }
 

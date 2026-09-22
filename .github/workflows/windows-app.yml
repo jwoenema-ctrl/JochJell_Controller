@@ -51,7 +51,8 @@ jobs:
           $process = Start-Process -FilePath './dist/JochJell-Controller.exe' -ArgumentList '--smoke-test',"`"$report`"" -PassThru -WindowStyle Hidden
           if (-not $process.WaitForExit(60000)) { throw 'Executable test timed out' }
           if ($process.ExitCode -ne 0) { throw 'Executable test failed' }
-          if (-not (Get-Content -LiteralPath $report | ConvertFrom-Json).passed) { throw 'Executable report failed' }
+          $smoke = Get-Content -LiteralPath $report | ConvertFrom-Json
+          if (-not $smoke.passed) { $smoke | ConvertTo-Json -Depth 10; throw 'Executable report failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: JochJell-Controller-Windows-x64
@@ -65,7 +66,8 @@ jobs:
           $process = Start-Process -FilePath './dist/JochJell-Controller-Native.exe' -ArgumentList '--smoke-test',"`"$report`"" -PassThru -WindowStyle Hidden
           if (-not $process.WaitForExit(60000)) { throw 'Embedded executable test timed out' }
           if ($process.ExitCode -ne 0) { throw 'Embedded executable test failed' }
-          if (-not (Get-Content -LiteralPath $report | ConvertFrom-Json).passed) { throw 'Embedded executable report failed' }
+          $smoke = Get-Content -LiteralPath $report | ConvertFrom-Json
+          if (-not $smoke.passed) { $smoke | ConvertTo-Json -Depth 10; throw 'Embedded executable report failed' }
       - name: Package embedded Windows app
         shell: pwsh
         run: |

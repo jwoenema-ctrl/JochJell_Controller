@@ -186,7 +186,10 @@ async function shot(page, name) {
   await page.locator('#save-route').click();
   await page.waitForFunction(() => document.querySelector('#route-list').textContent.includes('Smoke route updated'));
   page.once('dialog', dialog => dialog.accept());
+  const removeRouteResponse = page.waitForResponse(response => response.url().endsWith('/api/commands') && response.request().postDataJSON()?.type === 'remove_route');
   await page.locator('#route-list [data-route-id="smoke-route"] [data-route-action="delete"]').click();
+  const removeRouteResult = await removeRouteResponse;
+  assert.equal(removeRouteResult.ok(), true, await removeRouteResult.text());
   await page.waitForFunction(() => !document.querySelector('#route-list').textContent.includes('Smoke route updated'));
   await page.getByRole('button', { name: 'Edit layout', exact: true }).click();
   assert.equal(await page.locator('#layout-info-panel').isVisible(), true);
