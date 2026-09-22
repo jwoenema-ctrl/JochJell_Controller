@@ -2,5 +2,5 @@
 
 PRODUCT_NAME = "JochJell Controller"
 PUBLISHER = "JochJell"
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 VERSION_TAG = f"v{VERSION}"

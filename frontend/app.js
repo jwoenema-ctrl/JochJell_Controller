@@ -123,6 +123,8 @@
     automationPrograms: [],
     routeFlowSelectedId: null
   };
+  const pendingRouteDeletes = new Set();
+
   app.state.trains.forEach((train) => {
     if (train.length_mm == null && Number.isFinite(Number(train.length))) train.length_mm = Number(train.length) * 1000;
   });
@@ -2633,7 +2635,7 @@
   function renderRoutes() {
     const list = $('#route-list');
     if (!list) return;
-    const routes = Array.isArray(app.state.routes) ? app.state.routes : [];
+    const routes = (Array.isArray(app.state.routes) ? app.state.routes : []).filter((route) => !pendingRouteDeletes.has(route.id));
     const nodes = routeGraphNodes();
     fillScheduleSelect($('#route-source'), nodes, $('#route-source').value, 'No graph nodes configured');
     fillScheduleSelect($('#route-target'), nodes, $('#route-target').value, 'No graph nodes configured');
@@ -2686,10 +2688,15 @@
   async function deleteRoute(routeId) {
     const route = app.state.routes.find((item) => item.id === routeId);
     if (!route || !window.confirm(`Delete ${route.name || route.id}?`)) return;
-    const response = await sendCommand({ type: 'remove_route', route_id: routeId });
-    if (!response) return;
+    if (pendingRouteDeletes.has(routeId)) return;
+    pendingRouteDeletes.add(routeId);
     app.state.routes = app.state.routes.filter((item) => item.id !== routeId);
     if (app.editingRouteId === routeId) clearRouteEditor();
+    renderRoutes();
+    const response = await sendCommand({ type: 'remove_route', route_id: routeId });
+    pendingRouteDeletes.delete(routeId);
+    if (!response) { renderRoutes(); return; }
+    app.state.routes = app.state.routes.filter((item) => item.id !== routeId);
     renderRoutes();
     showToast(`${route.name || route.id} deleted`, 'success');
   }
