@@ -170,6 +170,11 @@ async function shot(page, name) {
   await page.locator('#new-route').click();
   await page.locator('#route-id').fill('smoke-route');
   await page.locator('#route-name').fill('Smoke route');
+  for (const catalogue of ['#route-node-catalogue', '#route-routine-catalogue', '#route-sync-catalogue']) {
+    const catalogueBox = await page.locator(catalogue).boundingBox();
+    const addBox = await page.locator(`${catalogue} .route-picker-add`).boundingBox();
+    assert.ok(catalogueBox && addBox && addBox.x >= catalogueBox.x - 1 && addBox.x + addBox.width <= catalogueBox.x + catalogueBox.width + 1, `${catalogue} Add button must stay inside the flow-block field`);
+  }
   await page.locator('#route-node-picker').selectOption('B01');
   await page.locator('#route-node-catalogue .route-picker-add').click();
   await page.locator('#route-node-picker').selectOption('B04');
