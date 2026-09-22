@@ -1555,22 +1555,26 @@ class ControllerApplication:
         return target
 
     def _start_scheduled_movement(self, train_id: str, train: dict[str, Any]) -> None:
-        """Put a departing scheduled train in automatic control and command motion.
+        """Command a departing scheduled train only when it is automatic.
 
-        A route target alone only updates the planner. The dispatcher must also
-        receive a non-zero automatic speed so both the simulator and a physical
-        Z21 train actually start moving.
+        Timetable dispatch is an automatic-control instruction. It must not
+        silently take ownership of a train that the operator has selected for
+        manual control; that train can still receive the route target and wait
+        safely until its own mode is changed to automatic.
         """
 
         if self.runtime is None:
             raise ValueError("controller runtime unavailable")
         if not self.simulation_mode and not self.track_power:
             raise ValueError("switch track power on before scheduled movement")
-        if str(train.get("mode", "manual")).lower() != ControlMode.AUTOMATIC.value:
-            result = self.runtime.mode_switcher.switch(train_id, ControlMode.AUTOMATIC)
-            if not result.accepted:
-                raise ValueError(f"scheduled automatic movement was rejected: {train_id}")
-            train["mode"] = ControlMode.AUTOMATIC.value
+        control = self.runtime.dispatcher.register_train(train_id)
+        if control.mode is not ControlMode.AUTOMATIC:
+            self.events.append({
+                "type": "schedule_departure_waiting_for_automatic",
+                "train_id": train_id,
+                "mode": control.mode.value,
+            })
+            return
         maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
         requested = float(train.get("requested_speed_kmh", train.get("speed", 10)) or 10)
         speed = max(0.0, min(1.0, requested / maximum))

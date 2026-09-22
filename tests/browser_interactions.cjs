@@ -26,6 +26,14 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   assert.equal(await page.locator('.editor-tab.is-active').getAttribute('data-editor-tab'), 'datasheet');
   assert.equal(await page.locator('.editor-tab').first().textContent(), 'Data sheet');
   await page.locator('.train-row').filter({ hasText: 'ICE 3' }).click();
+  for (const mode of ['automatic', 'manual']) {
+    const modeRequest = page.waitForRequest(request => request.url().endsWith('/api/commands') && request.postDataJSON()?.type === 'set_train_mode' && request.postDataJSON()?.train_id === 't2');
+    await page.locator(`.control-mode[data-control-mode="${mode}"]`).click();
+    await modeRequest;
+  }
+  const modeState = await (await page.request.get(`http://127.0.0.1:${port}/api/state`)).json();
+  assert.equal(modeState.trains.find(train => train.id === 't1').mode, 'automatic', 'Changing the selected train mode must not change another train');
+  assert.equal(modeState.trains.find(train => train.id === 't2').mode, 'manual', 'Selected train mode should be restored independently');
   const dial = async (value, release = false) => page.locator('#speed-slider').evaluate((node, { value, release }) => { node.value = String(value); node.dispatchEvent(new Event('input', { bubbles: true })); if (release) node.dispatchEvent(new Event('change', { bubbles: true })); }, { value, release });
   await dial(12); await dial(28); await dial(43);
   await page.waitForRequest(request => request.url().endsWith('/api/commands') && request.postDataJSON()?.speed_kmh === 43);

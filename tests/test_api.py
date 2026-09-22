@@ -531,6 +531,32 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_scheduled_route_waits_for_the_assigned_train_to_be_automatic(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "add_schedule", "schedule": {
+                "id": "manual-route-departure", "time": "00:01", "service": "Manual yard move",
+                "number": "3", "train_id": "train-3", "station_id": "ST02", "platform": "P02",
+                "dispatch_mode": "route", "route_id": "r2",
+            }})
+            app.runtime.scheduler.reset(tick=0)
+            app.runtime.scheduler.start()
+            app.tick(2)
+            control = app.runtime.dispatcher.trains["train-3"]
+            self.assertEqual(control.mode.value, "manual")
+            self.assertEqual(control.automatic_speed, 0)
+            self.assertTrue(any(event["type"] == "schedule_departure_waiting_for_automatic" for event in app.state()["events"]))
+
+            app.command({"type": "set_train_mode", "train_id": "train-3", "mode": "automatic"})
+            app.runtime.scheduler.reset(tick=0)
+            app.runtime.scheduler.start()
+            app.tick(2)
+            control = app.runtime.dispatcher.trains["train-3"]
+            self.assertGreater(control.automatic_speed, 0)
+            self.assertEqual(next(item for item in app.state()["trains"] if item["id"] == "t2")["mode"], "automatic")
+        finally:
+            app.close()
     def test_schedule_departure_binds_saved_route_to_train(self) -> None:
         app = ControllerApplication.sample()
         app.stop_motion_clock()

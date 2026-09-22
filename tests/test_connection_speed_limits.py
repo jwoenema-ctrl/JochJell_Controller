@@ -86,6 +86,7 @@ class ConnectionApiTests(unittest.TestCase):
         try:
             app.stop_motion_clock()
             app.command({"type": "track_power", "enabled": True})
+            app.command({"type": "set_train_mode", "train_id": "engine", "mode": "automatic"})
             app.command({"type": "add_schedule", "schedule": {
                 "id": "physical-route-departure", "time": "00:01", "service": "Yard move",
                 "number": "7", "train_id": "engine", "station_id": "ST01",

@@ -1295,6 +1295,8 @@
   function renderSidebar() {
     const train = selectedTrain();
     if (!train) return;
+    const selectedMode = trainControlMode(train);
+    app.controlMode = selectedMode === 'stopped' ? 'safe' : selectedMode;
     const direction = String(train.direction || '').toLowerCase();
     const directionLocked = app.directionPending || app.speedSending || (speedDraft && speedDraft.speed > 0) || Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 || Number(train.motion && train.motion.requested_speed) > 0 || trainControlMode(train) === 'automatic' || app.source !== 'api';
     ['forward', 'reverse'].forEach((value) => {
@@ -3728,10 +3730,25 @@
     $('#save-layout').addEventListener('click', saveLayout);
     $('#load-layout').addEventListener('click', loadSavedLayout);
     $$('.control-mode').forEach((button) => button.addEventListener('click', () => {
-      app.controlMode = button.dataset.controlMode;
-      app.state.mode = app.controlMode;
+      const requestedMode = button.dataset.controlMode;
+      const train = selectedTrain();
+      if (requestedMode === 'safe') {
+        // Safe stop remains the explicit fleet-wide emergency action.
+        app.controlMode = 'safe';
+        renderSidebar();
+        void sendCommand({ type: 'set_mode', mode: 'stopped' });
+        return;
+      }
+      if (requestedMode === 'simulation') {
+        showToast('Simulation is controlled by the simulation clock below.', 'warning');
+        return;
+      }
+      if (!train || !['manual', 'automatic'].includes(requestedMode)) return;
+      app.controlMode = requestedMode;
+      train.mode = requestedMode;
+      train.status = trainStatusForMode(train, requestedMode);
       renderSidebar();
-      sendCommand({ type: 'set_mode', mode: app.controlMode === 'safe' ? 'stopped' : app.controlMode });
+      void sendCommand({ type: 'set_train_mode', train_id: train.id, mode: requestedMode });
     }));
     $$('.toolbar-tab').forEach((button) => button.addEventListener('click', () => {
       if (button.dataset.layoutView === 'editor' && app.workspace !== 'layout') { navigateWorkspace('layout'); return; }
