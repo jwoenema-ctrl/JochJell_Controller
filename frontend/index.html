@@ -267,6 +267,8 @@
               </div>
               <div class="automation-palette" id="automation-catalogue">
                 <button type="button" class="automation-palette-block" draggable="true" data-action-block="drive"><strong>Drive</strong><small>Set speed and hold it</small></button>
+                <button type="button" class="automation-palette-block" draggable="true" data-action-block="speed_ramp"><strong>Speed staircase</strong><small>Ramp from one speed to another</small></button>
+                <button type="button" class="automation-palette-block" draggable="true" data-action-block="travel"><strong>Travel distance</strong><small>Move a calibrated distance</small></button>
                 <button type="button" class="automation-palette-block" draggable="true" data-action-block="wait"><strong>Wait</strong><small>Pause before the next action</small></button>
                 <button type="button" class="automation-palette-block" draggable="true" data-action-block="direction"><strong>Direction</strong><small>Forward or reverse</small></button>
                 <button type="button" class="automation-palette-block" draggable="true" data-action-block="function"><strong>Function</strong><small>Lighting, horn, or decoder F0-F31</small></button>
@@ -287,7 +289,7 @@
             <aside class="automation-inspector">
               <div class="automation-inspector-heading"><p class="eyebrow">SAVED PROGRAMS</p><h3>Routines</h3></div>
               <div class="automation-program-list" id="automation-program-list" aria-live="polite"></div>
-              <div class="automation-help-card"><strong>Block tips</strong><span>Drive for 12 seconds, then add Function and switch F0 lighting off. Wait blocks create pauses without changing speed.</span></div>
+              <div class="automation-help-card"><strong>Block tips</strong><span>Use Speed staircase to make a timed linear speed change. Travel distance uses the selected train&#39;s stored motion calibration to calculate the movement time.</span></div>
             </aside>
           </div>
         </section>
@@ -361,7 +363,7 @@
           <section class="panel train-editor-panel" id="train-editor-panel">
             <div class="panel-heading">
               <div><p class="eyebrow">TRAIN PROFILE</p><h2>Settings & data sheet</h2></div>
-              <button class="icon-button small" id="close-editor" title="Collapse train editor">×</button>
+              <div class="panel-heading-actions"><button type="button" class="text-button danger-text" id="remove-train">Remove train</button><button class="icon-button small" id="close-editor" title="Collapse train editor">×</button></div>
             </div>
             <div class="editor-tabs">
               <button class="editor-tab is-active" data-editor-tab="datasheet">Data sheet</button>

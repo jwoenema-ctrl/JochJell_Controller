@@ -490,6 +490,17 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_train_profiles_can_be_removed_from_fleet_and_runtime(self) -> None:
+        app = ControllerApplication.sample()
+        try:
+            app.command({"type": "add_train", "train": {"id": "train-removable", "name": "Temporary shunter", "address": 78, "block_id": "B04"}})
+            app.command({"type": "remove_train", "train_id": "train-removable"})
+            self.assertFalse(any(item["id"] == "train-removable" for item in app.state()["trains"]))
+            self.assertIsNone(app.train_database("train-removable"))
+            self.assertFalse(any(item.train_id == "train-removable" for item in app.runtime.track.get_snapshot().trains))
+            self.assertTrue(any(event["type"] == "train_removed" for event in app.state()["events"]))
+        finally:
+            app.close()
     def test_calibration_runs_bounded_stop_and_records_measurement(self) -> None:
         app = ControllerApplication.sample()
         try:

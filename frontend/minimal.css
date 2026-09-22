@@ -275,7 +275,7 @@ body .field textarea { min-height: 86px; }
 .add-car-button { min-height: 38px; color: var(--text); background: transparent; border-color: var(--line-bright); font-size: 12px; margin-bottom: 20px; }
 .add-car-button:hover { background: var(--panel-soft); }
 body .rolling-stock-label { font-size: 12px; }
-.schedule-header, .schedule-row { grid-template-columns: 66px minmax(0, 1.2fr) minmax(0, 1fr) 65px 86px 32px; gap: 14px; }
+.schedule-header, .schedule-row { grid-template-columns: 66px minmax(0, 1.2fr) minmax(0, 1fr) 65px 86px 62px; gap: 14px; }
 .schedule-row { min-height: 68px; padding: 12px 20px; }
 .schedule-time { font-size: 14px; }
 .schedule-service small, .schedule-route, .schedule-state, .platform-tag { font-size: 12px; }
@@ -395,7 +395,7 @@ body .empty-state { font-size: 13px; }
   .schedule-row .schedule-route { grid-column: 2; grid-row: 2; }
   .schedule-row .platform-tag { grid-column: 1; grid-row: 2; }
   .schedule-row .schedule-state { grid-column: 2; grid-row: 3; }
-  .schedule-row .icon-button { grid-column: 3; grid-row: 1; }
+  .schedule-row .schedule-actions { grid-column: 3; grid-row: 1; }
   .field-grid, .modal-body .field-grid, .layout-assets-grid { grid-template-columns: minmax(0, 1fr); }
   .field-wide { grid-column: 1; }
   .layout-assets-grid { padding: 12px; }
@@ -541,6 +541,9 @@ html[data-reduce-motion="true"] *, html[data-reduce-motion="true"] *::before, ht
 .route-block-catalogue h3, .route-flow-heading h3 { margin: 3px 0 4px; font-size: 13px; }
 .route-block-catalogue p:not(.eyebrow) { margin: 0 0 10px; color: var(--muted); font-size: 10px; line-height: 1.4; }
 .route-palette-group { display: grid; gap: 6px; margin-top: 10px; }
+.route-picker { display: flex; align-items: center; gap: 5px; margin-top: 6px; }
+.route-picker select { min-width: 0; flex: 1; min-height: 30px; padding: 0 6px; border: 1px solid var(--line-bright); border-radius: 7px; background: var(--panel); color: var(--text); font: inherit; font-size: 10px; }
+.route-picker .button { flex: 0 0 auto; min-height: 30px; padding: 0 8px; font-size: 10px; }
 .route-palette-button { width: 100%; padding: 8px 9px; text-align: left; border: 1px solid var(--line-bright); border-radius: 8px; background: var(--panel); color: var(--text); cursor: grab; }
 .route-palette-button strong, .route-palette-button small { display: block; }
 .route-palette-button strong { font-size: 10px; }

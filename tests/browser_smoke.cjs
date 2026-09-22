@@ -170,8 +170,10 @@ async function shot(page, name) {
   await page.locator('#new-route').click();
   await page.locator('#route-id').fill('smoke-route');
   await page.locator('#route-name').fill('Smoke route');
-  await page.locator('#route-node-catalogue [data-route-palette-value="B01"]').click();
-  await page.locator('#route-node-catalogue [data-route-palette-value="B04"]').click();
+  await page.locator('#route-node-picker').selectOption('B01');
+  await page.locator('#route-node-catalogue .route-picker-add').click();
+  await page.locator('#route-node-picker').selectOption('B04');
+  await page.locator('#route-node-catalogue .route-picker-add').click();
   await page.locator('#save-route').click();
   await page.waitForFunction(() => document.querySelector('#route-list').textContent.includes('Smoke route'));
   await page.locator('#route-list [data-route-id="smoke-route"] [data-route-action="edit"]').click();
@@ -298,7 +300,7 @@ async function shot(page, name) {
   assert.equal(await page.locator('#route-count').textContent(), '0');
   await page.locator('.mode-tab[data-workspace="layout"]').click();
   await page.waitForFunction(() => document.querySelector('#automation-studio-panel').classList.contains('is-hidden') === false);
-  assert.equal(await page.locator('#automation-catalogue [data-action-block]').count(), 5, 'Automation catalogue should expose five train action blocks');
+  assert.equal(await page.locator('#automation-catalogue [data-action-block]').count(), 7, 'Automation catalogue should expose seven train action blocks');
   await page.locator('#automation-catalogue [data-action-block="drive"]').click();
   await page.locator('#automation-catalogue [data-action-block="function"]').click();
   await page.locator('[data-automation-field="speed_kmh"]').fill('10');

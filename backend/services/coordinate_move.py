@@ -1028,6 +1028,40 @@ def build_timed_movement_request(
         max_duration_ms=max_duration_ms,
     ).request
 
+def calibrated_distance_duration_ms(
+    distance_mm: float,
+    speed_kmh: float,
+    calibration: Mapping[str, Any] | object | Iterable[Mapping[str, Any] | object],
+    *,
+    max_duration_ms: int | None = None,
+) -> int:
+    """Estimate distance time from a stored motion calibration."""
+
+    distance = _positive_finite(distance_mm, "distance_mm")
+    requested_speed = _positive_finite(speed_kmh, "speed_kmh")
+    records = _records(calibration)
+    candidates: list[tuple[float, tuple[float, int, float]]] = []
+    for record in records:
+        try:
+            record_speed = _positive_finite(_value(record, "speed_kmh", "speed"), "calibration.speed_kmh")
+            duration = _positive_duration(_value(record, "duration_ms", "duration"), "calibration.duration_ms")
+            measured_distance = _positive_finite(
+                _value(record, "measured_distance_mm", "distance_mm"),
+                "calibration.measured_distance_mm",
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MovementPlanValidationError(f"invalid stored calibration record: {exc}", field="calibration") from exc
+        candidates.append((abs(record_speed - requested_speed), (record_speed, duration, measured_distance)))
+    if not candidates:
+        raise MovementPlanValidationError("a calibration record is required", field="calibration")
+
+    record_speed, calibration_duration, measured_distance = min(candidates, key=lambda item: item[0])[1]
+    duration_ms = math.ceil(distance * calibration_duration * record_speed / (measured_distance * requested_speed))
+    if duration_ms <= 0:
+        raise MovementPlanValidationError("calibration produced a non-positive duration", field="duration_ms")
+    if max_duration_ms is not None and duration_ms > max_duration_ms:
+        raise MovementPlanValidationError("execution duration exceeds the configured safety limit", field="duration_ms")
+    return duration_ms
 
 # Short aliases keep the request and execution types easy to discover for
 # adapters that use generic movement terminology.

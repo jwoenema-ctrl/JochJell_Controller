@@ -74,6 +74,8 @@
 
   const AUTOMATION_BLOCK_DEFS = {
     drive: { label: 'Drive', description: 'Set speed and hold it', color: 'blue' },
+    speed_ramp: { label: 'Speed staircase', description: 'Ramp between two speeds', color: 'orange' },
+    travel: { label: 'Travel distance', description: 'Move a calibrated distance', color: 'green' },
     wait: { label: 'Wait', description: 'Pause before the next action', color: 'violet' },
     direction: { label: 'Direction', description: 'Forward or reverse', color: 'orange' },
     function: { label: 'Function', description: 'Lighting or decoder function', color: 'green' },
@@ -1015,6 +1017,8 @@
   function automationNewBlock(type) {
     const id = `automation-block-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     if (type === 'drive') return { id, type, speed_kmh: 10, duration_s: 12 };
+    if (type === 'speed_ramp') return { id, type, start_speed_kmh: 0, end_speed_kmh: 20, duration_s: 5 };
+    if (type === 'travel') return { id, type, distance_cm: 20, speed_kmh: 10 };
     if (type === 'wait') return { id, type, duration_s: 2 };
     if (type === 'direction') return { id, type, direction: 'forward' };
     if (type === 'function') return { id, type, function_number: 0, enabled: false };
@@ -1023,6 +1027,16 @@
 
   function automationBlockSummary(block) {
     if (block.type === 'drive') return `Drive at ${Number(block.speed_kmh || 0)} km/h for ${Number(block.duration_s || 0)} s`;
+    if (block.type === 'speed_ramp') return `Ramp from ${Number(block.start_speed_kmh || 0)} to ${Number(block.end_speed_kmh || 0)} km/h over ${Number(block.duration_s || 0)} s`;
+    if (block.type === 'travel') {
+      const record = ((app.state.calibration || {}).history || []).find((item) => item.train_id === app.automationDraft.trainId);
+      const distance = Number(block.distance_cm || 0);
+      const speed = Number(block.speed_kmh || 0);
+      const duration = record && distance > 0 && speed > 0 && Number(record.measured_distance_mm) > 0
+        ? distance * 10 * Number(record.duration_ms) * Number(record.speed_kmh) / (Number(record.measured_distance_mm) * speed * 1000)
+        : null;
+      return `Travel ${distance} cm at ${speed} km/h${duration == null ? '' : ` · ${duration.toFixed(2)} s`}`;
+    }
     if (block.type === 'wait') return `Wait for ${Number(block.duration_s || 0)} s`;
     if (block.type === 'direction') return `Set direction to ${block.direction || 'forward'}`;
     if (block.type === 'function') return `Function F${Number(block.function_number || 0)} ${block.enabled ? 'on' : 'off'}`;
@@ -1032,10 +1046,22 @@
   function automationBlockFields(block, index) {
     const field = (label, name, value, type = 'number', extra = '') => `<label>${label}<input type="${type}" data-automation-index="${index}" data-automation-field="${name}" value="${escapeHtml(value)}" ${extra}></label>`;
     if (block.type === 'drive') return field('Speed km/h', 'speed_kmh', Number(block.speed_kmh || 0), 'number', 'min="0" step="0.1"') + field('Duration seconds', 'duration_s', Number(block.duration_s || 0), 'number', 'min="0" step="0.1"');
+    if (block.type === 'speed_ramp') return field('Start speed km/h', 'start_speed_kmh', Number(block.start_speed_kmh || 0), 'number', 'min="0" step="0.1"') + field('End speed km/h', 'end_speed_kmh', Number(block.end_speed_kmh || 0), 'number', 'min="0" step="0.1"') + field('Ramp time seconds', 'duration_s', Number(block.duration_s || 0), 'number', 'min="0" step="0.1"');
+    if (block.type === 'travel') return field('Distance cm', 'distance_cm', Number(block.distance_cm || 0), 'number', 'min="0.1" step="0.1"') + field('Speed km/h', 'speed_kmh', Number(block.speed_kmh || 0), 'number', 'min="0.1" step="0.1"') + `<span class="automation-calibration-note">${escapeHtml(automationTravelCalibrationNote(block))}</span>`;
     if (block.type === 'wait') return field('Duration seconds', 'duration_s', Number(block.duration_s || 0), 'number', 'min="0" step="0.1"');
     if (block.type === 'direction') return `<label>Direction<select data-automation-index="${index}" data-automation-field="direction"><option value="forward" ${block.direction === 'forward' ? 'selected' : ''}>Forward</option><option value="reverse" ${block.direction === 'reverse' ? 'selected' : ''}>Reverse</option></select></label>`;
     if (block.type === 'function') return field('Function number', 'function_number', Number(block.function_number || 0), 'number', 'min="0" max="31" step="1"') + `<label>State<select data-automation-index="${index}" data-automation-field="enabled"><option value="false" ${!block.enabled ? 'selected' : ''}>Off</option><option value="true" ${block.enabled ? 'selected' : ''}>On</option></select></label>`;
     return '<span class="automation-stop-note">The controller will command a full stop here.</span>';
+  }
+
+  function automationTravelCalibrationNote(block) {
+    const record = ((app.state.calibration || {}).history || []).find((item) => item.train_id === app.automationDraft.trainId);
+    if (!record) return 'Record motion calibration for this train first.';
+    const distance = Number(block.distance_cm || 0);
+    const speed = Number(block.speed_kmh || 0);
+    if (!(distance > 0) || !(speed > 0) || !(Number(record.measured_distance_mm) > 0) || !(Number(record.speed_kmh) > 0)) return 'Enter a distance and speed to estimate time.';
+    const seconds = distance * 10 * Number(record.duration_ms) * Number(record.speed_kmh) / (Number(record.measured_distance_mm) * speed * 1000);
+    return `Estimated movement: ${seconds.toFixed(2)} s using ${record.speed_kmh} km/h calibration.`;
   }
 
   function renderAutomationStudio() {
@@ -2452,12 +2478,25 @@
   }
 
   function renderSchedules() {
-    $('#schedule-list').innerHTML = app.state.schedules.map((schedule) => `<div class="schedule-row"><span class="schedule-time">${escapeHtml(schedule.time || '—')}</span><span class="schedule-service"><strong>${escapeHtml(schedule.service || 'Service')}</strong><small>#${escapeHtml(schedule.number || '—')}</small></span><span class="schedule-route">${escapeHtml(schedule.route || '—')}</span><span class="platform-tag">${escapeHtml(schedule.platform || '—')}</span><span class="schedule-state ${schedule.state === 'Delayed' ? 'delayed' : ''}">${escapeHtml(schedule.state || 'Planned')}</span><button class="icon-button small schedule-menu" data-schedule-id="${escapeHtml(schedule.id)}" title="Edit service">⋯</button></div>`).join('');
+    $('#schedule-list').innerHTML = app.state.schedules.map((schedule) => `<div class="schedule-row"><span class="schedule-time">${escapeHtml(schedule.time || '—')}</span><span class="schedule-service"><strong>${escapeHtml(schedule.service || 'Service')}</strong><small>#${escapeHtml(schedule.number || '—')}</small></span><span class="schedule-route">${escapeHtml(schedule.route || '—')}</span><span class="platform-tag">${escapeHtml(schedule.platform || '—')}</span><span class="schedule-state ${schedule.state === 'Delayed' ? 'delayed' : ''}">${escapeHtml(schedule.state || 'Planned')}</span><span class="schedule-actions"><button class="icon-button small schedule-menu" data-schedule-id="${escapeHtml(schedule.id)}" title="Edit service" aria-label="Edit service">⋯</button><button class="icon-button small schedule-delete danger-text" data-schedule-id="${escapeHtml(schedule.id)}" title="Remove service" aria-label="Remove service">×</button></span></div>`).join('');
     $$('.schedule-menu', $('#schedule-list')).forEach((button) => button.addEventListener('click', () => {
       const schedule = app.state.schedules.find((item) => item.id === button.dataset.scheduleId);
       if (!schedule) return;
       openScheduleEditor(schedule);
     }));
+    $$('.schedule-delete', $('#schedule-list')).forEach((button) => button.addEventListener('click', () => deleteSchedule(button.dataset.scheduleId)));
+  }
+
+  async function deleteSchedule(scheduleId) {
+    const schedule = app.state.schedules.find((item) => item.id === scheduleId);
+    if (!schedule || !window.confirm(`Remove ${schedule.service || schedule.id} from the timetable? This cannot be undone.`)) return;
+    const response = await sendCommand({ type: 'remove_schedule', schedule_id: scheduleId });
+    if (!response) return;
+    if (app.editingScheduleId === scheduleId) {
+      app.editingScheduleId = null;
+      $('#schedule-editor')?.close();
+    }
+    showToast(`${schedule.service || schedule.id} removed`, 'success');
   }
 
   function routeGraphNodes() {
@@ -2490,6 +2529,17 @@
       .filter(Boolean);
   }
 
+  function routePickerMarkup(id, type, title, placeholder, options) {
+    const enabled = options.length > 0;
+    return `<p class="eyebrow">${escapeHtml(title)}</p><div class="route-picker"><select id="${escapeHtml(id)}" aria-label="${escapeHtml(title)}" ${enabled ? '' : 'disabled'}><option value="">${escapeHtml(enabled ? placeholder : `No ${title.toLowerCase()} configured`)}</option>${options.join('')}</select><button type="button" class="button button-soft route-picker-add" data-route-picker-type="${escapeHtml(type)}" data-route-picker-id="${escapeHtml(id)}" ${enabled ? '' : 'disabled'}>Add</button></div>`;
+  }
+
+  function addRoutePickerSelection(type, selectId) {
+    const select = $(`#${selectId}`);
+    if (!select || !select.value) return;
+    addRouteFlowBlock(type, select.value);
+  }
+
   function renderRouteFlow() {
     const nodeCatalogue = $('#route-node-catalogue');
     const routineCatalogue = $('#route-routine-catalogue');
@@ -2500,9 +2550,12 @@
     if (!nodeCatalogue || !routineCatalogue || !syncCatalogue || !flow) return;
     const nodes = routeGraphNodes();
     const trains = Array.isArray(app.state.trains) ? app.state.trains : [];
-    nodeCatalogue.innerHTML = `<p class="eyebrow">TRACK NODES</p>${nodes.length ? nodes.map((node) => `<button type="button" class="route-palette-button" draggable="true" data-route-palette-type="node" data-route-palette-value="${escapeHtml(node.value)}"><strong>${escapeHtml(node.label.split(' · ')[0])}</strong><small>${escapeHtml(node.value)}</small></button>`).join('') : '<p class="settings-help">No track nodes configured.</p>'}`;
-    routineCatalogue.innerHTML = `<p class="eyebrow">ROUTINES</p>${app.automationPrograms.length ? app.automationPrograms.map((program) => `<button type="button" class="route-palette-button" draggable="true" data-route-palette-type="routine" data-route-palette-value="${escapeHtml(program.id)}"><strong>${escapeHtml(program.name || program.id)}</strong><small>${escapeHtml(String((program.blocks || []).length))} action blocks</small></button>`).join('') : '<p class="settings-help">Save a routine to use it here.</p>'}`;
-    syncCatalogue.innerHTML = `<p class="eyebrow">SYNC LOCOMOTIVES</p>${trains.length ? trains.map((train) => `<button type="button" class="route-palette-button" draggable="true" data-route-palette-type="sync" data-route-palette-value="${escapeHtml(train.id)}"><strong>Add ${escapeHtml(train.name || train.id)}</strong><small>Join this locomotive to the active consist</small></button>`).join('') : '<p class="settings-help">No locomotive profiles configured.</p>'}`;
+    const nodeOptions = nodes.map((node) => `<option value="${escapeHtml(node.value)}">${escapeHtml(node.label)}</option>`);
+    const routineOptions = app.automationPrograms.map((program) => `<option value="${escapeHtml(program.id)}">${escapeHtml(program.name || program.id)} · ${escapeHtml(String((program.blocks || []).length))} action blocks</option>`);
+    const syncOptions = trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || train.id)} · #${escapeHtml(train.number || '—')}</option>`);
+    nodeCatalogue.innerHTML = routePickerMarkup('route-node-picker', 'node', 'Track node', 'Choose a track node…', nodeOptions);
+    routineCatalogue.innerHTML = routePickerMarkup('route-routine-picker', 'routine', 'Routine', 'Choose a saved routine…', routineOptions);
+    syncCatalogue.innerHTML = routePickerMarkup('route-sync-picker', 'sync', 'Sync locomotive', 'Choose a locomotive…', syncOptions);
     flow.innerHTML = (app.routeFlow || []).map((block, index) => {
       const kind = block.type || block.kind;
       const isRoutine = kind === 'routine' || kind === 'program';
@@ -3290,6 +3343,23 @@
     sendCommand({ type: 'update_train', train_id: train.id, train: { name: train.name, number: train.number, origin: train.origin, destination: train.destination, destination_block_id: train.destination_block_id, manufacturer: train.manufacturer, model_number: train.model_number, era: train.era, decoder_protocol: train.decoder_protocol, mass_g: train.mass_g, length_mm: train.length_mm, maxSpeed: train.maxSpeed } });
   }
 
+  async function removeSelectedTrain() {
+    const train = selectedTrain();
+    if (!train) {
+      showToast('Select a train before removing it.', 'warning');
+      return;
+    }
+    if (!window.confirm(`Remove ${train.name || train.id} from the fleet? This deletes its profile and stored calibration data.`)) return;
+    const response = await sendCommand({ type: 'remove_train', train_id: train.id });
+    if (!response) return;
+    app.selectedTrainId = app.state.trains[0]?.id || null;
+    app.consistDraft = null;
+    app.pendingPinboardTrain = null;
+    app.pinboardPlacementSelection = '';
+    renderAll();
+    showToast(`${train.name || train.id} removed from the fleet`, 'success');
+  }
+
   function setTrainMode(mode) {
     const train = selectedTrain();
     if (!train || !TRAIN_CONTROL_MODES.some((option) => option.value === mode)) return;
@@ -3304,7 +3374,7 @@
   }
 
   async function sendCommand(command) {
-    const changesControl = ['set_train_mode', 'set_mode', 'track_power', 'emergency_stop', 'stop_all', 'stop_train', 'stop'].includes(command.type);
+    const changesControl = ['set_train_mode', 'set_mode', 'track_power', 'emergency_stop', 'stop_all', 'stop_train', 'stop', 'remove_train'].includes(command.type);
     let releaseControl = null;
     if (changesControl) {
       app.controlPending = (app.controlPending || 0) + 1;
@@ -3758,10 +3828,10 @@
     $('#cancel-route').addEventListener('click', clearRouteEditor);
 
     ['#route-id', '#route-name', '#route-source', '#route-target', '#route-algorithm'].forEach((selector) => $(selector).addEventListener('input', () => { app.routeEditorDirty = true; }));
-    $('#route-node-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (button) addRouteFlowBlock(button.dataset.routePaletteType, button.dataset.routePaletteValue); });
-    $('#route-routine-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (button) addRouteFlowBlock(button.dataset.routePaletteType, button.dataset.routePaletteValue); });
-    $('#route-sync-catalogue').addEventListener('click', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (button) addRouteFlowBlock(button.dataset.routePaletteType, button.dataset.routePaletteValue); });
-    ['#route-node-catalogue', '#route-routine-catalogue', '#route-sync-catalogue'].forEach((selector) => $(selector).addEventListener('dragstart', (event) => { const button = event.target.closest('[data-route-palette-type]'); if (!button) return; event.dataTransfer.setData('application/x-route-flow', JSON.stringify({ type: button.dataset.routePaletteType, value: button.dataset.routePaletteValue })); event.dataTransfer.effectAllowed = 'copy'; }));
+    ['#route-node-catalogue', '#route-routine-catalogue', '#route-sync-catalogue'].forEach((selector) => $(selector).addEventListener('click', (event) => {
+      const button = event.target.closest('[data-route-picker-type]');
+      if (button) addRoutePickerSelection(button.dataset.routePickerType, button.dataset.routePickerId);
+    }));
     $('#route-flow-dropzone').addEventListener('dragover', (event) => { event.preventDefault(); $('#route-flow-dropzone').classList.add('is-dragging'); });
     $('#route-flow-dropzone').addEventListener('dragleave', () => $('#route-flow-dropzone').classList.remove('is-dragging'));
     $('#route-flow-dropzone').addEventListener('drop', (event) => { event.preventDefault(); $('#route-flow-dropzone').classList.remove('is-dragging'); const raw = event.dataTransfer.getData('application/x-route-flow'); if (!raw) return; try { const item = JSON.parse(raw); addRouteFlowBlock(item.type, item.value); } catch { showToast('That flow block could not be added.', 'warning'); } });
@@ -3805,6 +3875,7 @@
       if (button) removeLocomotiveFromConsist(button.dataset.removeLocomotive);
     });
     $('#save-consist').addEventListener('click', saveConsist);
+    $('#remove-train').addEventListener('click', removeSelectedTrain);
     $('#close-editor').addEventListener('click', () => { $('#train-editor-panel').classList.toggle('is-collapsed'); showToast($('#train-editor-panel').classList.contains('is-collapsed') ? 'Train profile collapsed' : 'Train profile expanded', 'success'); });
   }
 

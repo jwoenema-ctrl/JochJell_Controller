@@ -50,7 +50,12 @@ from backend.services.dispatcher import ControlMode
 from backend.services.connection_speed import ConnectionSpeedPolicy, next_connection
 from backend.services.block_editor import block_id as validate_block_id, next_block_id, rename_references
 from backend.services.scheduler import ScheduleStop as RuntimeScheduleStop
-from backend.services.coordinate_move import CoordinateMovementExecutionPlanner, CoordinateMovementPlanner, MovementPlanValidationError
+from backend.services.coordinate_move import (
+    CoordinateMovementExecutionPlanner,
+    CoordinateMovementPlanner,
+    MovementPlanValidationError,
+    calibrated_distance_duration_ms,
+)
 from backend.services.automation_recording import PlaybackPlan, RecordedAction
 from backend.services.train_presence import SavedTrainPresenceService
 from backend.services.pinboard import nearest_track_coordinate
@@ -1033,6 +1038,7 @@ class ControllerApplication:
                 raise ValueError(f"{field} must be a finite number >= {minimum}")
             return result
 
+        calibrations = self.runtime.calibration.history(canonical_id) if self.runtime is not None else ()
         for index, raw in enumerate(blocks):
             if not isinstance(raw, dict):
                 raise ValueError(f"automation block {index + 1} must be an object")
@@ -1046,6 +1052,41 @@ class ControllerApplication:
                 cursor += duration
                 if duration > 0:
                     actions.append(RecordedAction(cursor, "speed", canonical_id, speed=0.0))
+            elif kind in {"speed_ramp", "speed_staircase", "staircase", "ramp"}:
+                start_speed = number(raw.get("start_speed_kmh", raw.get("start_speed", 0)), "start_speed_kmh")
+                end_speed = number(raw.get("end_speed_kmh", raw.get("end_speed", 0)), "end_speed_kmh")
+                duration = number(raw.get("duration_s", raw.get("duration", 0)), "duration_s")
+                if start_speed > maximum or end_speed > maximum:
+                    raise ValueError(f"speed_kmh cannot exceed the train maximum of {maximum:g}")
+                if duration <= 0:
+                    actions.append(RecordedAction(cursor, "speed", canonical_id, speed=end_speed / maximum))
+                    continue
+                steps = max(1, min(120, math.ceil(duration / 0.1)))
+                for step in range(steps + 1):
+                    fraction = step / steps
+                    speed = start_speed + (end_speed - start_speed) * fraction
+                    timestamp = cursor + duration * fraction
+                    actions.append(RecordedAction(timestamp, "speed", canonical_id, speed=speed / maximum))
+                cursor += duration
+            elif kind in {"travel", "travel_distance", "distance"}:
+                distance_cm = number(raw.get("distance_cm", raw.get("distance", 0)), "distance_cm")
+                speed = number(raw.get("speed_kmh", raw.get("speed", 0)), "speed_kmh")
+                if distance_cm <= 0:
+                    raise ValueError("distance_cm must be greater than 0")
+                if speed > maximum:
+                    raise ValueError(f"speed_kmh cannot exceed the train maximum of {maximum:g}")
+                try:
+                    duration_ms = calibrated_distance_duration_ms(
+                        distance_cm * 10,
+                        speed,
+                        calibrations,
+                        max_duration_ms=120000,
+                    )
+                except MovementPlanValidationError as exc:
+                    raise ValueError(f"travel block needs a valid motion calibration: {exc}") from exc
+                actions.append(RecordedAction(cursor, "speed", canonical_id, speed=speed / maximum))
+                cursor += duration_ms / 1000
+                actions.append(RecordedAction(cursor, "speed", canonical_id, speed=0.0))
             elif kind == "wait":
                 cursor += number(raw.get("duration_s", raw.get("duration", 1)), "duration_s")
             elif kind == "direction":
@@ -3121,6 +3162,49 @@ class ControllerApplication:
                     )
                 )
                 self.events.append({"type": "turnout_command", "turnout_id": turnout_id, "state": turnout["state"]})
+            elif kind in {"remove_train", "delete_train"}:
+                train_id = self._canonical_train_id(str(payload.get("train_id", payload.get("id", ""))))
+                train = next((item for item in self.trains if item.get("id") == train_id), None)
+                if train is None:
+                    raise ValueError(f"Unknown train: {train_id}")
+                motion = next((item for item in self.runtime.track.get_snapshot().trains if item.train_id == train_id), None) if self.runtime is not None else None
+                control = self.runtime.dispatcher.trains.get(train_id) if self.runtime is not None else None
+                if (
+                    float(train.get("speed", 0) or 0) > 0
+                    or (control is not None and control.desired_speed > 0)
+                    or (motion is not None and (motion.speed > 0 or motion.target_speed > 0))
+                ):
+                    raise ValueError("stop the train before removing it from the fleet")
+                if self.runtime is not None:
+                    active_calibration = self.runtime.calibration.run
+                    if active_calibration is not None and active_calibration.train_id == train_id and active_calibration.status == "running":
+                        self.runtime.calibration.cancel()
+                    if hasattr(self.runtime.track, "remove_train"):
+                        self.runtime.track.remove_train(train_id)
+                    self.runtime.dispatcher.unregister_train(train_id)
+                    self.runtime.route_updater.release_train(train_id)
+                    self.runtime.train_database.delete(train_id)
+                for other in self.trains:
+                    if other is train:
+                        continue
+                    other["locomotive_ids"] = [item for item in other.get("locomotive_ids", ()) if self._canonical_train_id(str(item)) != train_id]
+                    if self._canonical_train_id(str(other.get("coupled_to", ""))) == train_id:
+                        other.pop("coupled_to", None)
+                    consist = other.get("consist")
+                    if isinstance(consist, list):
+                        other["consist"] = [
+                            item for item in consist
+                            if not isinstance(item, dict) or self._canonical_train_id(str(item.get("train_id", item.get("locomotive_id", item.get("id", ""))))) != train_id
+                        ]
+                unassigned_schedules = []
+                for schedule in self.schedules:
+                    assigned_id = schedule.get("train_id")
+                    if assigned_id not in (None, "") and self._canonical_train_id(str(assigned_id)) == train_id:
+                        schedule.pop("train_id", None)
+                        unassigned_schedules.append(str(schedule.get("id", "")))
+                self.trains = [item for item in self.trains if item is not train]
+                self._sync_runtime_from_ui()
+                self.events.append({"type": "train_removed", "train_id": train_id, "unassigned_schedule_ids": unassigned_schedules})
             elif kind == "update_train":
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 train = next((item for item in self.trains if item["id"] == train_id), None)
