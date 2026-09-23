@@ -531,6 +531,25 @@ class ApiTests(unittest.TestCase):
         finally:
             app.close()
 
+    def test_stale_optional_platform_reference_does_not_block_scheduled_dispatch(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({"type": "add_schedule", "schedule": {
+                "id": "stale-platform-route", "time": "00:01", "service": "Yard departure",
+                "number": "3", "train_id": "train-3", "station_id": "ST02",
+                "dispatch_mode": "route", "route_id": "r2",
+                "stops": [{"station_id": "ST02", "platform_id": "platform-b04", "arrival_seconds": 60, "departure_seconds": 120}],
+            }})
+            app.command({"type": "set_train_mode", "train_id": "t2", "mode": "automatic"})
+            app.runtime.scheduler.reset(tick=0)
+            app.runtime.scheduler.start()
+            app.tick(2)
+            self.assertGreater(app.runtime.dispatcher.trains["train-3"].automatic_speed, 0)
+            self.assertEqual(next(item for item in app.state()["trains"] if item["id"] == "t2")["scheduled_route_id"], "r2")
+        finally:
+            app.close()
+
     def test_scheduled_route_waits_for_the_assigned_train_to_be_automatic(self) -> None:
         app = ControllerApplication.sample()
         app.stop_motion_clock()
@@ -579,6 +598,51 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(train["route"], ["B03", "B04"])
             self.assertEqual(train["scheduled_route_id"], "r2")
             self.assertTrue(any(event["type"] == "schedule_route_bound" for event in app.state()["events"]))
+        finally:
+            app.close()
+
+    def test_one_block_mode_executes_scheduled_route_routines_without_graph_path(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({
+                "type": "save_automation_program",
+                "program": {
+                    "id": "one-block-routine",
+                    "name": "One-block departure",
+                    "train_id": "train-3",
+                    "blocks": [{"type": "drive", "speed_kmh": 20, "duration_s": 0.3}],
+                },
+            })
+            app.command({
+                "type": "add_route",
+                "route": {
+                    "id": "one-block-route",
+                    "name": "One-block routine route",
+                    "flow": [{"type": "routine", "program_id": "one-block-routine"}],
+                },
+            })
+            app.update_settings({"operations": {"connected_blocks": False}})
+            app.command({"type": "set_train_mode", "train_id": "train-3", "mode": "automatic"})
+            app.command({
+                "type": "add_schedule",
+                "schedule": {
+                    "id": "one-block-schedule", "time": "00:01", "service": "One-block service",
+                    "number": "3", "train_id": "train-3", "dispatch_mode": "route", "route_id": "one-block-route",
+                },
+            })
+            app.runtime.scheduler.reset(tick=0)
+            app.runtime.scheduler.start()
+            app.tick(2)
+            control = app.runtime.dispatcher.trains["train-3"]
+            self.assertGreater(control.automatic_speed, 0)
+            self.assertTrue(any(event["type"] == "schedule_routine_started" for event in app.state()["events"]))
+            self.assertTrue(any(event["type"] == "schedule_route_bound" and event["route"]["execution_mode"] == "one_block_routines" for event in app.state()["events"]))
+            app.tick(4)
+            self.assertEqual(control.automatic_speed, 0)
+            self.assertTrue(any(event["type"] == "schedule_routine_completed" for event in app.state()["events"]))
+            motion = next(item for item in app.runtime.track.get_snapshot().trains if item.train_id == "train-3")
+            self.assertEqual(motion.route, (motion.block_id,))
         finally:
             app.close()
 

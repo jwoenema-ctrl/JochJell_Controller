@@ -116,6 +116,7 @@ def _build_entity(entity_type: type[_T], value: Any) -> _T:
         data["status"] = ScheduleStatus(data.get("status", ScheduleStatus.PLANNED.value))
     elif entity_type is RouteDefinition:
         data["node_ids"] = _tuple(data.get("node_ids", data.get("blocks", data.get("path", ()))))
+        data["flow"] = tuple(dict(item) for item in data.get("flow", ()) if isinstance(item, Mapping))
     return entity_type(**data)
 
 

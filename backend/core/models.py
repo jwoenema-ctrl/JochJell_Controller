@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 import math
-from typing import Iterable, TypeVar
+from typing import Any, Iterable, Mapping, TypeVar
 
 
 class BlockState(str, Enum):
@@ -406,34 +406,43 @@ class Schedule:
 
 @dataclass(frozen=True, slots=True)
 class RouteDefinition:
-    """A named, reusable path through the layout graph."""
+    """A named, reusable path or routine flow through the layout graph."""
 
     id: str
     name: str
-    source_block_id: str
-    target_block_id: str
+    source_block_id: str = ""
+    target_block_id: str = ""
     node_ids: tuple[str, ...] = ()
     algorithm: str = "a_star"
     enabled: bool = True
+    flow: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _require_text(self.id, "id"))
         object.__setattr__(self, "name", _require_text(self.name, "name"))
-        object.__setattr__(self, "source_block_id", _require_text(self.source_block_id, "source_block_id"))
-        object.__setattr__(self, "target_block_id", _require_text(self.target_block_id, "target_block_id"))
+        source = str(self.source_block_id or "").strip()
+        target = str(self.target_block_id or "").strip()
         nodes = tuple(_require_text(item, "node_ids") for item in self.node_ids)
-        if not nodes:
+        flow = tuple(dict(item) for item in self.flow if isinstance(item, Mapping))
+        if not nodes and not flow:
             raise ValueError("route must contain at least one graph node")
-        if nodes[0] != self.source_block_id or nodes[-1] != self.target_block_id:
+        if nodes and (not source or not target):
+            raise ValueError("graph routes require source_block_id and target_block_id")
+        if nodes and (nodes[0] != source or nodes[-1] != target):
             raise ValueError("route node_ids must start at source_block_id and end at target_block_id")
         if len(set(nodes)) != len(nodes):
             raise ValueError("route node_ids must not contain duplicate graph nodes")
         algorithm = str(self.algorithm).strip().lower()
-        if algorithm not in {"a_star", "bfs"}:
-            raise ValueError("route algorithm must be a_star or bfs")
+        if algorithm not in {"a_star", "bfs", "stationary"}:
+            raise ValueError("route algorithm must be a_star, bfs, or stationary")
+        if nodes and algorithm == "stationary":
+            raise ValueError("graph routes cannot use the stationary algorithm")
+        object.__setattr__(self, "source_block_id", source)
+        object.__setattr__(self, "target_block_id", target)
         object.__setattr__(self, "node_ids", nodes)
         object.__setattr__(self, "algorithm", algorithm)
         object.__setattr__(self, "enabled", bool(self.enabled))
+        object.__setattr__(self, "flow", flow)
 
 
 @dataclass(frozen=True, slots=True)

@@ -210,7 +210,7 @@
     });
   }
 
-  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1 }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
+  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
   app.settings = clone(DEFAULT_SETTINGS);
   app.settingsDirty = false;
   app.settingsLoaded = false;
@@ -536,6 +536,7 @@
     $('#setting-show-connection-detail').checked = settings.interface.show_connection_detail;
     $('#setting-reduce-motion').checked = settings.interface.reduce_motion;
     $('#setting-confirm-power-actions').checked = settings.operations.confirm_power_actions;
+    $('#setting-connected-blocks').checked = settings.operations.connected_blocks;
     $('#setting-default-simulation-rate').value = String(settings.operations.default_simulation_rate);
     app.simRate = Number(settings.operations.default_simulation_rate) || 1;
     applyInterfaceSettings(settings);
@@ -659,7 +660,7 @@
       z21_wlan_enabled: $('#setting-z21-wlan').checked,
       ui_refresh_ms: Number($('#setting-ui-refresh').value) * 1000,
       interface: { density: $('#setting-interface-density').value, show_connection_detail: $('#setting-show-connection-detail').checked, reduce_motion: $('#setting-reduce-motion').checked },
-      operations: { confirm_power_actions: $('#setting-confirm-power-actions').checked, default_simulation_rate: Number($('#setting-default-simulation-rate').value) },
+      operations: { confirm_power_actions: $('#setting-confirm-power-actions').checked, default_simulation_rate: Number($('#setting-default-simulation-rate').value), connected_blocks: $('#setting-connected-blocks').checked },
       routing: { adaptive: $('#setting-routing-adaptive').checked, busy_interval_ms: Number($('#setting-routing-busy').value) * 1000, idle_interval_ms: Number($('#setting-routing-idle').value) * 1000 }
     };
     button.disabled = true;

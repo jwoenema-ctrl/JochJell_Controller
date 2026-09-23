@@ -274,6 +274,7 @@ def snapshot_from_ui(
             Platform(f"platform-{block.id.lower()}", block.name or block.id, f"station-{block.id.lower()}", block.id, block.length_mm)
             for block in domain_blocks
         )
+    platform_ids = {platform.id for platform in domain_platforms}
     block_by_train = {train.id: train for train in domain_trains}
     domain_schedules: list[Schedule] = []
     station_id_set = {station.id for station in domain_stations}
@@ -305,17 +306,19 @@ def snapshot_from_ui(
                 parsed_station = str(raw_stop.get("station_id", raw_stop.get("stationId", station_id))).strip()
                 if not parsed_station:
                     continue
+                requested_platform = str(raw_stop.get("platform_id", raw_stop.get("platformId", ""))).strip()
                 parsed_stops.append(
                     ScheduleStop(
                         parsed_station,
-                        str(raw_stop.get("platform_id", raw_stop.get("platformId", ""))).strip() or None,
+                        requested_platform if requested_platform in platform_ids else None,
                         _optional_time_seconds(raw_stop.get("arrival_seconds", raw_stop.get("arrivalSeconds"))),
                         _optional_time_seconds(raw_stop.get("departure_seconds", raw_stop.get("departureSeconds"))),
                     )
                 )
         if not parsed_stops:
             arrival = _time_seconds(value.get("time", "00:00"))
-            parsed_stops = [ScheduleStop(station_id, str(value.get("platform", "")).strip() or f"platform-{block_id.lower()}", arrival, arrival + 60)]
+            requested_platform = str(value.get("platform", "")).strip()
+            parsed_stops = [ScheduleStop(station_id, requested_platform if requested_platform in platform_ids else None, arrival, arrival + 60)]
         status_value = str(value.get("state", "planned")).lower()
         status = next((candidate for candidate in ScheduleStatus if candidate.value == status_value), ScheduleStatus.PLANNED)
         domain_schedules.append(
@@ -353,16 +356,19 @@ def snapshot_from_ui(
         target = _canonical_block_id(raw.get("target_block_id", raw.get("target", raw.get("to"))))
         raw_nodes = raw.get("node_ids", raw.get("blocks", raw.get("path", ())))
         nodes = tuple(_canonical_block_id(item) for item in raw_nodes if _canonical_block_id(item))
-        if not route_id or not source or not target or not nodes:
+        raw_flow = raw.get("flow", ())
+        flow = tuple(dict(item) for item in raw_flow if isinstance(item, Mapping)) if isinstance(raw_flow, (list, tuple)) else ()
+        if not route_id or (not (source and target and nodes) and not flow):
             continue
         domain_routes.append(RouteDefinition(
-            route_id,
-            name or route_id,
-            source,
-            target,
-            nodes,
-            str(raw.get("algorithm", "a_star")),
-            bool(raw.get("enabled", True)),
+            id=route_id,
+            name=name or route_id,
+            source_block_id=source,
+            target_block_id=target,
+            node_ids=nodes,
+            algorithm=str(raw.get("algorithm", "stationary" if not nodes else "a_star")),
+            enabled=bool(raw.get("enabled", True)),
+            flow=flow,
         ))
 
     return LayoutSnapshot(
@@ -547,6 +553,7 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
             "node_ids": list(route.node_ids),
             "algorithm": route.algorithm,
             "enabled": route.enabled,
+            "flow": [dict(item) for item in route.flow],
         }
         for route in snapshot.routes
     ]

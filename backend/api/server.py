@@ -15,7 +15,7 @@ import threading
 import time
 from copy import deepcopy
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from enum import Enum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -163,6 +163,7 @@ class ControllerApplication:
     }, init=False, repr=False)
     _recording_history: list[PlaybackPlan] = field(default_factory=list, init=False, repr=False)
     _automation_programs: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _scheduled_routines: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _coordinate_execution_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -357,6 +358,11 @@ class ControllerApplication:
         scheduled = any(self._schedule_domain_status(row.get("state")) is ScheduleStatus.ACTIVE for row in self.schedules)
         return "busy" if moving or scheduled else "idle"
 
+    def _connected_blocks_enabled(self) -> bool:
+        """Return whether dispatch should reserve and traverse connected blocks."""
+
+        return bool(self._settings.get("operations", {}).get("connected_blocks", True))
+
     def _routing_interval_ms(self) -> int:
         routing = self._settings["routing"]
         key = "idle_interval_ms" if routing["adaptive"] and self._routing_activity() == "idle" else "busy_interval_ms"
@@ -424,8 +430,11 @@ class ControllerApplication:
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             patch = payload.get("settings", payload)
+            previous_connected_blocks = self._connected_blocks_enabled()
             validated = validate_settings(patch, self._settings)
             self._settings = self._settings_repository.save(validated)
+            if previous_connected_blocks != self._connected_blocks_enabled():
+                self._sync_runtime_from_ui(apply_motion=False)
             self._routing_wake.set()
             return self.settings_payload()
 
@@ -434,6 +443,10 @@ class ControllerApplication:
 
         with self._lock:
             if self.runtime is None:
+                return False
+            if not self._connected_blocks_enabled():
+                for train_id in tuple(self.runtime.route_updater.desired_routes):
+                    self.runtime.route_updater.release_train(train_id)
                 return False
             current_time = time.monotonic() if now is None else now
             if not force and self._routing_last_monotonic is not None and (current_time - self._routing_last_monotonic) * 1000 < self._routing_interval_ms():
@@ -611,6 +624,7 @@ class ControllerApplication:
         graph = self.runtime.layout.graph()
         self._apply_speed_policy(snapshot)
         self.runtime.dispatcher.set_graph(graph)
+        connected_blocks = self._connected_blocks_enabled()
         desired_train_ids = {str(train["id"]) for train in self.trains}
         for existing_id in tuple(self.runtime.dispatcher.trains):
             if existing_id not in desired_train_ids:
@@ -657,6 +671,27 @@ class ControllerApplication:
                 self.runtime.add_train(train_id, block_id, route=route, address=train.get("address"))
             mode_value = str(train.get("mode", "manual")).lower()
             mode = ControlMode.AUTOMATIC if mode_value == "automatic" else ControlMode.STOPPED if mode_value in {"stopped", "safe", "stop"} else ControlMode.MANUAL
+            if not connected_blocks:
+                # One-block mode deliberately bypasses graph reservations and
+                # route planning. The runtime still keeps a single current
+                # block so direct DCC/simulation commands remain available.
+                self.runtime.route_updater.release_train(train_id)
+                single_block_route = (block_id.upper(),)
+                if hasattr(self.runtime.track, "set_train_route"):
+                    self.runtime.track.set_train_route(train_id, single_block_route)
+                train["route"] = [block_id.upper()]
+                if not apply_motion:
+                    continue
+                if self.z21_host:
+                    self.runtime.dispatcher.register_train(train_id, mode=mode)
+                    continue
+                self.runtime.dispatcher.set_mode(train_id, mode)
+                if mode is ControlMode.STOPPED:
+                    continue
+                normalized = max(0.0, min(1.0, float(train.get("requested_speed_kmh", train.get("speed", 0))) / max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140))))))
+                command = self.runtime.dispatcher.automatic_speed if mode is ControlMode.AUTOMATIC else self.runtime.dispatcher.manual_speed
+                command(train_id, normalized)
+                continue
             reserve_route = mode is ControlMode.AUTOMATIC or bool(train.get("target_coordinate"))
             if not reserve_route:
                 self.runtime.route_updater.release_train(train_id)
@@ -1126,6 +1161,120 @@ class ControllerApplication:
         duration = float(program.get("duration_s", 0) or 0)
         return PlaybackPlan(train_id, actions, 0.0, duration)
 
+    def _scheduled_route_plan(self, route: dict[str, Any], train_id: str) -> PlaybackPlan | None:
+        """Compile routine flow blocks for the train that owns the service.
+
+        Route routines are reusable definitions. Recompiling their authored
+        blocks for the scheduled train keeps speed limits and distance
+        calibration tied to that train rather than to the train used while the
+        routine was first saved.
+        """
+
+        flow = route.get("flow", ())
+        if not isinstance(flow, (list, tuple)):
+            return None
+        canonical_train_id = self._canonical_train_id(train_id)
+        actions: list[RecordedAction] = []
+        cursor = 0.0
+        for index, raw_block in enumerate(flow):
+            if not isinstance(raw_block, dict):
+                raise ValueError(f"route flow block {index + 1} must be an object")
+            kind = str(raw_block.get("type", raw_block.get("kind", ""))).strip().lower()
+            if kind in {"program", "routine"}:
+                program_id = str(raw_block.get("program_id", raw_block.get("value", ""))).strip()
+                program = next((item for item in self._automation_programs if str(item.get("id")) == program_id), None)
+                if program is None:
+                    raise ValueError(f"route routine references unknown automation program: {program_id}")
+                compiled, duration = self._compile_automation_program(canonical_train_id, program.get("blocks"))
+                actions.extend(replace(action, timestamp=cursor + action.timestamp, train_id=canonical_train_id) for action in compiled)
+                cursor += duration
+        if not actions:
+            return None
+        return PlaybackPlan(canonical_train_id, tuple(actions), 0.0, cursor)
+
+    def _apply_scheduled_route_sync(self, train_id: str, locomotive_id: str) -> None:
+        """Apply a route-flow consist sync without requiring connected blocks."""
+
+        lead_id = self._canonical_train_id(train_id)
+        member_id = self._canonical_train_id(locomotive_id)
+        if lead_id == member_id:
+            return
+        lead = next((item for item in self.trains if str(item.get("id")) == lead_id), None)
+        member = next((item for item in self.trains if str(item.get("id")) == member_id), None)
+        if lead is None or member is None:
+            raise ValueError(f"route sync references an unknown locomotive: {locomotive_id}")
+        locomotive_ids = [self._canonical_train_id(str(item)) for item in lead.get("locomotive_ids", ()) if str(item)]
+        if member_id not in locomotive_ids:
+            locomotive_ids.append(member_id)
+        lead["locomotive_ids"] = locomotive_ids
+        member["coupled_to"] = lead_id
+        member["block_id"] = lead.get("block_id", member.get("block_id"))
+        member["route"] = list(lead.get("route", member.get("route", [])))
+        member["direction"] = lead.get("direction", member.get("direction", "forward"))
+        member["mode"] = lead.get("mode", member.get("mode", "manual"))
+
+    def _execute_scheduled_routine_action(self, train_id: str, train: dict[str, Any], action: RecordedAction) -> None:
+        """Apply one already validated routine action without blocking the clock."""
+
+        if self.runtime is None:
+            raise ValueError("controller runtime unavailable")
+        control = self.runtime.dispatcher.register_train(train_id)
+        if control.mode is not ControlMode.AUTOMATIC:
+            raise ValueError("scheduled routine stopped because the train is no longer automatic")
+        if action.operation == "speed":
+            result = self.runtime.dispatcher.automatic_speed(train_id, float(action.speed))
+            if hasattr(result, "accepted") and not result.accepted:
+                raise ValueError(result.detail or "scheduled routine speed was rejected")
+            maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
+            train["speed"] = round(float(action.speed) * maximum)
+            train["requested_speed_kmh"] = train["speed"]
+        elif action.operation == "direction":
+            result = self.runtime.track.set_train_direction(train_id, forward=action.direction == "forward")
+            if hasattr(result, "accepted") and not result.accepted:
+                raise ValueError(result.detail or "scheduled routine direction was rejected")
+            train["direction"] = action.direction
+        else:
+            if not hasattr(self.runtime.track, "set_train_function"):
+                raise ValueError("the active track adapter does not support decoder functions")
+            result = self.runtime.track.set_train_function(train_id, int(action.function_number), enabled=bool(action.enabled))
+            if hasattr(result, "accepted") and not result.accepted:
+                raise ValueError(result.detail or "scheduled routine function was rejected")
+            train.setdefault("decoder_function_states", {})[str(action.function_number)] = bool(action.enabled)
+
+    def _advance_scheduled_routines(self, elapsed_seconds: float) -> None:
+        """Advance route routines using the controller clock, never a blocking sleep."""
+
+        if self.runtime is None or not self._scheduled_routines:
+            return
+        delta = max(0.0, float(elapsed_seconds))
+        for train_id, state in list(self._scheduled_routines.items()):
+            train = next((item for item in self.trains if str(item.get("id")) == train_id), None)
+            if train is None:
+                self._scheduled_routines.pop(train_id, None)
+                continue
+            state["elapsed"] = float(state.get("elapsed", 0.0)) + delta
+            plan = state["plan"]
+            actions = plan.actions
+            try:
+                while state["next_action"] < len(actions) and float(actions[state["next_action"]].timestamp) <= state["elapsed"] + 1e-9:
+                    action = actions[state["next_action"]]
+                    self._execute_scheduled_routine_action(train_id, train, action)
+                    state["next_action"] += 1
+                if state["next_action"] >= len(actions) and state["elapsed"] + 1e-9 >= float(plan.stopped_at):
+                    self.runtime.track.stop_train(train_id)
+                    control = self.runtime.dispatcher.register_train(train_id)
+                    control.manual_speed = control.automatic_speed = 0.0
+                    train["speed"] = train["requested_speed_kmh"] = 0
+                    self._scheduled_routines.pop(train_id, None)
+                    self.events.append({"type": "schedule_routine_completed", "train_id": train_id})
+            except Exception as exc:
+                self.runtime.track.stop_train(train_id)
+                control = self.runtime.dispatcher.register_train(train_id)
+                control.manual_speed = control.automatic_speed = 0.0
+                train["speed"] = train["requested_speed_kmh"] = 0
+                self._scheduled_routines.pop(train_id, None)
+                self.events.append({"type": "schedule_routine_error", "train_id": train_id, "detail": str(exc)})
+
     def save_automation_program(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         raw = payload.get("program", payload)
         if not isinstance(raw, dict):
@@ -1529,9 +1678,10 @@ class ControllerApplication:
         if train is None:
             raise ValueError(f"Unknown train: {train_id}")
         path = tuple(str(item).upper() for item in route.get("node_ids", ()) if str(item).strip())
+        flow = deepcopy(route.get("flow", []))
         train["scheduled_route_id"] = route_id
         train["scheduled_route_name"] = str(route.get("name", route_id))
-        if path:
+        if self._connected_blocks_enabled() and path:
             self.runtime.route_updater.set_route(canonical_train_id, path)
             if hasattr(self.runtime.track, "set_train_route"):
                 result = self.runtime.track.set_train_route(canonical_train_id, path)
@@ -1541,12 +1691,28 @@ class ControllerApplication:
             train["destination_block_id"] = path[-1]
             train["route"] = list(path)
             self._publish_domain_event(RouteChanged(train_id=canonical_train_id, route=path))
+        elif not self._connected_blocks_enabled():
+            for raw_block in flow:
+                if isinstance(raw_block, dict) and str(raw_block.get("type", raw_block.get("kind", ""))).strip().lower() in {"sync", "sync_locomotive"}:
+                    self._apply_scheduled_route_sync(canonical_train_id, str(raw_block.get("locomotive_id", raw_block.get("train_id", raw_block.get("value", "")))))
+            plan = self._scheduled_route_plan(route, canonical_train_id)
+            if plan is not None:
+                self._start_scheduled_routine(canonical_train_id, train, plan)
+            elif path:
+                self.events.append({
+                    "type": "schedule_route_block_path_skipped",
+                    "schedule_id": str(schedule.get("id", "")),
+                    "train_id": canonical_train_id,
+                    "route_id": route_id,
+                    "reason": "connected-block dispatch is disabled",
+                })
         target = {
             "route_id": route_id,
             "name": str(route.get("name", route_id)),
             "node_ids": [item.lower() for item in path],
-            "flow": deepcopy(route.get("flow", [])),
+            "flow": flow,
             "schedule_id": str(schedule.get("id", "")),
+            "execution_mode": "connected_blocks" if self._connected_blocks_enabled() else "one_block_routines",
         }
         self.events.append({
             "type": "schedule_route_bound", "schedule_id": str(schedule.get("id", "")),
@@ -1581,6 +1747,34 @@ class ControllerApplication:
         result = self.runtime.dispatcher.automatic_speed(train_id, speed)
         if hasattr(result, "accepted") and not result.accepted:
             raise ValueError(result.detail or "scheduled automatic movement was rejected")
+
+    def _start_scheduled_routine(self, train_id: str, train: dict[str, Any], plan: PlaybackPlan) -> None:
+        """Start a compiled route routine in one-block mode."""
+
+        if self.runtime is None:
+            raise ValueError("controller runtime unavailable")
+        if not self.track_power:
+            raise ValueError("switch track power on before scheduled routine execution")
+        control = self.runtime.dispatcher.register_train(train_id)
+        if control.mode is not ControlMode.AUTOMATIC:
+            self.events.append({
+                "type": "schedule_departure_waiting_for_automatic",
+                "train_id": train_id,
+                "mode": control.mode.value,
+            })
+            return
+        if train_id in self._scheduled_routines:
+            self.runtime.track.stop_train(train_id)
+            self._scheduled_routines.pop(train_id, None)
+        self._scheduled_routines[train_id] = {"plan": plan, "elapsed": 0.0, "next_action": 0}
+        self.events.append({
+            "type": "schedule_routine_started",
+            "train_id": train_id,
+            "action_count": plan.action_count,
+            "duration_s": plan.duration,
+        })
+        self._advance_scheduled_routines(0.0)
+
     def _schedule_coordinate_target(self, schedule: dict[str, Any], stop_id: str, train_id: str) -> dict[str, Any] | None:
         """Plan a calibrated destination for a timetable departure.
 
@@ -2273,6 +2467,8 @@ class ControllerApplication:
                         tick=self.runtime.scheduler.current_tick,
                         world_tick=self.runtime.scheduler.world_current_tick,
                     )
+                routine_elapsed = (safe_steps * self.runtime.track.tick_seconds) if elapsed_seconds is None else max(0.0, elapsed_seconds)
+                self._advance_scheduled_routines(routine_elapsed)
                 self.runtime.tick(safe_steps)
                 if elapsed_seconds is None:
                     self._world_clock_seconds += safe_steps * 60
@@ -3685,7 +3881,10 @@ class ControllerApplication:
                 target = str(route.get("target_block_id") or route.get("target") or (flow_nodes[-1] if flow_nodes else "")).strip().upper()
                 requested = route.get("node_ids") or route.get("path") or (flow_nodes if flow_nodes else None)
                 if source or target or requested:
-                    path, algorithm = self._route_path(source, target, route.get("algorithm", "a_star"), requested)
+                    if self._connected_blocks_enabled():
+                        path, algorithm = self._route_path(source, target, route.get("algorithm", "a_star"), requested)
+                    else:
+                        path, algorithm = [], "stationary"
                 else:
                     if not flow:
                         raise ValueError("route must contain at least one flow block")
@@ -3710,7 +3909,10 @@ class ControllerApplication:
                 target = str(updates.get("target_block_id") or updates.get("target") or (flow_nodes[-1] if flow_nodes else route.get("target_block_id", "")) or "").strip().upper()
                 path_requested = updates.get("node_ids") or updates.get("path") or (flow_nodes if flow_nodes else None)
                 if source or target or path_requested:
-                    path, algorithm = self._route_path(source, target, updates.get("algorithm", route.get("algorithm", "a_star")), path_requested)
+                    if self._connected_blocks_enabled():
+                        path, algorithm = self._route_path(source, target, updates.get("algorithm", route.get("algorithm", "a_star")), path_requested)
+                    else:
+                        path, algorithm = [], "stationary"
                 else:
                     if flow_present and not flow:
                         raise ValueError("route must contain at least one flow block")

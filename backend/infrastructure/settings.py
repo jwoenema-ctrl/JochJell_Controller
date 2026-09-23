@@ -99,6 +99,7 @@ DEFAULT_SETTINGS = {
     "operations": {
         "confirm_power_actions": False,
         "default_simulation_rate": 1,
+        "connected_blocks": True,
     },
     "z21_host": "192.168.0.111",
     "z21_port": 21105,
@@ -158,6 +159,8 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
             raise ValueError(f"interface.{key} must be a boolean")
     if type(result["operations"]["confirm_power_actions"]) is not bool:
         raise ValueError("operations.confirm_power_actions must be a boolean")
+    if type(result["operations"]["connected_blocks"]) is not bool:
+        raise ValueError("operations.connected_blocks must be a boolean")
     if type(result["operations"]["default_simulation_rate"]) is not int or result["operations"]["default_simulation_rate"] not in (1, 5, 15, 60):
         raise ValueError("operations.default_simulation_rate must be one of 1, 5, 15, or 60")
     if type(result["routing"]["adaptive"]) is not bool:
