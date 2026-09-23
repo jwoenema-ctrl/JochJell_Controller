@@ -190,6 +190,32 @@ class ControllerApplication:
         self._last_train_blocks = {str(train.get("id")): str(train.get("block_id", "")) for train in self.trains}
         if self.database_path != ":memory:" and self.runtime.layout_repository.load(self.layout_id) is not None:
             self.load_layout(self.layout_id)
+        self._restore_automation_programs()
+
+    def _restore_automation_programs(self) -> None:
+        """Restore persisted routines and rebuild their train-specific actions."""
+
+        restored: list[dict[str, Any]] = []
+        for raw in self._settings_repository.load_automation_programs():
+            try:
+                program_id = str(raw.get("id", "")).strip()
+                train_id = self._canonical_train_id(str(raw.get("train_id", "")))
+                actions, duration = self._compile_automation_program(train_id, raw.get("blocks"))
+            except (TypeError, ValueError):
+                # Keep startup safe if an old routine references a train or
+                # block format that no longer exists. It can be replaced from
+                # the automation editor without preventing the controller
+                # from starting.
+                continue
+            restored.append({
+                "id": program_id,
+                "name": str(raw.get("name", "Untitled train routine")),
+                "train_id": train_id,
+                "blocks": deepcopy(raw.get("blocks")),
+                "duration_s": round(duration, 3),
+                "_compiled_actions": [self._recording_action_payload(action) for action in actions],
+            })
+        self._automation_programs = restored
 
     def _restore_formation_metadata(self) -> None:
         """Load persisted locomotive pairings without replacing the UI fixture."""
@@ -1291,8 +1317,10 @@ class ControllerApplication:
             "duration_s": round(duration, 3),
             "_compiled_actions": [self._recording_action_payload(action) for action in actions],
         }
-        self._automation_programs = [item for item in self._automation_programs if item.get("id") != program_id]
-        self._automation_programs.append(stored)
+        programs = [item for item in self._automation_programs if item.get("id") != program_id]
+        programs.append(stored)
+        self._settings_repository.replace_automation_programs(programs)
+        self._automation_programs = programs
         self.events.append({"type": "automation_program_saved", "program_id": program_id, "train_id": train_id})
         return self.automation_programs_state()
 
@@ -2984,9 +3012,11 @@ class ControllerApplication:
             elif kind in {"delete_automation_program", "remove_automation_program"}:
                 program_id = str(payload.get("program_id", payload.get("id", ""))).strip()
                 before = len(self._automation_programs)
-                self._automation_programs = [item for item in self._automation_programs if item.get("id") != program_id]
-                if len(self._automation_programs) == before:
+                programs = [item for item in self._automation_programs if item.get("id") != program_id]
+                if len(programs) == before:
                     raise ValueError("automation program not found")
+                self._settings_repository.replace_automation_programs(programs)
+                self._automation_programs = programs
                 self.events.append({"type": "automation_program_deleted", "program_id": program_id})
             elif kind in {"play_automation_program", "run_automation_program"}:
                 self.play_automation_program(payload)

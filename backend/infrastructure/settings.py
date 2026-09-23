@@ -182,6 +182,10 @@ class SQLiteSettingsRepository:
         self._connection = sqlite3.connect(str(path), check_same_thread=False)
         with self._connection:
             self._connection.execute("CREATE TABLE IF NOT EXISTS app_settings (id INTEGER PRIMARY KEY CHECK (id = 1), data_json TEXT NOT NULL)")
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS automation_programs ("
+                "id TEXT PRIMARY KEY, position INTEGER NOT NULL, data_json TEXT NOT NULL)"
+            )
 
     def load(self) -> dict[str, Any]:
         with self._lock:
@@ -196,6 +200,40 @@ class SQLiteSettingsRepository:
                 (json.dumps(validated, separators=(",", ":")),),
             )
         return validated
+
+    def load_automation_programs(self) -> list[dict[str, Any]]:
+        """Load authored automation routines stored beside application settings."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT data_json FROM automation_programs ORDER BY position, id"
+            ).fetchall()
+        programs: list[dict[str, Any]] = []
+        for (raw,) in rows:
+            try:
+                value = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, dict) and str(value.get("id", "")).strip():
+                programs.append(value)
+        return programs
+
+    def replace_automation_programs(self, programs: list[Mapping[str, Any]]) -> None:
+        """Atomically replace the authored automation routine catalogue."""
+
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM automation_programs")
+            self._connection.executemany(
+                "INSERT INTO automation_programs (id, position, data_json) VALUES (?, ?, ?)",
+                [
+                    (
+                        str(program.get("id", "")),
+                        index,
+                        json.dumps(dict(program), separators=(",", ":")),
+                    )
+                    for index, program in enumerate(programs)
+                ],
+            )
 
     def close(self) -> None:
         with self._lock:

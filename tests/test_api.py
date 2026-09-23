@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import threading
 import tempfile
 import time
@@ -645,6 +646,55 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(motion.route, (motion.block_id,))
         finally:
             app.close()
+
+    def test_one_block_scheduled_routine_survives_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "controller.sqlite3")
+            first = ControllerApplication.sample(database_path=database)
+            try:
+                first.stop_motion_clock()
+                first.command({
+                    "type": "save_automation_program",
+                    "program": {
+                        "id": "persisted-one-block-routine",
+                        "name": "Persisted one-block departure",
+                        "train_id": "train-3",
+                        "blocks": [{"type": "drive", "speed_kmh": 20, "duration_s": 0.3}],
+                    },
+                })
+                first.command({
+                    "type": "add_route",
+                    "route": {
+                        "id": "persisted-one-block-route",
+                        "name": "Persisted one-block route",
+                        "flow": [{"type": "routine", "program_id": "persisted-one-block-routine"}],
+                    },
+                })
+                first.save_layout("default")
+            finally:
+                first.close()
+
+            second = ControllerApplication.sample(database_path=database)
+            try:
+                second.stop_motion_clock()
+                self.assertTrue(any(item["id"] == "persisted-one-block-routine" for item in second.automation_programs_state()))
+                second.update_settings({"operations": {"connected_blocks": False}})
+                second.command({"type": "set_train_mode", "train_id": "train-3", "mode": "automatic"})
+                second.command({
+                    "type": "add_schedule",
+                    "schedule": {
+                        "id": "persisted-one-block-schedule", "time": "00:01", "service": "Persisted service",
+                        "number": "3", "train_id": "train-3", "dispatch_mode": "route",
+                        "route_id": "persisted-one-block-route",
+                    },
+                })
+                second.runtime.scheduler.reset(tick=0)
+                second.runtime.scheduler.start()
+                second.tick(2)
+                self.assertTrue(any(event["type"] == "schedule_routine_started" for event in second.state()["events"]))
+                self.assertGreater(second.runtime.dispatcher.trains["train-3"].automatic_speed, 0)
+            finally:
+                second.close()
 
     def test_simulation_controls_pause_and_manual_tick(self) -> None:
         app = ControllerApplication.sample()
