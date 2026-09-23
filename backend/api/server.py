@@ -43,13 +43,14 @@ from backend.core.routing import RouteAlgorithm, find_route
 from backend.infrastructure.train_catalogue import TrainCatalogue, export_csv, export_json, import_csv, import_json
 from backend.infrastructure.train_database import DecoderFunctionMapping, MaintenanceRecord, RollingStockInventoryRecord, RollingStockRecord, TrainModel
 from backend.infrastructure.settings import SQLiteSettingsRepository, validate_settings
+from backend.infrastructure.operating_plan import OperatingPlanRepository
 from backend.infrastructure.wlan import WindowsRouteAPI, preflight_z21_wlan
 from backend.infrastructure.scan_store import MAX_UPLOAD_BODY_BYTES, ScanStore
 from backend.runtime import ControllerRuntime
 from backend.services.dispatcher import ControlMode
 from backend.services.connection_speed import ConnectionSpeedPolicy, next_connection
 from backend.services.block_editor import block_id as validate_block_id, next_block_id, rename_references
-from backend.services.scheduler import ScheduleStop as RuntimeScheduleStop
+from backend.services.scheduler import ScheduleEvent as RuntimeScheduleEvent, ScheduleStop as RuntimeScheduleStop
 from backend.services.coordinate_move import (
     CoordinateMovementExecutionPlanner,
     CoordinateMovementPlanner,
@@ -64,6 +65,7 @@ from backend.services.pinboard import nearest_track_coordinate
 ROOT_DIR = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = ROOT_DIR / "frontend"
 SCAN_DIR = ROOT_DIR / "data" / "scans"
+WORLD_DAY_MINUTES = 24 * 60
 
 
 def _schedule_tick(value: Any, fallback: Any, index: int, *, default: int | None = None) -> int:
@@ -123,6 +125,7 @@ class ControllerApplication:
     simulation_running: bool = True
     connection_limits: list[dict[str, Any]] = field(default_factory=list)
     database_path: str = ":memory:"
+    operating_plan_path: str | Path | None = None
     layout_id: str = "default"
     layout_name: str = "Sample H0 layout"
     z21_host: str | None = None
@@ -171,6 +174,16 @@ class ControllerApplication:
 
         self._settings_repository = SQLiteSettingsRepository(self.database_path)
         self._settings = self._settings_repository.load()
+        plan_path = self.operating_plan_path or (
+            Path(self.database_path).with_name("operating_plan.json") if self.database_path != ":memory:" else None
+        )
+        self._operating_plan_repository = OperatingPlanRepository(plan_path)
+        self._loaded_operating_plan = self._operating_plan_repository.load()
+        self._operating_plan_routines = (
+            deepcopy(self._loaded_operating_plan["routines"])
+            if self._loaded_operating_plan is not None
+            else self._settings_repository.load_automation_programs()
+        )
         scan_directory = self.scan_directory or (Path(self.database_path).resolve().parent / "scans" if self.database_path != ":memory:" else SCAN_DIR)
         self._scan_store = ScanStore(scan_directory)
         if self.runtime is None:
@@ -190,13 +203,26 @@ class ControllerApplication:
         self._last_train_blocks = {str(train.get("id")): str(train.get("block_id", "")) for train in self.trains}
         if self.database_path != ":memory:" and self.runtime.layout_repository.load(self.layout_id) is not None:
             self.load_layout(self.layout_id)
+        if self._loaded_operating_plan is not None:
+            self.schedules = deepcopy(self._loaded_operating_plan["schedules"])
+            self._sync_scheduler()
         self._restore_automation_programs()
+        self._persist_operating_plan()
+
+    def _persist_operating_plan(self) -> None:
+        """Persist timetable rows and authored routines in the sidecar file."""
+
+        routines = [
+            {key: deepcopy(value) for key, value in program.items() if key != "_compiled_actions"}
+            for program in self._automation_programs
+        ]
+        self._operating_plan_repository.save(self.schedules, routines)
 
     def _restore_automation_programs(self) -> None:
         """Restore persisted routines and rebuild their train-specific actions."""
 
         restored: list[dict[str, Any]] = []
-        for raw in self._settings_repository.load_automation_programs():
+        for raw in self._operating_plan_routines:
             try:
                 program_id = str(raw.get("id", "")).strip()
                 train_id = self._canonical_train_id(str(raw.get("train_id", "")))
@@ -806,6 +832,28 @@ class ControllerApplication:
         if was_running or self.simulation_running:
             self.runtime.scheduler.start(tick=current_tick, world_tick=current_world_tick)
 
+    def _advance_repeating_world_schedule(self, count: int) -> tuple[RuntimeScheduleEvent, ...]:
+        """Advance timetable minutes and replay the timetable at each day boundary."""
+
+        if self.runtime is None or not self.runtime.scheduler.running or count <= 0:
+            return ()
+        events: list[RuntimeScheduleEvent] = []
+        remaining = int(count)
+        scheduler = self.runtime.scheduler
+        while remaining:
+            current = scheduler.world_current_tick % WORLD_DAY_MINUTES
+            until_rollover = WORLD_DAY_MINUTES - current
+            step = min(remaining, until_rollover)
+            if step:
+                events.extend(scheduler.advance_world(step))
+                remaining -= step
+            if scheduler.world_current_tick >= WORLD_DAY_MINUTES and (remaining or step == until_rollover):
+                legacy_tick = scheduler.current_tick
+                scheduler.reset(tick=legacy_tick, world_tick=0)
+                scheduler.start(tick=legacy_tick, world_tick=0)
+                events.extend(scheduler.events_at(0))
+        return tuple(events)
+
     def _apply_speed_policy(self, snapshot: LayoutSnapshot) -> None:
         try:
             self.runtime.track.configure_speed_limits(ConnectionSpeedPolicy(snapshot.connection_limits,
@@ -1321,6 +1369,7 @@ class ControllerApplication:
         programs.append(stored)
         self._settings_repository.replace_automation_programs(programs)
         self._automation_programs = programs
+        self._persist_operating_plan()
         self.events.append({"type": "automation_program_saved", "program_id": program_id, "train_id": train_id})
         return self.automation_programs_state()
 
@@ -2502,7 +2551,7 @@ class ControllerApplication:
                     self._world_clock_seconds += safe_steps * 60
                     if self.runtime.scheduler.running:
                         self.runtime.scheduler.advance(safe_steps)
-                        schedule_events = self.runtime.scheduler.advance_world(safe_steps)
+                        schedule_events = self._advance_repeating_world_schedule(safe_steps)
                     else:
                         schedule_events = ()
                 else:
@@ -2520,7 +2569,7 @@ class ControllerApplication:
                         self.runtime.scheduler.advance(schedule_steps)
                     world_target_tick = int(self._world_clock_seconds // 60)
                     world_steps = max(0, world_target_tick - self.runtime.scheduler.world_current_tick)
-                    schedule_events = self.runtime.scheduler.advance_world(world_steps) if self.runtime.scheduler.running else ()
+                    schedule_events = self._advance_repeating_world_schedule(world_steps)
                 for schedule_event in schedule_events:
                     state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
                     schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]
@@ -2567,6 +2616,7 @@ class ControllerApplication:
         if name:
             self.layout_name = name.strip() or self.layout_name
         record = self.runtime.layout_repository.save(selected_id, self.runtime.layout.snapshot().snapshot, name=self.layout_name)
+        self._persist_operating_plan()
         self.events.append({"type": "layout_saved", "layout_id": record.layout_id, "revision": record.revision})
         return {"layout_id": record.layout_id, "name": record.name, "revision": record.revision, "updated_at": record.updated_at}
 
@@ -3017,6 +3067,7 @@ class ControllerApplication:
                     raise ValueError("automation program not found")
                 self._settings_repository.replace_automation_programs(programs)
                 self._automation_programs = programs
+                self._persist_operating_plan()
                 self.events.append({"type": "automation_program_deleted", "program_id": program_id})
             elif kind in {"play_automation_program", "run_automation_program"}:
                 self.play_automation_program(payload)
@@ -3994,6 +4045,7 @@ class ControllerApplication:
                 self._validate_schedule_coordinate(schedule)
                 self.schedules.append(schedule)
                 self._sync_runtime_from_ui()
+                self._persist_operating_plan()
                 self._publish_domain_event(
                     ScheduleStateChanged(
                         schedule_id=schedule_id,
@@ -4015,6 +4067,7 @@ class ControllerApplication:
                 self._validate_schedule_coordinate(updates)
                 schedule.update(updates)
                 self._sync_runtime_from_ui()
+                self._persist_operating_plan()
                 self._publish_domain_event(
                     ScheduleStateChanged(
                         schedule_id=schedule_id,
@@ -4029,6 +4082,7 @@ class ControllerApplication:
                 if len(self.schedules) == before:
                     raise ValueError(f"Unknown schedule: {schedule_id}")
                 self._sync_runtime_from_ui()
+                self._persist_operating_plan()
                 self._publish_domain_event(ScheduleStateChanged(schedule_id=schedule_id, status=ScheduleStatus.CANCELLED))
                 self.events.append({"type": "schedule_removed", "schedule_id": schedule_id})
             elif kind == "simulate_schedule":

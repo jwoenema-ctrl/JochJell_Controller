@@ -696,6 +696,87 @@ class ApiTests(unittest.TestCase):
             finally:
                 second.close()
 
+    def test_timetable_repeats_after_world_day_rollover(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.command({
+                "type": "save_automation_program",
+                "program": {
+                    "id": "daily-routine",
+                    "name": "Daily routine",
+                    "train_id": "train-3",
+                    "blocks": [{"type": "drive", "speed_kmh": 20, "duration_s": 0.1}],
+                },
+            })
+            app.command({
+                "type": "add_route",
+                "route": {
+                    "id": "daily-route",
+                    "name": "Daily route",
+                    "flow": [{"type": "routine", "program_id": "daily-routine"}],
+                },
+            })
+            app.update_settings({"operations": {"connected_blocks": False}})
+            app.command({"type": "set_train_mode", "train_id": "train-3", "mode": "automatic"})
+            app.command({
+                "type": "add_schedule",
+                "schedule": {
+                    "id": "daily-schedule", "time": "00:01", "service": "Daily service",
+                    "number": "3", "train_id": "train-3", "dispatch_mode": "route", "route_id": "daily-route",
+                },
+            })
+            app.runtime.scheduler.reset(tick=0, world_tick=0)
+            app.runtime.scheduler.start()
+            app.tick(2)
+            departure_count = lambda: sum(
+                event["type"] == "schedule_departure" and event["schedule_id"] == "daily-schedule"
+                for event in app.events
+            )
+            self.assertEqual(departure_count(), 1)
+            for _ in range(14):
+                app.tick(100)
+            while app.runtime.scheduler.world_current_tick < 1439:
+                app.tick(1)
+            app.tick(1)
+            app.tick(2)
+            self.assertEqual(departure_count(), 2)
+            self.assertEqual(app.runtime.scheduler.world_current_tick, 2)
+        finally:
+            app.close()
+
+    def test_timetable_and_routines_persist_in_operating_plan_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "controller.sqlite3")
+            first = ControllerApplication.sample(database_path=database)
+            try:
+                first.stop_motion_clock()
+                first.command({
+                    "type": "save_automation_program",
+                    "program": {
+                        "id": "sidecar-routine",
+                        "name": "Sidecar routine",
+                        "train_id": "train-3",
+                        "blocks": [{"type": "drive", "speed_kmh": 15, "duration_s": 0.2}],
+                    },
+                })
+                first.command({
+                    "type": "add_schedule",
+                    "schedule": {
+                        "id": "sidecar-schedule", "time": "12:34", "service": "Saved service",
+                        "number": "3", "train_id": "train-3", "station_id": "ST02",
+                    },
+                })
+                self.assertTrue((Path(directory) / "operating_plan.json").is_file())
+            finally:
+                first.close()
+            second = ControllerApplication.sample(database_path=database)
+            try:
+                self.assertTrue(any(item["id"] == "sidecar-schedule" for item in second.schedules))
+                self.assertTrue(any(item["id"] == "sidecar-routine" for item in second.automation_programs_state()))
+            finally:
+                second.close()
+
     def test_simulation_controls_pause_and_manual_tick(self) -> None:
         app = ControllerApplication.sample()
         app.stop_motion_clock()
