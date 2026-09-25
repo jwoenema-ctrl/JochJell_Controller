@@ -1074,7 +1074,7 @@
     const trains = app.state.trains || [];
     const draft = app.automationDraft;
     if (!trains.some((train) => train.id === draft.trainId)) draft.trainId = (trains.find((train) => train.id === app.selectedTrainId) || trains[0] || {}).id || '';
-    trainSelect.innerHTML = trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || train.id)} � #${escapeHtml(train.number || '')}</option>`).join('');
+    trainSelect.innerHTML = trains.map((train) => `<option value="${escapeHtml(train.id)}">${escapeHtml(train.name || train.id)} · #${escapeHtml(train.number || '—')}</option>`).join('');
     trainSelect.value = draft.trainId;
     $('#automation-program-name').value = draft.name || 'New train routine';
     $('#automation-program-title').textContent = draft.name || 'New train routine';
@@ -1086,7 +1086,7 @@
     $('#automation-empty-state').classList.toggle('is-hidden', draft.blocks.length > 0);
     const programList = $('#automation-program-list');
     programList.innerHTML = app.automationPrograms.length
-      ? app.automationPrograms.map((program) => `<div class="automation-program-row" data-automation-program-id="${escapeHtml(program.id)}"><span><strong>${escapeHtml(program.name || program.id)}</strong><small>${escapeHtml(String(program.train_id || ''))} � ${escapeHtml(String((program.blocks || []).length))} blocks � ${escapeHtml(String(program.duration_s || 0))} s</small></span><span class="automation-program-row-actions"><button type="button" class="text-button" data-automation-program-action="load">Load</button><button type="button" class="text-button" data-automation-program-action="run">Run</button><button type="button" class="text-button danger-text" data-automation-program-action="delete">Delete</button></span></div>`).join('')
+      ? app.automationPrograms.map((program) => `<div class="automation-program-row" data-automation-program-id="${escapeHtml(program.id)}"><span><strong>${escapeHtml(program.name || program.id)}</strong><small>${escapeHtml(String(program.train_id || ''))} · ${escapeHtml(String((program.blocks || []).length))} blocks · ${escapeHtml(String(program.duration_s || 0))} s</small></span><span class="automation-program-row-actions"><button type="button" class="text-button" data-automation-program-action="load">Load</button><button type="button" class="text-button" data-automation-program-action="run">Run</button><button type="button" class="text-button danger-text" data-automation-program-action="delete">Delete</button></span></div>`).join('')
       : '<p class="settings-help">No saved routines yet. Build one and save it here.</p>';
   }
 
@@ -2473,12 +2473,10 @@
     }
     const dataLengthRow = $$('.data-item', content).find((row) => row.firstElementChild && row.firstElementChild.textContent === 'Overall length / mass');
     if (dataLengthRow && dataLengthRow.lastElementChild) {
-      dataLengthRow.lastElementChild.textContent = formatLengthMm(train.length_mm) + ' mm � ' + (train.mass_g == null || train.mass_g === '' ? '-' : train.mass_g) + ' g';
+      dataLengthRow.lastElementChild.textContent = formatLengthMm(train.length_mm) + ' mm · ' + (train.mass_g == null || train.mass_g === '' ? '-' : train.mass_g) + ' g';
     }
-    if (dataLengthRow && dataLengthRow.lastElementChild) dataLengthRow.lastElementChild.textContent = formatLengthMm(train.length_mm) + ' mm - ' + (train.mass_g == null || train.mass_g === '' ? '-' : train.mass_g) + ' g';
     const formationSummary = $('.consist-summary strong', content);
-    if (formationSummary) formationSummary.textContent = (train.consist || []).length + ' vehicles � ' + formatLengthMm(train.length_mm) + ' mm';
-    if (formationSummary) formationSummary.textContent = (train.consist || []).length + ' vehicles - ' + formatLengthMm(train.length_mm) + ' mm';
+    if (formationSummary) formationSummary.textContent = (train.consist || []).length + ' vehicles · ' + formatLengthMm(train.length_mm) + ' mm';
     $$('.editor-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.editorTab === app.editorTab));
   }
 
