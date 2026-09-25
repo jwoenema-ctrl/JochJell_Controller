@@ -2677,13 +2677,22 @@
     const editing = app.editingRouteId;
     if (editing) {
       const existing = app.state.routes.find((item) => item.id === editing);
+      const previous = existing ? clone(existing) : null;
       if (existing) Object.assign(existing, route, { id: editing, enabled: existing.enabled !== false });
-      await sendCommand({ type: 'update_route', route_id: editing, route });
+      const response = await sendCommand({ type: 'update_route', route_id: editing, route });
+      if (!response) {
+        if (existing && previous) Object.assign(existing, previous);
+        renderRoutes();
+        return;
+      }
       $('#route-status').textContent = `${name} updated.`;
       showToast(`${name} updated`, 'success');
     } else {
-      app.state.routes.push(route);
-      await sendCommand({ type: 'add_route', route });
+      const response = await sendCommand({ type: 'add_route', route });
+      if (!response) {
+        renderRoutes();
+        return;
+      }
       $('#route-status').textContent = `${name} saved.`;
       showToast(`${name} saved`, 'success');
     }
@@ -2695,12 +2704,17 @@
     if (!route || !window.confirm(`Delete ${route.name || route.id}?`)) return;
     if (pendingRouteDeletes.has(routeId)) return;
     pendingRouteDeletes.add(routeId);
+    const previousRoutes = app.state.routes;
     app.state.routes = app.state.routes.filter((item) => item.id !== routeId);
     if (app.editingRouteId === routeId) clearRouteEditor();
     renderRoutes();
     const response = await sendCommand({ type: 'remove_route', route_id: routeId });
     pendingRouteDeletes.delete(routeId);
-    if (!response) { renderRoutes(); return; }
+    if (!response) {
+      app.state.routes = previousRoutes;
+      renderRoutes();
+      return;
+    }
     app.state.routes = app.state.routes.filter((item) => item.id !== routeId);
     renderRoutes();
     showToast(`${route.name || route.id} deleted`, 'success');
@@ -2825,17 +2839,28 @@
     if (id) {
       const schedule = app.state.schedules.find((item) => item.id === id);
       if (!schedule) return;
+      const previous = clone(schedule);
       Object.assign(schedule, fields);
       renderSchedules();
+      const response = await sendCommand({ type: 'update_schedule', schedule_id: id, schedule: fields });
+      if (!response) {
+        Object.assign(schedule, previous);
+        renderSchedules();
+        return;
+      }
       $('#schedule-editor').close();
-      await sendCommand({ type: 'update_schedule', schedule_id: id, schedule: fields });
       showToast(`${service} updated`, 'success');
     } else {
       const schedule = { id: `local-${Date.now()}`, ...fields };
       app.state.schedules.push(schedule);
       renderSchedules();
+      const response = await sendCommand({ type: 'add_schedule', schedule });
+      if (!response) {
+        app.state.schedules = app.state.schedules.filter((item) => item.id !== schedule.id);
+        renderSchedules();
+        return;
+      }
       $('#schedule-editor').close();
-      await sendCommand({ type: 'add_schedule', schedule });
       showToast(`${service} added to dispatcher timetable`, 'success');
     }
     app.editingScheduleId = null;

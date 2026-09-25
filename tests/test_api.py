@@ -1043,13 +1043,20 @@ class ApiTests(unittest.TestCase):
                 train = next(item for item in app.state()["trains"] if item["id"] == "t2")
                 self.assertEqual(train["route"], ["B04", "B03", "B02"])
                 self.assertEqual(train["destination_block_id"], "B02")
-                app.save_layout("default")
+                app.command({"type": "add_schedule", "schedule": {
+                    "id": "yard-central-departure", "time": "12:34", "service": "Saved route service",
+                    "number": "3", "train_id": "train-3", "dispatch_mode": "route",
+                    "route_id": "yard-central",
+                }})
             finally:
                 app.close()
             restored = ControllerApplication.sample(database_path=database_path)
             try:
                 route = next(item for item in restored.routes if item["id"] == "yard-central")
                 self.assertEqual(route["name"], "Yard to Central (A*)")
+                schedule = next(item for item in restored.schedules if item["id"] == "yard-central-departure")
+                self.assertEqual(schedule["dispatch_mode"], "route")
+                self.assertEqual(schedule["route_id"], "yard-central")
                 restored.command({"type": "remove_route", "route_id": "yard-central"})
                 self.assertNotIn("yard-central", [item["id"] for item in restored.routes])
             finally:

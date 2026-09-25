@@ -3987,6 +3987,7 @@ class ControllerApplication:
                     saved["flow"] = flow
                 self.routes.append(saved)
                 self._sync_runtime_from_ui()
+                self.save_layout(self.layout_id)
                 self.events.append({"type": "route_added", "route_id": route_id, "route": deepcopy(saved)})
             elif kind == "update_route":
                 route_id = str(payload.get("route_id", payload.get("id", ""))).strip()
@@ -4014,6 +4015,7 @@ class ControllerApplication:
                 if flow_present:
                     route["flow"] = flow
                 self._sync_runtime_from_ui()
+                self.save_layout(self.layout_id)
                 self.events.append({"type": "route_updated", "route_id": route_id, "route": deepcopy(route)})
             elif kind == "remove_route":
                 route_id = str(payload.get("route_id", payload.get("id", ""))).strip()
@@ -4022,6 +4024,7 @@ class ControllerApplication:
                 if len(self.routes) == before:
                     raise ValueError(f"Unknown route: {route_id}")
                 self._sync_runtime_from_ui()
+                self.save_layout(self.layout_id)
                 self.events.append({"type": "route_removed", "route_id": route_id})
             elif kind == "apply_route":
                 route_id = str(payload.get("route_id", "")).strip()
