@@ -177,6 +177,18 @@ class Z21TransportTests(unittest.TestCase):
         self.assertIn("sent 07 00 40 00 21 21 00", status.detail)
         self.assertIn("no UDP datagram was received", status.detail)
 
+    def test_connection_reopens_socket_after_a_failed_probe(self) -> None:
+        first = FakeDatagramSocket()
+        second = FakeDatagramSocket([version_reply()])
+        sockets = iter((first, second))
+        transport = Z21LanTransport(socket_factory=lambda: next(sockets))
+
+        transport.open()
+        self.assertFalse(transport.check_connection().connected)
+        self.assertTrue(transport.check_connection().connected)
+        self.assertTrue(first.closed)
+        self.assertEqual(len(second.sent), 1)
+
     def test_connection_rejects_bad_xbus_checksum(self) -> None:
         bad_reply = encode_dataset(LAN_X_HEADER, b"\x63\x21\x30\x12\x61")
         socket = FakeDatagramSocket([bad_reply])

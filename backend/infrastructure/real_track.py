@@ -396,6 +396,10 @@ class Z21TrackSystem:
                 build_rbus_get_data(int(group)),
                 expected_header=0x0080,
                 command="poll_feedback",
+                # Missing feedback is a safety event, but it is not proof
+                # that the command-station link is gone. Link health is
+                # checked separately by the periodic version probe.
+                keep_connection_on_timeout=True,
             )
             results.append(result)
             if not result.accepted:

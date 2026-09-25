@@ -536,11 +536,18 @@ class ControllerApplication:
     def _motion_loop(self) -> None:
         interval = self.runtime.track.tick_seconds if self.simulation_mode else 1.0
         next_tick = time.monotonic() + interval
+        last_tick = time.monotonic()
         while not self._motion_stop.wait(max(0, next_tick - time.monotonic())):
             try:
+                now = time.monotonic()
+                elapsed = max(0.0, now - last_tick)
+                last_tick = now
                 with self._lock:
                     if self.track_power and (not self.simulation_mode or self.simulation_running):
-                        self.tick(1, elapsed_seconds=interval)
+                        # Hardware checks can take longer than one cadence when
+                        # a WLAN packet is lost. Advance the world by the real
+                        # elapsed time instead of silently losing those minutes.
+                        self.tick(1, elapsed_seconds=elapsed if not self.simulation_mode else interval)
                 next_tick += interval
                 if next_tick < time.monotonic() - interval:
                     # Never burst hardware commands after a suspended computer.
@@ -2567,8 +2574,11 @@ class ControllerApplication:
                         # Keep the legacy simulation-minute counter available
                         # for explicit diagnostics and existing integrations.
                         self.runtime.scheduler.advance(schedule_steps)
-                    world_target_tick = int(self._world_clock_seconds // 60)
-                    world_steps = max(0, world_target_tick - self.runtime.scheduler.world_current_tick)
+                    # The scheduler is reset to minute 0 at a model-day
+                    # boundary, while the UI counter remains absolute.
+                    world_target_tick = int(self._world_clock_seconds // 60) % WORLD_DAY_MINUTES
+                    current_world_tick = self.runtime.scheduler.world_current_tick % WORLD_DAY_MINUTES
+                    world_steps = (world_target_tick - current_world_tick) % WORLD_DAY_MINUTES
                     schedule_events = self._advance_repeating_world_schedule(world_steps)
                 for schedule_event in schedule_events:
                     state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"

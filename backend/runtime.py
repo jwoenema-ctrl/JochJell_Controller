@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import time
 from typing import Mapping
 
 from .core import EventController, LayoutController, StateController
@@ -56,6 +57,9 @@ class ControllerRuntime:
     calibration: TrainCalibrationService
     coordinate_movement: CoordinateMovementExecutor
     recording: AutomationRecordingService
+    _connection_check_at: float = field(default=float("-inf"), init=False, repr=False)
+
+    CONNECTION_CHECK_INTERVAL_SECONDS = 5.0
 
     @classmethod
     def create(cls, *, database_path: str = ":memory:") -> "ControllerRuntime":
@@ -140,8 +144,14 @@ class ControllerRuntime:
         cycle: DispatchCycle | None = None
         for _ in range(max(0, count)):
             if isinstance(self.track, Z21TrackSystem):
-                connection = self.connection.check()
-                if not connection.status.connected:
+                now = time.monotonic()
+                if now - self._connection_check_at >= self.CONNECTION_CHECK_INTERVAL_SECONDS:
+                    connection = self.connection.check()
+                    self._connection_check_at = now
+                    connected = connection.status.connected
+                else:
+                    connected = self.connection.status.connected
+                if not connected:
                     self.dispatcher.emergency_stop()
             self.track.tick()
             if isinstance(self.track, Z21TrackSystem) and self.track.feedback_groups():

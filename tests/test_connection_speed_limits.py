@@ -274,6 +274,22 @@ class ConnectionApiTests(unittest.TestCase):
 
 
 class ConnectionAdapterTests(unittest.TestCase):
+    def test_z21_health_probe_is_not_run_on_every_motion_tick(self):
+        transport = Mock()
+        connected = ConnectionStatus(ConnectionState.CONNECTED, "fake-z21")
+        transport.check_connection.return_value = connected
+        transport.connection_status.return_value = connected
+        track = Z21TrackSystem(transport)
+        runtime = ControllerRuntime._compose(track, database_path=":memory:", connection=ConnectionChecker(track))
+        try:
+            runtime.tick(3)
+            self.assertEqual(transport.check_connection.call_count, 1)
+            runtime._connection_check_at -= runtime.CONNECTION_CHECK_INTERVAL_SECONDS
+            runtime.tick()
+            self.assertEqual(transport.check_connection.call_count, 2)
+        finally:
+            runtime.close()
+
     def test_reverse_and_train_override(self):
         track = SimulatedTrackSystem()
         track.add_train("train", "B", route=("A", "B", "C"))

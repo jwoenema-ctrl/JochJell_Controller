@@ -11,7 +11,7 @@ import unittest
 import urllib.request
 from unittest.mock import patch
 
-from backend.api.server import ControllerApplication, make_server
+from backend.api.server import ControllerApplication, WORLD_DAY_MINUTES, make_server
 from backend.infrastructure.interfaces import CommandResult
 
 
@@ -742,6 +742,21 @@ class ApiTests(unittest.TestCase):
             app.tick(2)
             self.assertEqual(departure_count(), 2)
             self.assertEqual(app.runtime.scheduler.world_current_tick, 2)
+        finally:
+            app.close()
+
+    def test_elapsed_tick_after_rollover_advances_only_new_day_minutes(self) -> None:
+        app = ControllerApplication.sample()
+        app.stop_motion_clock()
+        try:
+            app.runtime.scheduler.reset(tick=0, world_tick=WORLD_DAY_MINUTES - 1)
+            app.runtime.scheduler.start()
+            app._world_clock_seconds = WORLD_DAY_MINUTES * 60 - 1
+            with patch.object(app, "_advance_repeating_world_schedule", wraps=app._advance_repeating_world_schedule) as advance:
+                app.tick(1, elapsed_seconds=1)
+                app.tick(1, elapsed_seconds=1)
+            self.assertEqual(app.runtime.scheduler.world_current_tick, 1)
+            self.assertEqual(advance.call_args_list[-1].args, (1,))
         finally:
             app.close()
 

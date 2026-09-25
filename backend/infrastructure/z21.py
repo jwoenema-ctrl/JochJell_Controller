@@ -531,6 +531,20 @@ class Z21LanTransport:
                 self._clock(),
             )
             return self._status
+        if self._status.state is ConnectionState.DISCONNECTED:
+            # Recreate a socket after a timeout or send error. This lets a
+            # later health probe recover from WLAN roaming or a Z21 restart
+            # without restarting the controller process.
+            socket_obj, self._socket = self._socket, None
+            self._local_endpoint = ""
+            try:
+                socket_obj.close()
+            except OSError:
+                pass
+            self._status = ConnectionStatus(ConnectionState.DISCONNECTED, self.endpoint, checked_at=self._clock())
+            opened = self.open()
+            if opened.state is ConnectionState.ERROR:
+                return opened
         try:
             request = build_get_version()
             self._last_response_hex = ""
