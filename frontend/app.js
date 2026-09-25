@@ -121,6 +121,7 @@
     automationDraft: { id: null, name: 'New train routine', trainId: '', blocks: [] },
     automationSelectedBlockId: null,
     automationPrograms: [],
+    stateMutationRevision: 0,
     routeFlowSelectedId: null
   };
   const pendingRouteDeletes = new Set();
@@ -468,7 +469,12 @@
 
   async function pollController() {
     if (document.visibilityState === 'hidden') return;
+    const revision = app.stateMutationRevision;
     const results = await Promise.allSettled(['/api/connection', '/api/feedback', '/api/state', '/api/settings'].map((endpoint) => fetchJson(endpoint)));
+    // A command or manual simulation tick may complete while this parallel
+    // refresh is in flight. Do not let that older snapshot restore the clock
+    // or pause state after the newer command response was applied.
+    if (revision !== app.stateMutationRevision) return;
     const connectionResult = results[0];
     if (connectionResult && connectionResult.status === 'fulfilled') {
       const connection = unwrap(connectionResult.value) || {};
@@ -3383,6 +3389,7 @@
   }
 
   async function sendCommand(command) {
+    app.stateMutationRevision += 1;
     const changesControl = ['set_train_mode', 'set_mode', 'track_power', 'emergency_stop', 'stop_all', 'stop_train', 'stop', 'remove_train'].includes(command.type);
     let releaseControl = null;
     if (changesControl) {
@@ -3470,6 +3477,7 @@
   async function tickSimulation() {
     const button = $('#simulation-tick');
     if (button) button.disabled = true;
+    app.stateMutationRevision += 1;
     try {
       const response = await fetchJson('/api/simulation/tick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds: 60, rate: app.simRate }) });
       mergePayload(response);
@@ -3795,7 +3803,7 @@
     $('#automation-dropzone').addEventListener('dragleave', () => $('#automation-dropzone').classList.remove('is-dragging'));
     $('#automation-dropzone').addEventListener('drop', (event) => { event.preventDefault(); $('#automation-dropzone').classList.remove('is-dragging'); addAutomationBlock(event.dataTransfer.getData('text/plain')); });
     $('#automation-block-list').addEventListener('change', updateAutomationBlockField);
-    $('#automation-block-list').addEventListener('click', (event) => { const button = event.target.closest('[data-automation-action]'); if (button) automationBlockAction(button.dataset.automationAction, Number(button.dataset.automationIndex)); else { const block = event.target.closest('[data-automation-block-id]'); if (block) { app.automationSelectedBlockId = block.dataset.automationBlockId; renderAutomationStudio(); } } });
+    $('#automation-block-list').addEventListener('click', (event) => { const button = event.target.closest('[data-automation-action]'); if (button) automationBlockAction(button.dataset.automationAction, Number(button.dataset.automationIndex)); else if (!event.target.closest('input, select, textarea, button')) { const block = event.target.closest('[data-automation-block-id]'); if (block) { app.automationSelectedBlockId = block.dataset.automationBlockId; renderAutomationStudio(); } } });
     $('#automation-program-list').addEventListener('click', (event) => { const button = event.target.closest('[data-automation-program-action]'); const row = event.target.closest('[data-automation-program-id]'); if (!button || !row) return; const id = row.dataset.automationProgramId; if (button.dataset.automationProgramAction === 'load') loadAutomationProgram(id); if (button.dataset.automationProgramAction === 'run') { loadAutomationProgram(id); runAutomationProgram(); } if (button.dataset.automationProgramAction === 'delete') deleteAutomationProgram(id); });
     $('#automation-import-recording').addEventListener('click', importLastRecording);
     $('#automation-clear-program').addEventListener('click', clearAutomationProgram);
