@@ -1496,6 +1496,7 @@
       renderPinboard();
       return;
     }
+    $('#layout-svg').setAttribute('aria-label', 'Track block node graph');
     const stageMode = $('#map-stage-mode');
     if (stageMode) stageMode.textContent = 'LIVE BLOCK GRAPH';
     $('#toggle-layout-edit').textContent = app.layoutEditing ? 'Editor' : 'Edit layout';
@@ -1626,26 +1627,30 @@
     return best && best.distance <= 32 ? best : null;
   }
 
-  function pinboardTrainPoint(train, blockMap, edges) {
-    const motion = train.motion || {};
-    const from = blockMap[String(motion.from_block_id || motion.block_id || train.position || '').toLowerCase()];
-    if (!from) return null;
-    const to = blockMap[String(motion.to_block_id || '').toLowerCase()];
-    const start = blockCenter(from);
-    const end = to ? blockCenter(to) : start;
-    const progress = to && motion.source === 'simulation' && Number.isFinite(Number(motion.position))
-      ? Math.max(0, Math.min(0.98, Number(motion.position))) : 0;
-    if (!to) return { x: start.x, y: start.y, dx: 1, dy: 0 };
-    const matching = (edges || []).find((edge) => {
-      const left = String(edge.from || '').toLowerCase(); const right = String(edge.to || '').toLowerCase();
-      return (left === String(from.id).toLowerCase() && right === String(to.id).toLowerCase())
-        || (left === String(to.id).toLowerCase() && right === String(from.id).toLowerCase());
-    });
-    if (!matching) return { x: start.x + (end.x - start.x) * progress, y: start.y + (end.y - start.y) * progress, dx: end.x - start.x, dy: end.y - start.y };
-    const forward = String(matching.from).toLowerCase() === String(from.id).toLowerCase();
-    const controls = Array.isArray(matching.control_points || matching.controlPoints) ? (matching.control_points || matching.controlPoints) : [];
-    const points = [start, ...(forward ? controls : [...controls].reverse()).map((point) => ({ x: Number(point.x), y: Number(point.y) })), end];
-    return splinePointAtProgress(points, progress);
+  function pinboardPathSamples(points) {
+    const samples = [];
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const steps = points.length === 2 ? 1 : 32;
+      for (let step = index === 0 ? 0 : 1; step <= steps; step += 1) {
+        const point = points.length === 2
+          ? { x: points[0].x + (points[1].x - points[0].x) * step, y: points[0].y + (points[1].y - points[0].y) * step }
+          : splinePointAt(points, index, step / steps);
+        const previous = samples[samples.length - 1];
+        samples.push({ ...point, distance: previous ? previous.distance + Math.hypot(point.x - previous.x, point.y - previous.y) : 0 });
+      }
+    }
+    return samples;
+  }
+
+  function pinboardPointAtDistance(samples, distance) {
+    if (!samples.length) return { x: 0, y: 0, dx: 1, dy: 0 };
+    const target = Math.max(0, Math.min(samples[samples.length - 1].distance, distance));
+    let index = 1;
+    while (index < samples.length - 1 && samples[index].distance < target) index += 1;
+    const start = samples[index - 1]; const end = samples[index];
+    const span = end.distance - start.distance;
+    const progress = span > 0 ? (target - start.distance) / span : 0;
+    return { x: start.x + (end.x - start.x) * progress, y: start.y + (end.y - start.y) * progress, dx: end.x - start.x, dy: end.y - start.y };
   }
 
   function renderPinboardTrainPicker() {
@@ -1773,11 +1778,19 @@
   function renderPinboard() {
     const layout = app.state.layout;
     const blocks = layout.blocks || [];
-    const blockMap = Object.fromEntries(blocks.flatMap((block) => [[block.id, block], [String(block.id || '').toLowerCase(), block]]));
+    const blockMap = Object.fromEntries(blocks.flatMap((block) => [[block.id, block], [String(block.id || '').toLowerCase(), block], [String(block.name || '').toLowerCase(), block]]));
     const edges = normalizedEdges(layout, blocks);
     const edgeMarkup = edges.map((edge) => {
-      const path = edgePath(blockMap[edge.from], blockMap[edge.to], edge);
-      return '<path class="pinboard-rail" d="' + path + '"></path>';
+      const from = blockMap[String(edge.from).toLowerCase()]; const to = blockMap[String(edge.to).toLowerCase()];
+      if (!from || !to) return '';
+      const path = edgePath(from, to, edge);
+      const occupied = [from, to].find((block) => block.status === 'occupied' || block.occupied_by || block.trainId) || (edge.status === 'occupied' ? to : null);
+      const routed = [from, to].find((block) => block.status === 'route') || (edge.status === 'route' ? to : null);
+      const section = occupied || routed || to;
+      const status = occupied ? 'occupied' : routed || edge.status === 'route' ? 'route' : 'free';
+      const point = splinePointAtProgress(edgeControlPoints(from, to, edge), .5);
+      const label = escapeHtml(section.name || section.id);
+      return '<path class="pinboard-rail-bed" d="' + path + '"></path><path class="pinboard-rail is-' + status + '" d="' + path + '"><title>' + label + ' · ' + status + '</title></path><text class="pinboard-section-label" x="' + point.x + '" y="' + (point.y - 9) + '">' + label + '</text>';
     }).join('');
     const nodeMarkup = blocks.map((block) => {
       const point = blockCenter(block);
@@ -1788,26 +1801,57 @@
       const x = Number(waypoint.x || 0); const y = Number(waypoint.y || 0);
       return '<g class="pinboard-spline-point" data-waypoint-id="' + escapeHtml(waypoint.id) + '" tabindex="0" role="button" aria-label="Spline control point ' + escapeHtml(waypoint.name || waypoint.id) + '"><circle cx="' + x + '" cy="' + y + '" r="6"></circle><text x="' + (x + 11) + '" y="' + (y - 9) + '">' + escapeHtml(waypoint.name || waypoint.id) + '</text><title>' + escapeHtml(waypoint.name || waypoint.id) + ' · X ' + x.toFixed(1) + ' · Y ' + y.toFixed(1) + '</title></g>';
     }).join('');
+    const degree = new Map();
+    edges.forEach((edge) => { degree.set(String(edge.from).toLowerCase(), (degree.get(String(edge.from).toLowerCase()) || 0) + 1); degree.set(String(edge.to).toLowerCase(), (degree.get(String(edge.to).toLowerCase()) || 0) + 1); });
+    const junctions = blocks.filter((block) => (degree.get(String(block.id).toLowerCase()) || 0) > 2);
+    const turnoutMarkup = (layout.turnouts || []).map((turnout, index) => {
+      const anchor = blockMap[String(turnout.from || '').toLowerCase()] || junctions[index % Math.max(1, junctions.length)];
+      if (!anchor) return '';
+      const center = blockCenter(anchor);
+      const point = { x: center.x - 16, y: center.y - 17 };
+      const state = String(turnout.state || 'straight').toLowerCase() === 'diverging' ? 'diverging' : 'straight';
+      const glyph = state === 'straight' ? '→' : '↗';
+      const locked = turnout.lockedBy ? ' · locked by ' + escapeHtml(turnout.lockedBy) : '';
+      return '<g class="pinboard-turnout is-' + state + (turnout.lockedBy ? ' is-locked' : '') + '" data-turnout-id="' + escapeHtml(turnout.id) + '" tabindex="0" role="button" aria-label="Switch ' + escapeHtml(turnout.name || turnout.id) + ' ' + state + locked + '"><circle class="pinboard-switch-dot" cx="' + point.x + '" cy="' + point.y + '" r="13"></circle><text class="pinboard-switch-state" x="' + point.x + '" y="' + (point.y + 4) + '">' + glyph + '</text><title>' + escapeHtml(turnout.name || turnout.id) + ' · ' + state + locked + '</title></g>';
+    }).join('');
     const trainMarkup = app.state.trains.filter((train) => train.graph_enabled !== false).map((train) => {
-      const point = pinboardTrainPoint(train, blockMap, edges);
-      if (!point) return '';
-      const angle = Math.atan2(point.dy, point.dx) * 180 / Math.PI;
+      const motion = train.motion || {};
+      const from = blockMap[String(motion.from_block_id || motion.block_id || train.position || '').toLowerCase()];
+      if (!from) return '';
+      const to = blockMap[String(motion.to_block_id || '').toLowerCase()];
+      const matching = edges.find((edge) => to
+        ? ((String(edge.from).toLowerCase() === String(from.id).toLowerCase() && String(edge.to).toLowerCase() === String(to.id).toLowerCase()) || (String(edge.to).toLowerCase() === String(from.id).toLowerCase() && String(edge.from).toLowerCase() === String(to.id).toLowerCase()))
+        : (String(edge.from).toLowerCase() === String(from.id).toLowerCase() || String(edge.to).toLowerCase() === String(from.id).toLowerCase()));
+      const previous = matching && !to ? blockMap[(String(matching.from).toLowerCase() === String(from.id).toLowerCase() ? String(matching.to) : String(matching.from)).toLowerCase()] : null;
+      const start = to ? from : (previous || from); const end = to || from;
+      const orientedEdge = matching && String(matching.from).toLowerCase() !== String(start.id).toLowerCase()
+        ? { ...matching, control_points: [...(matching.control_points || matching.controlPoints || [])].reverse() } : matching;
+      const points = matching ? edgeControlPoints(start, end, orientedEdge) : [blockCenter(from), { x: blockCenter(from).x + 100, y: blockCenter(from).y }];
+      const samples = pinboardPathSamples(points);
+      const totalLength = samples.length ? samples[samples.length - 1].distance : 0;
+      const progress = !to && !matching ? .5 : to && motion.source === 'simulation' && Number.isFinite(Number(motion.position)) ? Math.max(0, Math.min(.98, Number(motion.position))) : to ? 0 : 1;
+      const leadDistance = progress * totalLength;
       const consist = Array.isArray(train.consist) && train.consist.length ? train.consist : [{ type: 'locomotive', name: train.name, length_mm: train.length_mm || 220 }];
       let offset = 0;
       const vehicles = consist.map((item, index) => {
         const length = Math.max(16, Math.min(90, Number(item.length_mm || 220) / 8));
-        const value = '<rect class="pinboard-vehicle ' + (index === 0 ? 'is-locomotive' : 'is-rolling-stock') + '" x="' + (-offset - length) + '" y="-7" width="' + length + '" height="14" rx="2"><title>' + escapeHtml(item.name || item.type || 'Rolling stock') + '</title></rect>';
+        const centerDistance = leadDistance - offset - length / 2;
+        const point = pinboardPointAtDistance(samples, centerDistance);
+        const angle = Math.atan2(point.dy, point.dx) * 180 / Math.PI;
+        const value = '<g class="pinboard-vehicle-position" data-distance-behind="' + (offset + length / 2) + '" transform="translate(' + point.x + ' ' + point.y + ') rotate(' + angle + ')"><rect class="pinboard-vehicle ' + (index === 0 ? 'is-locomotive' : 'is-rolling-stock') + '" x="' + (-length / 2) + '" y="-7" width="' + length + '" height="14" rx="2"><title>' + escapeHtml(item.name || item.type || 'Rolling stock') + '</title></rect></g>';
         offset += length + 3;
         return value;
       }).join('');
       const label = escapeHtml(train.name || train.id);
-      return '<g class="pinboard-train' + (train.id === app.selectedTrainId ? ' is-selected' : '') + '" data-pinboard-train-id="' + escapeHtml(train.id) + '" transform="translate(' + point.x + ' ' + point.y + ') rotate(' + angle + ')" tabindex="0" role="button" aria-label="Train ' + label + '">' + vehicles + '<path class="pinboard-direction-arrow" d="M 7 -5 L 17 0 L 7 5 Z"></path><text class="pinboard-train-label" transform="rotate(' + (-angle) + ')" x="10" y="-13">' + label + '</text></g>';
+      const point = pinboardPointAtDistance(samples, leadDistance);
+      return '<g class="pinboard-train' + (train.id === app.selectedTrainId ? ' is-selected' : '') + '" data-pinboard-train-id="' + escapeHtml(train.id) + '" data-from-block="' + escapeHtml(from.id) + '" data-to-block="' + escapeHtml(to ? to.id : '') + '" tabindex="0" role="button" aria-label="Train ' + label + '">' + vehicles + '<text class="pinboard-train-label" x="' + (point.x + 10) + '" y="' + (point.y - 14) + '">' + label + '</text></g>';
     }).join('');
-    $('#layout-svg').setAttribute('viewBox', '0 0 980 650');
-    $('#layout-svg').innerHTML = '<g class="pinboard-layer">' + edgeMarkup + nodeMarkup + splinePointMarkup + trainMarkup + '</g>';
+    $('#layout-svg').setAttribute('viewBox', '0 0 980 350');
+    $('#layout-svg').setAttribute('aria-label', 'Top-down train visualizer with block-colored track, clickable switches, and trains following the track spline');
+    $('#layout-svg').innerHTML = '<g class="pinboard-layer">' + edgeMarkup + nodeMarkup + turnoutMarkup + splinePointMarkup + trainMarkup + '</g>';
     const stageMode = $('#map-stage-mode');
-    if (stageMode) stageMode.textContent = '2D PINBOARD';
-    $('#graph-motion-note').textContent = 'Pinboard view · drag a train marker to issue a coordinate target. Hover or move the pointer to read track coordinates.';
+    if (stageMode) stageMode.textContent = 'TRAIN VISUALIZER';
+    $('#graph-motion-note').textContent = 'Colored rail sections show block state. Click a switch dot to change its alignment; train cars follow the track spline.';
     const stage = $('#map-stage');
     stage.onpointermove = (event) => {
       const point = pinboardPointFromEvent(event);
@@ -1820,7 +1864,7 @@
       if (display) display.textContent = 'Move over the board to read coordinates';
     };
     stage.onclick = (event) => {
-      if (event.target.closest('.pinboard-node, .pinboard-train, .pinboard-spline-point')) return;
+      if (event.target.closest('.pinboard-node, .pinboard-train, .pinboard-turnout, .pinboard-spline-point')) return;
       const point = pinboardPointFromEvent(event);
       const coordinate = nearestPinboardCoordinate(point);
       if (app.pendingPinboardTrain) {
@@ -1854,6 +1898,10 @@
     $$('[data-block-id]', $('#layout-svg')).forEach((node) => {
       node.addEventListener('click', () => selectBlock(node.dataset.blockId));
       node.addEventListener('pointerdown', (event) => beginBlockDrag(event, node.dataset.blockId));
+    });
+    $$('[data-turnout-id]', $('#layout-svg')).forEach((node) => {
+      node.addEventListener('click', () => { if (!node.classList.contains('is-locked')) void toggleTurnout(node.dataset.turnoutId); });
+      node.addEventListener('keydown', (event) => { if ((event.key === 'Enter' || event.key === ' ') && !node.classList.contains('is-locked')) { event.preventDefault(); void toggleTurnout(node.dataset.turnoutId); } });
     });
     $$('[data-pinboard-train-id]', $('#layout-svg')).forEach((node) => {
       node.addEventListener('click', () => selectTrain(node.dataset.pinboardTrainId));
@@ -1974,6 +2022,44 @@
       marker.setAttribute('transform', `translate(${point.x} ${point.y})`);
       marker.dataset.progress = String(progress);
       marker.dataset.estimated = String(elapsed > 0 && Number(motion.speed) > 0);
+    });
+    updatePinboardTrainMarkers(now);
+  }
+
+  function updatePinboardTrainMarkers(now) {
+    if (app.layoutView !== 'pinboard') return;
+    const blocks = app.state.layout.blocks || [];
+    const blockMap = Object.fromEntries(blocks.flatMap((block) => [[String(block.id).toLowerCase(), block], [String(block.name || '').toLowerCase(), block]]));
+    const edges = normalizedEdges(app.state.layout, blocks);
+    $$('.pinboard-train[data-pinboard-train-id]', $('#layout-svg')).forEach((group) => {
+      const train = app.state.trains.find((item) => String(item.id) === group.dataset.pinboardTrainId);
+      const from = blockMap[String(group.dataset.fromBlock || '').toLowerCase()];
+      const to = blockMap[String(group.dataset.toBlock || '').toLowerCase()];
+      if (!train || !from) return;
+      const edge = to && edges.find((item) => (String(item.from).toLowerCase() === String(from.id).toLowerCase() && String(item.to).toLowerCase() === String(to.id).toLowerCase()) || (String(item.to).toLowerCase() === String(from.id).toLowerCase() && String(item.from).toLowerCase() === String(to.id).toLowerCase()));
+      const previous = edge || to ? null : edges.find((item) => String(item.from).toLowerCase() === String(from.id).toLowerCase() || String(item.to).toLowerCase() === String(from.id).toLowerCase());
+      const prior = previous && blockMap[(String(previous.from).toLowerCase() === String(from.id).toLowerCase() ? String(previous.to) : String(previous.from)).toLowerCase()];
+      const start = to ? from : prior || from; const end = to || from;
+      const connection = edge || previous;
+      const reversed = connection && String(connection.from).toLowerCase() !== String(start.id).toLowerCase();
+      const oriented = reversed ? { ...connection, control_points: [...(connection.control_points || connection.controlPoints || [])].reverse() } : connection;
+      const points = connection ? edgeControlPoints(start, end, oriented) : [blockCenter(from), { x: blockCenter(from).x + 100, y: blockCenter(from).y }];
+      const samples = pinboardPathSamples(points);
+      const total = samples.length ? samples[samples.length - 1].distance : 0;
+      const motion = train.motion || {};
+      let progress = !to && !connection ? .5 : to && motion.source === 'simulation' && Number.isFinite(Number(motion.position)) ? Math.max(0, Math.min(.98, Number(motion.position))) : to ? 0 : 1;
+      const sample = motionSamples.get(train.id);
+      const age = sample ? Math.max(0, (now - sample.receivedAt) / 1000) : 0;
+      const elapsed = app.state.simulation.running && app.state.track_power && app.source === 'api' ? Math.min(age, 2) : 0;
+      if (to && motion.source === 'simulation' && Number(motion.speed) > 0) progress = Math.max(progress, Math.min(.98, progress + Number(motion.speed) * elapsed));
+      const leadDistance = progress * total;
+      $$('.pinboard-vehicle-position', group).forEach((vehicle) => {
+        const point = pinboardPointAtDistance(samples, leadDistance - Number(vehicle.dataset.distanceBehind || 0));
+        vehicle.setAttribute('transform', 'translate(' + point.x + ' ' + point.y + ') rotate(' + (Math.atan2(point.dy, point.dx) * 180 / Math.PI) + ')');
+      });
+      const label = $('.pinboard-train-label', group);
+      const lead = pinboardPointAtDistance(samples, leadDistance);
+      if (label) { label.setAttribute('x', String(lead.x + 10)); label.setAttribute('y', String(lead.y - 14)); }
     });
   }
 
@@ -3946,7 +4032,7 @@
     const style = document.createElement('style');
     style.textContent = '.is-collapsed .editor-tabs, .is-collapsed .editor-content { display: none; } .is-collapsed { min-height: 0 !important; } .empty-state { padding: 24px 18px; color: var(--faint); font-size: 10px; } #sync-ribbon[data-tone="warning"] .ribbon-icon { color: var(--yellow); } #sync-ribbon[data-tone="success"] .ribbon-icon { color: var(--green); } .systematic-legend { display: flex; justify-content: space-between; gap: 12px; padding: 0 18px 7px; color: var(--faint); font-size: 9px; } .systematic-legend b { color: var(--cyan); font-weight: 600; } .systematic-track { overflow-x: auto; } .systematic-block { flex: 1 1 0; min-width: 52px; padding: 0 5px; white-space: nowrap; } .systematic-block.is-selected { border-color: var(--blue-bright); box-shadow: 0 0 0 1px rgba(92,157,255,.25); color: var(--text); } .systematic-link { position: relative; z-index: 2; flex: 0 0 17px; color: var(--cyan); font-size: 12px; line-height: 1; text-align: center; } .systematic-link.is-gap { color: var(--faint); opacity: .65; } .systematic-status strong.is-occupied { color: var(--orange); } .systematic-status strong.is-route { color: var(--violet); } .rolling-stock-label { display: block; margin: 8px 18px 0; color: var(--faint); font-size: 9px; } .rolling-stock-select { width: calc(100% - 36px); min-height: 28px; margin: 4px 18px 0; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font-size: 10px; } #consist-list .consist-item { grid-template-columns: 25px minmax(0, 1fr) auto auto; } .consist-position { color: var(--faint); font-size: 9px; white-space: nowrap; } .consist-actions { display: inline-flex; gap: 3px; } .consist-actions .icon-button { width: 22px; height: 22px; font-size: 13px; } .consist-actions .icon-button:disabled { cursor: default; opacity: .3; }';
     style.textContent += ' .function-control-panel { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); } .function-control-panel .record-section-heading { padding: 0 0 8px; } .function-toggle-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; } .function-toggle { min-height: 48px; padding: 6px; border: 1px solid var(--line); border-radius: 7px; background: #0d192a; color: var(--text); text-align: left; cursor: pointer; } .function-toggle:hover { border-color: var(--blue-bright); } .function-toggle.is-on { border-color: var(--cyan); background: rgba(0, 198, 217, .13); box-shadow: inset 0 0 0 1px rgba(0, 198, 217, .16); } .function-toggle:disabled { opacity: .35; cursor: not-allowed; } .function-toggle strong, .function-toggle span, .function-toggle small { display: block; } .function-toggle strong { color: var(--cyan); font-size: 10px; } .function-toggle span { overflow: hidden; margin-top: 2px; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; } .function-toggle small { margin-top: 4px; color: var(--faint); font-size: 8px; letter-spacing: .08em; } .function-toggle.is-on small { color: var(--cyan); } .function-control-panel.is-compact { margin: 12px 18px 0; } .function-control-panel.is-compact .record-section-heading { display: block; } .function-control-panel.is-compact .settings-help { display: block; margin-top: 4px; }';
-    style.textContent += ' .pinboard-layer { font-family: inherit; } .pinboard-rail { fill: none; stroke: rgba(115, 148, 184, .62); stroke-width: 8; stroke-linecap: round; } .pinboard-rail:hover { stroke: var(--cyan); } .pinboard-node { cursor: pointer; } .pinboard-node circle { fill: #10233a; stroke: var(--blue-bright); stroke-width: 2; } .pinboard-node text { fill: var(--text); font-size: 11px; font-weight: 600; } .pinboard-node.is-selected circle { fill: var(--cyan); stroke: #fff; } .pinboard-node.is-selected text { fill: var(--cyan); } .pinboard-train { cursor: grab; filter: drop-shadow(0 3px 4px rgba(0,0,0,.32)); } .pinboard-train:hover .pinboard-vehicle { stroke: #fff; stroke-width: 2.5; filter: drop-shadow(0 0 5px var(--cyan)); } .pinboard-train:hover .pinboard-train-label { fill: var(--cyan); } .pinboard-train:active { cursor: grabbing; } .pinboard-vehicle { stroke: #08111e; stroke-width: 1.5; fill: var(--orange); } .pinboard-vehicle.is-locomotive { fill: var(--cyan); } .pinboard-train.is-selected .pinboard-vehicle { stroke: #fff; stroke-width: 2; } .pinboard-direction-arrow { fill: var(--green); stroke: #07111e; stroke-width: 1; } .pinboard-train-label { fill: var(--text); font-size: 10px; font-weight: 700; paint-order: stroke; stroke: #09111f; stroke-width: 3; stroke-linejoin: round; } .calibration-form, .calibration-record { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 18px; } .calibration-record { grid-template-columns: 1fr 1.5fr auto; margin-top: 10px; align-items: end; } .calibration-form label, .calibration-record label { display: grid; gap: 4px; color: var(--faint); font-size: 9px; } .calibration-form input, .calibration-form select, .calibration-record input { min-width: 0; min-height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font: inherit; } .calibration-panel > .settings-help, .calibration-panel > .settings-status { margin-left: 18px; margin-right: 18px; } .calibration-actions { padding: 0 18px; margin-top: 10px; } .calibration-history { margin: 12px 18px 0; border-top: 1px solid var(--line); padding-top: 8px; } .calibration-history > small { color: var(--faint); } .calibration-history > div { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding-top: 5px; color: var(--faint); font-size: 9px; } .calibration-history strong { color: var(--cyan); }';
+    style.textContent += ' .pinboard-layer { font-family: inherit; } .pinboard-rail-bed, .pinboard-rail { fill: none; stroke-linecap: round; } .pinboard-rail-bed { stroke: rgba(6,11,20,.92); stroke-width: 11; } .pinboard-rail { stroke: rgba(115,148,184,.68); stroke-width: 6; } .pinboard-rail.is-occupied { stroke: var(--orange); filter: drop-shadow(0 0 5px rgba(239,170,109,.48)); } .pinboard-rail.is-route { stroke: var(--violet); filter: drop-shadow(0 0 4px rgba(174,154,255,.4)); } .pinboard-rail.is-free { stroke: var(--cyan); opacity: .62; } .pinboard-rail:hover { stroke-width: 8; } .pinboard-section-label { fill: var(--text); font-size: 10px; font-weight: 700; text-anchor: middle; paint-order: stroke; stroke: #09111f; stroke-width: 4; stroke-linejoin: round; pointer-events: none; } .pinboard-node { cursor: pointer; } .pinboard-node circle { fill: #10233a; stroke: var(--blue-bright); stroke-width: 2; } .pinboard-node text { fill: var(--text); font-size: 11px; font-weight: 600; } .pinboard-node.is-selected circle { fill: var(--cyan); stroke: #fff; } .pinboard-node.is-selected text { fill: var(--cyan); } .pinboard-turnout { cursor: pointer; } .pinboard-switch-dot { fill: #0e1a2a; stroke: var(--cyan); stroke-width: 3; filter: drop-shadow(0 0 5px rgba(87,212,223,.45)); } .pinboard-turnout.is-diverging .pinboard-switch-dot { stroke: var(--orange); filter: drop-shadow(0 0 5px rgba(239,170,109,.48)); } .pinboard-switch-state { fill: var(--cyan); font-size: 12px; font-weight: 700; text-anchor: middle; pointer-events: none; } .pinboard-turnout.is-diverging .pinboard-switch-state { fill: var(--orange); } .pinboard-turnout.is-locked { opacity: .65; cursor: not-allowed; } .pinboard-turnout:focus .pinboard-switch-dot { stroke-width: 4; } .pinboard-train { cursor: grab; } .pinboard-train:hover .pinboard-vehicle { stroke: #fff; stroke-width: 2.5; filter: drop-shadow(0 0 5px var(--cyan)); } .pinboard-train:active { cursor: grabbing; } .pinboard-vehicle { stroke: #08111e; stroke-width: 1.5; fill: var(--orange); } .pinboard-vehicle.is-locomotive { fill: var(--cyan); } .pinboard-train.is-selected .pinboard-vehicle { stroke: #fff; stroke-width: 2; } .pinboard-train-label { fill: var(--text); font-size: 10px; font-weight: 700; paint-order: stroke; stroke: #09111f; stroke-width: 3; stroke-linejoin: round; pointer-events: none; } .calibration-form, .calibration-record { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 0 18px; } .calibration-record { grid-template-columns: 1fr 1.5fr auto; margin-top: 10px; align-items: end; } .calibration-form label, .calibration-record label { display: grid; gap: 4px; color: var(--faint); font-size: 9px; } .calibration-form input, .calibration-form select, .calibration-record input { min-width: 0; min-height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: #0d192a; color: var(--text); font: inherit; } .calibration-panel > .settings-help, .calibration-panel > .settings-status { margin-left: 18px; margin-right: 18px; } .calibration-actions { padding: 0 18px; margin-top: 10px; } .calibration-history { margin: 12px 18px 0; border-top: 1px solid var(--line); padding-top: 8px; } .calibration-history > small { color: var(--faint); } .calibration-history > div { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; padding-top: 5px; color: var(--faint); font-size: 9px; } .calibration-history strong { color: var(--cyan); }';
     style.textContent += ' .route-editor { padding: 0 18px 14px; border-bottom: 1px solid var(--line); } .route-editor .field-grid { padding: 0; } .route-editor .button-row { padding: 10px 0 0; } .route-panel .settings-status { margin: 9px 0 0; } .route-list { padding: 0 18px 12px; } .route-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); } .route-row-main, .route-row-main strong, .route-row-main small { display: block; min-width: 0; } .route-row-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .route-row-main small, .route-row-meta { color: var(--faint); font-size: 9px; } .route-row-meta { white-space: nowrap; } .route-row-actions { display: inline-flex; gap: 4px; } .pinboard-spline-point { cursor: grab; } .pinboard-spline-point circle { fill: var(--violet); stroke: #fff; stroke-width: 1.5; } .pinboard-spline-point text { fill: var(--violet); font-size: 9px; font-weight: 700; paint-order: stroke; stroke: #09111f; stroke-width: 3; }';
     document.head.appendChild(style);
   }
