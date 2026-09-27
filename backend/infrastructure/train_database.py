@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import RLock
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 
 @dataclass(frozen=True)
@@ -691,9 +691,78 @@ class SQLiteTrainDatabase:
 
     get_full_train = get_details
 
+    def iter_full_trains(self) -> Iterator[TrainDetails]:
+        """Stream all train details with five ordered SQL cursors.
+
+        The UI refresh needs the full fleet, so loading each train through
+        ``get_details`` would issue five queries per row. Ordered cursors keep
+        query count fixed while retaining only one train's related records at
+        a time, avoiding a second fleet-sized in-memory copy during encoding.
+        """
+        with self._lock:
+            train_cursor = self._connection.execute(
+                "SELECT * FROM trains ORDER BY name COLLATE NOCASE, train_id"
+            )
+            child_cursors = {
+                "decoder_functions": self._connection.execute(
+                    "SELECT child.* FROM decoder_function_mappings AS child "
+                    "JOIN trains AS parent ON parent.train_id = child.train_id "
+                    "ORDER BY parent.name COLLATE NOCASE, parent.train_id, child.function_number"
+                ),
+                "maintenance_records": self._connection.execute(
+                    "SELECT child.* FROM maintenance_records AS child "
+                    "JOIN trains AS parent ON parent.train_id = child.train_id "
+                    "ORDER BY parent.name COLLATE NOCASE, parent.train_id, child.service_date DESC, child.record_id DESC"
+                ),
+                "rolling_stock": self._connection.execute(
+                    "SELECT child.* FROM rolling_stock_records AS child "
+                    "JOIN trains AS parent ON parent.train_id = child.train_id "
+                    "ORDER BY parent.name COLLATE NOCASE, parent.train_id, child.position, child.rolling_stock_id"
+                ),
+                "calibrations": self._connection.execute(
+                    "SELECT child.* FROM train_calibrations AS child "
+                    "JOIN trains AS parent ON parent.train_id = child.train_id "
+                    "ORDER BY parent.name COLLATE NOCASE, parent.train_id, child.created_at DESC, child.calibration_id DESC"
+                ),
+            }
+            converters = {
+                "decoder_functions": self._decoder_function_from_row,
+                "maintenance_records": self._maintenance_from_row,
+                "rolling_stock": self._rolling_stock_from_row,
+                "calibrations": self._calibration_from_row,
+            }
+            current = {name: cursor.fetchone() for name, cursor in child_cursors.items()}
+            for row in train_cursor:
+                train_id = row["train_id"]
+                related: dict[str, tuple[Any, ...]] = {}
+                for name, cursor in child_cursors.items():
+                    values = []
+                    while current[name] is not None and current[name]["train_id"] == train_id:
+                        values.append(converters[name](current[name]))
+                        current[name] = cursor.fetchone()
+                    related[name] = tuple(values)
+                yield TrainDetails(
+                    train=self._from_row(row),
+                    decoder_functions=related["decoder_functions"],
+                    maintenance_records=related["maintenance_records"],
+                    rolling_stock=related["rolling_stock"],
+                    calibrations=related["calibrations"],
+                )
+
+    def list_full_trains(self) -> tuple[TrainDetails, ...]:
+        """Read all details as a tuple for callers that need materialized results."""
+        return tuple(self.iter_full_trains())
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    @property
+    def revision(self) -> str:
+        """Return a cheap token that changes when this database is updated."""
+        with self._lock:
+            external_version = self._connection.execute("PRAGMA data_version").fetchone()[0]
+            return f"{self._connection.total_changes}:{external_version}"
 
     def __enter__(self) -> "SQLiteTrainDatabase":
         return self

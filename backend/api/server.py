@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, fields, replace
 from enum import Enum
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
@@ -402,10 +403,10 @@ class ControllerApplication:
                 repository.close()
                 self._settings_repository = None
 
-    def _routing_activity(self) -> str:
+    def _routing_activity(self, track_snapshot: Any | None = None) -> str:
         if self.runtime is None or not self.track_power or (self.simulation_mode and not self.simulation_running):
             return "idle"
-        snapshot = self.runtime.track.get_snapshot()
+        snapshot = track_snapshot or self.runtime.track.get_snapshot()
         moving = any(motion.speed > 0 or motion.target_speed > 0 for motion in snapshot.trains)
         scheduled = any(self._schedule_domain_status(row.get("state")) is ScheduleStatus.ACTIVE for row in self.schedules)
         return "busy" if moving or scheduled else "idle"
@@ -415,12 +416,15 @@ class ControllerApplication:
 
         return bool(self._settings.get("operations", {}).get("connected_blocks", True))
 
-    def _routing_interval_ms(self) -> int:
+    def _routing_interval_ms(self, track_snapshot: Any | None = None, *, activity: str | None = None) -> int:
         routing = self._settings["routing"]
-        key = "idle_interval_ms" if routing["adaptive"] and self._routing_activity() == "idle" else "busy_interval_ms"
+        if activity is None:
+            activity = self._routing_activity(track_snapshot)
+        key = "idle_interval_ms" if routing["adaptive"] and activity == "idle" else "busy_interval_ms"
         return routing[key]
 
-    def settings_payload(self) -> dict[str, Any]:
+    def settings_payload(self, *, track_snapshot: Any | None = None,
+                         include_settings: bool = True) -> dict[str, Any]:
         """Read saved preferences and live status, without probing any device."""
 
         with self._lock:
@@ -448,10 +452,10 @@ class ControllerApplication:
                     "host": self.z21_host,
                     "detail": "No startup transport preflight status is available.",
                 }
-            interval = self._routing_interval_ms()
+            routing_activity = self._routing_activity(track_snapshot)
+            interval = self._routing_interval_ms(track_snapshot, activity=routing_activity)
             remaining = max(0, interval - int((time.monotonic() - self._routing_last_monotonic) * 1000)) if self._routing_last_monotonic is not None else 0
-            return {
-                "settings": deepcopy(self._settings),
+            result = {
                 "runtime": {
                     "connection_mode": "z21" if self.z21_host else "simulation",
                     "active_z21_host": self.z21_host,
@@ -467,7 +471,7 @@ class ControllerApplication:
                     "connection_message": "Saved for the next explicit physical startup; simulation stays active." if not self.z21_host else "Restart physical control to apply the saved endpoint or transport profile." if restart_required else f"Physical {active_profile.upper()} profile is active. Environment endpoint overrides take precedence when set.",
                     "routing": {
                         "running": bool(self._routing_thread and self._routing_thread.is_alive()),
-                        "activity": self._routing_activity(),
+                        "activity": routing_activity,
                         "adaptive": self._settings["routing"]["adaptive"],
                         "effective_interval_ms": interval,
                         "next_refresh_in_ms": remaining,
@@ -478,6 +482,9 @@ class ControllerApplication:
                     },
                 },
             }
+            if include_settings:
+                result["settings"] = deepcopy(self._settings)
+            return result
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -954,9 +961,7 @@ class ControllerApplication:
 
         if self.runtime is None:
             return [] if train_id is None else None
-        records = self.runtime.train_database.list()
-        def serialize(record: TrainModel) -> dict[str, Any]:
-            details = self.runtime.train_database.get_full_train(record.train_id)
+        def serialize(record: TrainModel, details: Any) -> dict[str, Any]:
             return {
                 "train_id": record.train_id,
                 "name": record.name,
@@ -1023,9 +1028,9 @@ class ControllerApplication:
                 ],
             }
         if train_id is not None:
-            record = self.runtime.train_database.get(self._canonical_train_id(str(train_id)))
-            return serialize(record) if record is not None else None
-        return [serialize(record) for record in records]
+            details = self.runtime.train_database.get_full_train(self._canonical_train_id(str(train_id)))
+            return serialize(details.train, details) if details is not None else None
+        return [serialize(details.train, details) for details in self.runtime.train_database.iter_full_trains()]
 
     def calibration_state(self) -> dict[str, Any]:
         """Return the active calibration run and stored measurements."""
@@ -2128,14 +2133,148 @@ class ControllerApplication:
         with self._lock:
             return self._ui_snapshot()
 
+    def live_payload(self) -> dict[str, Any]:
+        """Return frequently changing dashboard data without large catalogues or images."""
+        with self._lock:
+            track_snapshot = self.runtime.track.get_snapshot() if self.runtime is not None else None
+            snapshot = self._snapshot()
+            motions_by_id = {motion.train_id: motion for motion in track_snapshot.trains} if track_snapshot is not None else {}
+            ui_blocks = self._ui_blocks(track_snapshot)
+            ui_turnouts = self._ui_turnouts()
+            elapsed_seconds = int(track_snapshot.time_seconds) if track_snapshot is not None else 0
+            world_elapsed_seconds = int(self._world_clock_seconds) % 86400
+            world_clock = f"{world_elapsed_seconds // 3600:02d}:{(world_elapsed_seconds % 3600) // 60:02d}"
+            return {
+                "simulation_mode": snapshot["simulation_mode"],
+                "mode": "simulation" if self.simulation_mode else "manual",
+                "connection": self.connection_payload(),
+                "simulation": {
+                    "running": self.simulation_running,
+                    "rate": 1,
+                    "clock": f"{(elapsed_seconds // 3600) % 24:02d}:{(elapsed_seconds // 60) % 60:02d}:{elapsed_seconds % 60:02d}",
+                    "elapsed_seconds": track_snapshot.time_seconds if track_snapshot is not None else 0,
+                    "schedule_minutes": self.runtime.scheduler.world_current_tick if self.runtime is not None else 0,
+                    "world_clock": world_clock,
+                    "world_clock_seconds": self._world_clock_seconds,
+                    "date": "Simulation",
+                },
+                "tick": snapshot["tick"],
+                "track_power": snapshot["track_power"],
+                "motion_clock": {
+                    "running": bool(self._motion_thread and self._motion_thread.is_alive()),
+                    "interval_seconds": self.runtime.track.tick_seconds if self.simulation_mode else 1.0,
+                },
+                "layout_info": self.layout_info(track_snapshot=track_snapshot, ui_blocks=ui_blocks),
+                "layout": self._layout_payload(
+                    ui_blocks, self._ui_edges(), self._ui_connection_limits(), ui_turnouts,
+                ),
+                "trains": self._ui_trains(track_snapshot, motions_by_id),
+                "schedules": list(self.schedules),
+                "feedback": self.feedback_payload(),
+                "presence": self.train_presence_state(),
+                "rollingStockInventory": self.rolling_stock_inventory(),
+                "calibration": self.calibration_state(),
+                "programming": self.programming_state(),
+                "recording": self.recording_state(),
+                "automationPrograms": self.automation_programs_state(),
+                "coordinate_execution": self.runtime.coordinate_movement.status.as_dict()
+                    if self.runtime is not None and self.runtime.coordinate_movement.status is not None else None,
+                "routes": deepcopy(self.routes),
+                "events": snapshot["events"],
+                "scans": list(self.scans),
+                "runtime": self.settings_payload(
+                    track_snapshot=track_snapshot, include_settings=False,
+                )["runtime"],
+                "train_database_revision": self.runtime.train_database.revision if self.runtime is not None else None,
+            }
+
+    def connection_payload(self) -> dict[str, Any]:
+        """Return connection presentation without materializing a full UI state."""
+        with self._lock:
+            connection = (
+                self.runtime.track.connection_status()
+                if self.runtime is not None and self.z21_host
+                else self.runtime.connection.status if self.runtime is not None
+                else None
+            )
+            connected = bool(connection.connected) if connection is not None else self.connected
+            simulated = self.simulation_mode
+            return {
+                "connected": connected,
+                "simulated": simulated,
+                "mode": "simulation" if simulated else "z21",
+                "endpoint": connection.endpoint if connection is not None and connection.endpoint else "127.0.0.1:21105",
+                "label": "Simulation fallback" if simulated else "Z21 connected" if connected else "Z21 disconnected",
+                "detail": "Local sample state" if simulated else connection.detail if connection is not None else "",
+            }
+
+    def feedback_payload(self) -> dict[str, Any]:
+        """Return the latest occupancy and feedback-health projection only."""
+        with self._lock:
+            feedback_healthy = getattr(self.runtime.track, "feedback_healthy", True) if self.runtime is not None else True
+            feedback_error = getattr(self.runtime.track, "feedback_error", "") if self.runtime is not None else ""
+            return {
+                "occupied_blocks": dict(self.feedback_occupancy),
+                "healthy": feedback_healthy,
+                "error": feedback_error,
+                "mapped_contacts": len(self.feedback_map),
+            }
+
+    def layout_payload(self) -> dict[str, Any]:
+        """Return the layout projection without building train and database state."""
+        with self._lock:
+            track_snapshot = self.runtime.track.get_snapshot() if self.runtime is not None else None
+            blocks = self._ui_blocks(track_snapshot)
+            edges = self._ui_edges()
+            connection_limits = self._ui_connection_limits()
+            return self._layout_payload(blocks, edges, connection_limits, self._ui_turnouts())
+
+    def trains_payload(self) -> dict[str, Any]:
+        """Return current train state from one track snapshot."""
+        with self._lock:
+            track_snapshot = self.runtime.track.get_snapshot() if self.runtime is not None else None
+            motions_by_id = {motion.train_id: motion for motion in track_snapshot.trains} if track_snapshot is not None else {}
+            return {"trains": self._ui_trains(track_snapshot, motions_by_id)}
+
+    def events_payload(self) -> dict[str, Any]:
+        with self._lock:
+            return {"events": self.events[-25:]}
+
+    def scans_payload(self) -> dict[str, Any]:
+        with self._lock:
+            return {"scans": list(self.scans)}
+
+    def _layout_payload(self, blocks: list[dict[str, Any]], edges: list[dict[str, Any]],
+                        connection_limits: list[dict[str, Any]], turnouts: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "name": self.layout_name,
+            "blocks": blocks,
+            "edges": edges,
+            "connection_limits": connection_limits,
+            "connections": self._ui_connections(edges, connection_limits),
+            "turnouts": turnouts,
+            "stations": list(self.stations),
+            "signals": list(self.signals),
+            "waypoints": list(self.waypoints),
+            "turntables": list(self.turntables),
+            "routes": deepcopy(self.routes),
+            "platforms": list(self.platforms) or [
+                {"id": "p1", "name": "Central station", "blockIds": ["b01", "b02"]},
+                {"id": "p2", "name": "East platform", "blockIds": ["b03"]},
+                {"id": "p3", "name": "Yard", "blockIds": ["b04"]},
+            ],
+        }
+
     def raw_state(self) -> dict[str, Any]:
         """Return the backend-oriented snapshot for diagnostics and tests."""
 
         with self._lock:
             return self._snapshot()
 
-    def layout_info(self) -> dict[str, Any]:
+    def layout_info(self, *, track_snapshot: Any | None = None, ui_blocks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Controller positions, occupancy and executing operations, not catalogue totals."""
+        if track_snapshot is None and self.runtime is not None:
+            track_snapshot = self.runtime.track.get_snapshot()
         block_ids = {str(block["id"]).upper() for block in self.blocks}
         trains = [
             train for train in self.trains
@@ -2143,7 +2282,7 @@ class ControllerApplication:
             and str(train.get("block_id", "")).upper() in block_ids
         ]
         if not self.simulation_mode:
-            reported = {motion.train_id for motion in self.runtime.track.get_snapshot().trains}
+            reported = {motion.train_id for motion in track_snapshot.trains} if track_snapshot is not None else set()
             trains = [train for train in trains if train["id"] in reported]
         controls = self.runtime.dispatcher.trains if self.runtime else {}
         routes = self.runtime.route_updater.desired_routes if self.runtime else {}
@@ -2158,7 +2297,7 @@ class ControllerApplication:
         if not self.simulation_mode and time.monotonic() - getattr(self, "_power_read_at", 0) > 15:
             telemetry = {"available": False, "reason": "No fresh Z21 power readings"}
         return {"block_count": len(block_ids),
-                "occupied_blocks": sum(block["status"] == "occupied" for block in self._ui_blocks()),
+                "occupied_blocks": sum(block["status"] == "occupied" for block in (ui_blocks if ui_blocks is not None else self._ui_blocks(track_snapshot))),
                 "train_count": len(trains),
                 "manual_trains": sum(str(t.get("mode", "")).lower() == "manual" for t in trains),
                 "automatic_trains": sum(str(t.get("mode", "")).lower() == "automatic" for t in trains),
@@ -2187,8 +2326,20 @@ class ControllerApplication:
                 self._sync_ui_from_runtime()
 
     def _ui_snapshot(self) -> dict[str, Any]:
+        track_snapshot = self.runtime.track.get_snapshot() if self.runtime is not None else None
         snapshot = self._snapshot()
-        elapsed_seconds = int(self.runtime.track.get_snapshot().time_seconds)
+        elapsed_seconds = int(track_snapshot.time_seconds) if track_snapshot is not None else 0
+        motions_by_id = {motion.train_id: motion for motion in track_snapshot.trains} if track_snapshot is not None else {}
+        ui_blocks = self._ui_blocks(track_snapshot)
+        ui_edges = self._ui_edges()
+        ui_connection_limits = self._ui_connection_limits()
+        ui_turnouts = self._ui_turnouts()
+        ui_trains = self._ui_trains(track_snapshot, motions_by_id)
+        runtime_settings = self.settings_payload(track_snapshot=track_snapshot)["runtime"]
+        feedback = {
+            **snapshot["feedback"],
+            "occupied_blocks": self.feedback_occupancy,
+        }
         world_elapsed_seconds = int(self._world_clock_seconds) % 86400
         world_hours = world_elapsed_seconds // 3600
         world_minutes = (world_elapsed_seconds % 3600) // 60
@@ -2208,7 +2359,7 @@ class ControllerApplication:
                 "running": self.simulation_running,
                 "rate": 1,
                 "clock": f"{(elapsed_seconds // 3600) % 24:02d}:{(elapsed_seconds // 60) % 60:02d}:{elapsed_seconds % 60:02d}",
-                "elapsed_seconds": self.runtime.track.get_snapshot().time_seconds,
+                "elapsed_seconds": track_snapshot.time_seconds if track_snapshot is not None else 0,
                 "schedule_minutes": self.runtime.scheduler.world_current_tick,
                 "world_clock": world_clock,
                 "world_clock_seconds": self._world_clock_seconds,
@@ -2218,7 +2369,7 @@ class ControllerApplication:
             "track_power": snapshot["track_power"],
             "motion_clock": {"running": bool(self._motion_thread and self._motion_thread.is_alive()),
                              "interval_seconds": self.runtime.track.tick_seconds if self.simulation_mode else 1.0},
-            "layout_info": self.layout_info(),
+            "layout_info": self.layout_info(track_snapshot=track_snapshot, ui_blocks=ui_blocks),
             "calibration": self.calibration_state(),
             "presence": self.train_presence_state(),
             "rollingStockInventory": self.rolling_stock_inventory(),
@@ -2226,49 +2377,38 @@ class ControllerApplication:
             "recording": self.recording_state(),
             "automationPrograms": self.automation_programs_state(),
             "coordinate_execution": self.runtime.coordinate_movement.status.as_dict() if self.runtime is not None and self.runtime.coordinate_movement.status is not None else None,
-            "feedback": snapshot["feedback"],
-            "layout": {
-                "name": self.layout_name,
-                "blocks": self._ui_blocks(),
-                "edges": self._ui_edges(),
-                "connection_limits": self._ui_connection_limits(),
-                "connections": self._ui_connections(),
-                "turnouts": self._ui_turnouts(),
-                "stations": list(self.stations),
-                "signals": list(self.signals),
-                "waypoints": list(self.waypoints),
-                "turntables": list(self.turntables),
-                "routes": deepcopy(self.routes),
-                "platforms": list(self.platforms) or [
-                    {"id": "p1", "name": "Central station", "blockIds": ["b01", "b02"]},
-                    {"id": "p2", "name": "East platform", "blockIds": ["b03"]},
-                    {"id": "p3", "name": "Yard", "blockIds": ["b04"]},
-                ],
-            },
-            "trains": self._ui_trains(),
+            "feedback": feedback,
+            "layout": self._layout_payload(ui_blocks, ui_edges, ui_connection_limits, ui_turnouts),
+            "trains": ui_trains,
             "trainDatabase": self.train_database(),
+            "train_database_revision": self.runtime.train_database.revision if self.runtime is not None else None,
             "schedules": list(self.schedules),
             "routes": deepcopy(self.routes),
-            "blocks": self._ui_blocks(),
-            "turnouts": self._ui_turnouts(),
+            "blocks": ui_blocks,
+            "turnouts": ui_turnouts,
             "events": snapshot["events"],
             "scans": list(self.scans),
             "settings": deepcopy(self._settings),
-            "runtime": self.settings_payload()["runtime"],
+            "runtime": runtime_settings,
         }
 
-    def _ui_blocks(self) -> list[dict[str, Any]]:
+    def _ui_blocks(self, track_snapshot: Any | None = None) -> list[dict[str, Any]]:
         positions = {"B01": (62, 62), "B02": (222, 62), "B03": (382, 62), "B04": (542, 62)}
         reservations = getattr(self.runtime.route_updater, "reservations", {}) if self.runtime is not None else {}
+        if not self.simulation_mode and track_snapshot is None and self.runtime is not None:
+            track_snapshot = self.runtime.track.get_snapshot()
+        reported_occupancy = track_snapshot.occupied_blocks if track_snapshot is not None else {}
+        simulated_occupants: dict[str, list[str]] = {}
+        if self.simulation_mode:
+            for train in self.trains:
+                if train.get("graph_enabled", True):
+                    simulated_occupants.setdefault(str(train.get("block_id", "")), []).append(str(train["id"]))
         result = []
         for block in self.blocks:
             block_id = str(block["id"])
-            occupants = [
-                train["id"] for train in self.trains
-                if train.get("graph_enabled", True) and train.get("block_id") == block_id
-            ]
+            occupants = simulated_occupants.get(block_id, [])
             if not self.simulation_mode:
-                occupants = [motion.train_id for motion in self.runtime.track.get_snapshot().trains if motion.block_id == block_id]
+                occupants = list(reported_occupancy.get(block_id, ()))
             feedback_occupants = list(self.feedback_occupancy.get(block_id, ()))
             reservation_owner = reservations.get(block_id) or reservations.get(block_id.upper())
             default_x, default_y = positions.get(block_id, (62, 224))
@@ -2285,7 +2425,7 @@ class ControllerApplication:
         return result
 
     def _ui_edges(self) -> list[dict[str, Any]]:
-        links = set((edge["from"], edge["to"]) for edge in self._topology_edges())
+        links = set(self._topology_links())
         for turnout in self.turnouts:
             entry = str(turnout.get("from", "")).lower()
             straight = str(turnout.get("to", "")).lower()
@@ -2294,22 +2434,36 @@ class ControllerApplication:
                 links.add((entry, straight))
             if entry and diverging:
                 links.add((entry, diverging))
-        return [self._edge_with_geometry(left, right) for left, right in sorted(links)]
+        ordered_links = sorted(links)
+        waypoint_geometry = self._waypoint_geometry_index()
+        return [self._edge_with_geometry(left, right, waypoint_geometry=waypoint_geometry) for left, right in ordered_links]
 
-    def _edge_with_geometry(self, left: str, right: str, *, status: str = "free") -> dict[str, Any]:
-        edge = {"from": left, "to": right, "status": status}
-        connected = {str(left).upper(), str(right).upper()}
-        control_points: list[dict[str, float]] = []
+    def _waypoint_geometry_index(self) -> dict[tuple[str, str], list[dict[str, float]]]:
+        index: dict[tuple[str, str], list[dict[str, float]]] = {}
         for waypoint in sorted(self.waypoints, key=lambda item: str(item.get("id", ""))):
-            nodes = {str(value).upper() for value in waypoint.get("connected_node_ids", waypoint.get("connectedNodeIds", ())) }
-            if not connected.issubset(nodes):
+            nodes = sorted({str(value).upper() for value in waypoint.get("connected_node_ids", waypoint.get("connectedNodeIds", ()))})
+            if len(nodes) < 2:
                 continue
             try:
                 point = {"x": float(waypoint.get("x", 0)), "y": float(waypoint.get("y", 0))}
             except (TypeError, ValueError):
                 continue
             if math.isfinite(point["x"]) and math.isfinite(point["y"]):
-                control_points.append(point)
+                for node in nodes:
+                    index.setdefault((node, node), []).append(point)
+                for left, right in combinations(nodes, 2):
+                    index.setdefault((left, right), []).append(point)
+        return index
+
+    def _edge_with_geometry(
+        self, left: str, right: str, *, status: str = "free",
+        waypoint_geometry: dict[tuple[str, str], list[dict[str, float]]] | None = None,
+    ) -> dict[str, Any]:
+        edge = {"from": left, "to": right, "status": status}
+        if waypoint_geometry is None:
+            waypoint_geometry = self._waypoint_geometry_index()
+        pair = tuple(sorted((str(left).upper(), str(right).upper())))
+        control_points = [dict(point) for point in waypoint_geometry.get(pair, ())]
         if control_points:
             edge["control_points"] = control_points
         return edge
@@ -2320,16 +2474,22 @@ class ControllerApplication:
                  "train_speed_limits": {self._ui_train_id(key): value for key, value in row.get("train_speed_limits", {}).items()}}
                 for row in self.connection_limits]
 
-    def _ui_connections(self) -> list[dict[str, Any]]:
-        rules = {(r["from"], r["to"]): r for r in self._ui_connection_limits()}
-        pairs = {(e["from"], e["to"]) for e in self._ui_edges()}
+    def _ui_connections(self, edges: list[dict[str, Any]] | None = None,
+                        connection_limits: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        rules = {(r["from"], r["to"]): r for r in (connection_limits if connection_limits is not None else self._ui_connection_limits())}
+        pairs = {(e["from"], e["to"]) for e in (edges if edges is not None else self._ui_edges())}
         pairs |= {(right, left) for left, right in pairs}
         return [{"from": left, "to": right, "speed_limit_kmh": None, "train_speed_limits": {},
                  **rules.get((left, right), {})} for left, right in sorted(pairs)]
 
-    def _train_motion_state(self, train: dict[str, Any]) -> dict[str, Any]:
+    def _train_motion_state(self, train: dict[str, Any], track_snapshot: Any | None = None,
+                            motions_by_id: dict[str, Any] | None = None) -> dict[str, Any]:
         train_id = str(train["id"])
-        motion = next((m for m in self.runtime.track.get_snapshot().trains if m.train_id == train_id), None)
+        if track_snapshot is None:
+            track_snapshot = self.runtime.track.get_snapshot()
+        if motions_by_id is None:
+            motions_by_id = {item.train_id: item for item in track_snapshot.trains}
+        motion = motions_by_id.get(train_id)
         control = self.runtime.dispatcher.trains.get(train_id)
         maximum = float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140)
         requested = control.desired_speed if control else 0.0
@@ -2339,7 +2499,7 @@ class ControllerApplication:
             route = ()
         direction = 1 if self.runtime.track.get_train_direction(train_id) else -1
         connection = next_connection(block, route, direction)
-        limit = self.runtime.track.get_train_speed_limit(train_id)
+        limit = self.runtime.track.get_train_speed_limit(train_id, motion=motion, snapshot=track_snapshot)
         effective = motion.target_speed if motion else self.runtime.track.get_effective_speed(train_id) if not self.simulation_mode else 0.0
         return {"requested_speed_kmh": round(requested * maximum, 4),
                 "effective_speed_kmh": round(effective * maximum, 4),
@@ -2353,12 +2513,11 @@ class ControllerApplication:
                            "from_block_id": connection[0].lower() if connection else block.lower(),
                            "to_block_id": connection[1].lower() if connection else None,
                            "source": "simulation" if self.simulation_mode else "reported" if motion else "unknown",
-                           "time_seconds": self.runtime.track.get_snapshot().time_seconds,
+                           "time_seconds": track_snapshot.time_seconds,
                            "tick_seconds": self.runtime.track.tick_seconds}}
 
-    def _topology_edges(self) -> list[dict[str, Any]]:
-        """Return editable block adjacency; turnout branches remain separately controlled."""
-
+    def _topology_links(self) -> list[tuple[str, str]]:
+        """Return editable block adjacency without allocating edge geometry."""
         links: set[tuple[str, str]] = set()
         explicit_topology = any("neighbor_ids" in block or "neighborIds" in block for block in self.blocks)
         if explicit_topology:
@@ -2374,7 +2533,15 @@ class ControllerApplication:
                 links.update({("b01", "b02"), ("b02", "b03"), ("b03", "b04")})
             else:
                 links.update(tuple(sorted((left, right))) for left, right in zip(block_ids, block_ids[1:]))
-        return [self._edge_with_geometry(left, right) for left, right in sorted(links)]
+        return sorted(links)
+
+    def _topology_edges(self) -> list[dict[str, Any]]:
+        """Return editable block adjacency; turnout branches remain separately controlled."""
+        waypoint_geometry = self._waypoint_geometry_index()
+        return [
+            self._edge_with_geometry(left, right, waypoint_geometry=waypoint_geometry)
+            for left, right in self._topology_links()
+        ]
 
     def _ui_turnouts(self) -> list[dict[str, Any]]:
         locks = self.runtime.interlocking.locks if self.runtime is not None and hasattr(self.runtime, "interlocking") else {}
@@ -2445,6 +2612,9 @@ class ControllerApplication:
         if not candidates:
             return None
         _, schedule = sorted(candidates, key=lambda item: item[0])[0]
+        return self._schedule_destination_text(schedule)
+
+    def _schedule_destination_text(self, schedule: dict[str, Any]) -> str | None:
         destination = str(schedule.get("destination", "")).strip()
         if destination:
             return destination
@@ -2467,7 +2637,41 @@ class ControllerApplication:
             return f"Coordinate {coordinate['x']}, {coordinate['y']}"
         return None
 
-    def _ui_trains(self) -> list[dict[str, Any]]:
+    def _next_schedule_destinations(self) -> dict[str, str | None]:
+        """Resolve each train's next destination in one pass over the timetable."""
+        terminal_states = {"completed", "arrived", "cancelled", "canceled"}
+        by_train: dict[str, tuple[str, int, dict[str, Any]]] = {}
+        by_address: dict[str, tuple[str, int, dict[str, Any]]] = {}
+        for index, schedule in enumerate(self.schedules):
+            if str(schedule.get("state", "")).strip().lower() in terminal_states:
+                continue
+            time_key = str(schedule.get("time", "99:99"))
+            train_id = schedule.get("train_id")
+            bucket = by_train if train_id not in (None, "") else by_address
+            key = self._canonical_train_id(str(train_id)) if train_id not in (None, "") else str(schedule.get("number", ""))
+            current = bucket.get(key)
+            if current is None or (time_key, index) < (current[0], current[1]):
+                bucket[key] = (time_key, index, schedule)
+
+        result: dict[str, str | None] = {}
+        for train in self.trains:
+            train_id = str(train.get("id", ""))
+            address = str(train.get("address", train.get("number", "")))
+            candidates = [candidate for candidate in (by_train.get(train_id), by_address.get(address)) if candidate is not None]
+            if candidates:
+                schedule = min(candidates, key=lambda item: (item[0], item[1]))[2]
+                result[train_id] = self._schedule_destination_text(schedule)
+        return result
+
+    def _ui_trains(self, track_snapshot: Any | None = None,
+                   motions_by_id: dict[str, Any] | None = None,
+                   next_destinations: dict[str, str | None] | None = None) -> list[dict[str, Any]]:
+        if track_snapshot is None:
+            track_snapshot = self.runtime.track.get_snapshot()
+        if motions_by_id is None:
+            motions_by_id = {motion.train_id: motion for motion in track_snapshot.trains}
+        if next_destinations is None:
+            next_destinations = self._next_schedule_destinations()
         result = []
         for train in self.trains:
             ui_id = self._ui_train_id(train["id"])
@@ -2494,7 +2698,7 @@ class ControllerApplication:
                 "position": (
                     "Off graph" if not train.get("graph_enabled", True)
                     else train.get("block_id", "—")
-                    if self.simulation_mode or any(m.train_id == train["id"] for m in self.runtime.track.get_snapshot().trains)
+                    if self.simulation_mode or train["id"] in motions_by_id
                     else "—"
                 ),
                 "graph_enabled": bool(train.get("graph_enabled", True)),
@@ -2504,7 +2708,7 @@ class ControllerApplication:
                 "scheduled_route_name": train.get("scheduled_route_name"),
                 "origin": train.get("origin", "Layout"),
                 "destination": train.get("destination", "Layout"),
-                "next_destination": self._next_schedule_destination(train),
+                "next_destination": next_destinations.get(str(train["id"])),
                 "direction": "Forward" if (self.runtime.track.get_train_direction(str(train["id"])) if self.runtime else train.get("direction", "forward") == "forward") else "Reverse",
                 "decoder": f"Z21-{train.get('address', '')}",
                 "manufacturer": train.get("manufacturer", ""),
@@ -2519,7 +2723,7 @@ class ControllerApplication:
                 "locomotive_ids": [self._ui_train_id(str(item)) for item in train.get("locomotive_ids", ()) if str(item)],
                 "decoder_function_states": dict(train.get("decoder_function_states", {})),
                 "target_coordinate": deepcopy(train.get("target_coordinate")) if train.get("target_coordinate") else None,
-                **self._train_motion_state(train),
+                **self._train_motion_state(train, track_snapshot, motions_by_id),
             })
         return result
 
@@ -4242,13 +4446,24 @@ class ControllerHandler(BaseHTTPRequestHandler):
             return self._send_json(self.application.settings_payload())
         if parsed.path.startswith("/api/scans/files/"):
             return self._send_scan_file(unquote(parsed.path.removeprefix("/api/scans/files/")))
+        if parsed.path == "/api/live":
+            try:
+                self.application.check_connection()
+            except Exception:
+                pass
+            return self._send_json(self.application.live_payload())
         if parsed.path == "/api/state":
+            try:
+                self.application.check_connection()
+            except Exception:
+                # Keep cached controller state available if a health probe
+                # fails; the snapshot reports the latest known connection.
+                pass
             return self._send_json(self.application.state())
         if parsed.path == "/api/layout":
-            snapshot = self.application.state()
-            return self._send_json(snapshot["layout"])
+            return self._send_json(self.application.layout_payload())
         if parsed.path == "/api/trains":
-            return self._send_json({"trains": self.application.state()["trains"]})
+            return self._send_json(self.application.trains_payload())
         if parsed.path == "/api/train-database":
             return self._send_json({"trains": self.application.train_database()})
         if parsed.path == "/api/calibration":
@@ -4274,15 +4489,13 @@ class ControllerHandler(BaseHTTPRequestHandler):
             return self._send_json(record)
         if parsed.path == "/api/connection":
             self.application.check_connection()
-            snapshot = self.application.state()
-            return self._send_json(snapshot["connection"])
+            return self._send_json(self.application.connection_payload())
         if parsed.path == "/api/events":
-            return self._send_json({"events": self.application.state()["events"]})
+            return self._send_json(self.application.events_payload())
         if parsed.path == "/api/feedback":
-            snapshot = self.application.state()
-            return self._send_json({"occupied_blocks": self.application.feedback_occupancy, **snapshot.get("feedback", {})})
+            return self._send_json(self.application.feedback_payload())
         if parsed.path == "/api/scans":
-            return self._send_json({"scans": self.application.state()["scans"]})
+            return self._send_json(self.application.scans_payload())
         if parsed.path == "/api/layouts":
             records = self.application.runtime.layout_repository.list() if self.application.runtime is not None else ()
             return self._send_json({"layouts": [record.__dict__ for record in records]})
