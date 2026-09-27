@@ -96,6 +96,10 @@
     editorTab: 'datasheet',
     simRate: 1,
     zoom: 1,
+    layoutViewports: { graph: null, pinboard: null },
+    panDrag: null,
+    panKeyDown: false,
+    suppressCanvasClickUntil: 0,
     filter: '',
     consistDraft: null,
     editingBlockId: null,
@@ -1480,13 +1484,39 @@
 
   function fitGraphViewport() {
     const layout = app.state.layout;
+    const key = app.layoutView === 'pinboard' ? 'pinboard' : 'graph';
+    if (key === 'pinboard') {
+      const items = [...(layout.blocks || []), ...(layout.waypoints || []), ...(layout.turntables || [])];
+      if (!items.length) app.layoutViewports.pinboard = { x: 0, y: 0, width: 980, height: 350 };
+      else {
+        const left = Math.min(...items.map((item) => Number(item.x) || 0)) - 90;
+        const top = Math.min(...items.map((item) => Number(item.y) || 0)) - 70;
+        const right = Math.max(...items.map((item) => (Number(item.x) || 0) + (Number(item.width) || 0))) + 90;
+        const bottom = Math.max(...items.map((item) => (Number(item.y) || 0) + (Number(item.height) || 0))) + 70;
+        app.layoutViewports.pinboard = { x: left, y: top, width: Math.max(980, right - left), height: Math.max(350, bottom - top) };
+      }
+      applyLayoutViewport();
+      return;
+    }
     const items = [...(layout.blocks || []), ...(layout.waypoints || []), ...(layout.turntables || [])];
-    if (!items.length) { $('#layout-svg').setAttribute('viewBox', '0 0 980 350'); return; }
+    if (!items.length) {
+      app.layoutViewports.graph = { x: 0, y: 0, width: 980, height: 350 };
+      applyLayoutViewport();
+      return;
+    }
     const left = Math.min(...items.map((item) => Number(item.x) || 0)) - 70;
     const top = Math.min(...items.map((item) => Number(item.y) || 0)) - 80;
     const right = Math.max(...items.map((item) => (Number(item.x) || 0) + (Number(item.width) || 140))) + 70;
     const bottom = Math.max(...items.map((item) => (Number(item.y) || 0) + (Number(item.height) || 56))) + 65;
-    $('#layout-svg').setAttribute('viewBox', `${left} ${top} ${Math.max(320, right - left)} ${Math.max(220, bottom - top)}`);
+    app.layoutViewports.graph = { x: left, y: top, width: Math.max(320, right - left), height: Math.max(220, bottom - top) };
+    applyLayoutViewport();
+  }
+
+  function applyLayoutViewport() {
+    const key = app.layoutView === 'pinboard' ? 'pinboard' : 'graph';
+    if (!app.layoutViewports[key]) { fitGraphViewport(); return; }
+    const view = app.layoutViewports[key];
+    $('#layout-svg').setAttribute('viewBox', `${view.x} ${view.y} ${view.width} ${view.height}`);
   }
 
   function renderGraph() {
@@ -1557,7 +1587,7 @@
     $('#layout-svg').innerHTML = `<g class="graph-layer" style="transform-origin: 490px 175px;">${edgeMarkup}${nodeMarkup}${waypointMarkup}${turntableMarkup}${turnoutMarkup}${signalMarkup}${markers}</g>`;
     $('#graph-motion-note').textContent = app.state.connection.simulated ? 'Simulation positions · estimated interpolation between updates, capped at 2 seconds. Block boundaries wait for controller confirmation.' : 'Real trains: reported block only. Exact within-block positions are unknown; no movement is invented.';
     updateMotionMarkers(performance.now());
-    if (!app.layoutDrag) fitGraphViewport();
+    if (!app.layoutDrag) applyLayoutViewport();
     $$('[data-block-id]', $('#layout-svg')).forEach((node) => {
       node.addEventListener('click', () => selectBlock(node.dataset.blockId));
       node.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') selectBlock(node.dataset.blockId); });
@@ -1570,12 +1600,7 @@
 
   function pinboardPointFromEvent(event) {
     const svg = $('#layout-svg');
-    const rect = svg.getBoundingClientRect();
-    const viewBox = svg.viewBox.baseVal;
-    return {
-      x: viewBox.x + ((event.clientX - rect.left) / Math.max(1, rect.width)) * viewBox.width,
-      y: viewBox.y + ((event.clientY - rect.top) / Math.max(1, rect.height)) * viewBox.height,
-    };
+    return svgPoint(event);
   }
 
   function formatPinboardCoordinate(point) {
@@ -1619,7 +1644,7 @@
       const from = blockMap[String(edge.from).toLowerCase()];
       const to = blockMap[String(edge.to).toLowerCase()];
       if (!from || !to) return;
-      const projected = projectPinboardPoint(edgeControlPoints(from, to, edge), point);
+      const projected = projectPinboardPoint(pinboardPathSamples(edgeControlPoints(from, to, edge)), point);
       if (projected && (!best || projected.distance < best.distance)) {
         best = { ...projected, from_node: String(edge.from).toLowerCase(), to_node: String(edge.to).toLowerCase() };
       }
@@ -1651,6 +1676,21 @@
     const span = end.distance - start.distance;
     const progress = span > 0 ? (target - start.distance) / span : 0;
     return { x: start.x + (end.x - start.x) * progress, y: start.y + (end.y - start.y) * progress, dx: end.x - start.x, dy: end.y - start.y };
+  }
+
+  function pinboardVehicleLengthsMm(train, consist) {
+    const declaredTotal = Number(train.length_mm != null ? train.length_mm : Number(train.length || 0) * 1000);
+    // Data-sheet train totals are prototype lengths; small values are already H0 model millimetres.
+    const totalModelLength = Number.isFinite(declaredTotal) && declaredTotal > 0
+      ? declaredTotal / (declaredTotal > 10000 ? 87 : 1)
+      : 0;
+    const known = consist.map((item) => Number(item.length_mm) > 0 ? Number(item.length_mm) : 0);
+    const missingCount = known.filter((length) => !length).length;
+    const remaining = totalModelLength > known.reduce((sum, length) => sum + length, 0)
+      ? totalModelLength - known.reduce((sum, length) => sum + length, 0)
+      : totalModelLength;
+    const inferred = missingCount && remaining > 0 ? remaining / missingCount : 220;
+    return consist.map((item, index) => known[index] || inferred);
   }
 
   function renderPinboardTrainPicker() {
@@ -1814,6 +1854,12 @@
       const locked = turnout.lockedBy ? ' · locked by ' + escapeHtml(turnout.lockedBy) : '';
       return '<g class="pinboard-turnout is-' + state + (turnout.lockedBy ? ' is-locked' : '') + '" data-turnout-id="' + escapeHtml(turnout.id) + '" tabindex="0" role="button" aria-label="Switch ' + escapeHtml(turnout.name || turnout.id) + ' ' + state + locked + '"><circle class="pinboard-switch-dot" cx="' + point.x + '" cy="' + point.y + '" r="13"></circle><text class="pinboard-switch-state" x="' + point.x + '" y="' + (point.y + 4) + '">' + glyph + '</text><title>' + escapeHtml(turnout.name || turnout.id) + ' · ' + state + locked + '</title></g>';
     }).join('');
+    const targetMarkup = (app.state.trains || []).map((train) => {
+      const target = train.target_coordinate;
+      if (!target || target.x == null || target.y == null || !Number.isFinite(Number(target.x)) || !Number.isFinite(Number(target.y))) return '';
+      const x = Number(target.x); const y = Number(target.y); const label = escapeHtml(train.name || train.id);
+      return '<g class="pinboard-destination"><circle cx="' + x + '" cy="' + y + '" r="10"></circle><circle class="pinboard-destination-center" cx="' + x + '" cy="' + y + '" r="3"></circle><text x="' + (x + 14) + '" y="' + (y - 10) + '">DEST</text><title>' + label + ' destination</title></g>';
+    }).join('');
     const trainMarkup = app.state.trains.filter((train) => train.graph_enabled !== false).map((train) => {
       const motion = train.motion || {};
       const from = blockMap[String(motion.from_block_id || motion.block_id || train.position || '').toLowerCase()];
@@ -1831,10 +1877,11 @@
       const totalLength = samples.length ? samples[samples.length - 1].distance : 0;
       const progress = !to && !matching ? .5 : to && motion.source === 'simulation' && Number.isFinite(Number(motion.position)) ? Math.max(0, Math.min(.98, Number(motion.position))) : to ? 0 : 1;
       const leadDistance = progress * totalLength;
-      const consist = Array.isArray(train.consist) && train.consist.length ? train.consist : [{ type: 'locomotive', name: train.name, length_mm: train.length_mm || 220 }];
+      const consist = Array.isArray(train.consist) && train.consist.length ? train.consist : [{ type: 'locomotive', name: train.name }];
+      const vehicleLengths = pinboardVehicleLengthsMm(train, consist);
       let offset = 0;
       const vehicles = consist.map((item, index) => {
-        const length = Math.max(16, Math.min(90, Number(item.length_mm || 220) / 8));
+        const length = Math.max(4, vehicleLengths[index] / 8);
         const centerDistance = leadDistance - offset - length / 2;
         const point = pinboardPointAtDistance(samples, centerDistance);
         const angle = Math.atan2(point.dy, point.dx) * 180 / Math.PI;
@@ -1844,14 +1891,16 @@
       }).join('');
       const label = escapeHtml(train.name || train.id);
       const point = pinboardPointAtDistance(samples, leadDistance);
-      return '<g class="pinboard-train' + (train.id === app.selectedTrainId ? ' is-selected' : '') + '" data-pinboard-train-id="' + escapeHtml(train.id) + '" data-from-block="' + escapeHtml(from.id) + '" data-to-block="' + escapeHtml(to ? to.id : '') + '" tabindex="0" role="button" aria-label="Train ' + label + '">' + vehicles + '<text class="pinboard-train-label" x="' + (point.x + 10) + '" y="' + (point.y - 14) + '">' + label + '</text></g>';
+      return '<g class="pinboard-train' + (train.id === app.selectedTrainId ? ' is-selected' : '') + '" data-pinboard-train-id="' + escapeHtml(train.id) + '" data-from-block="' + escapeHtml(from.id) + '" data-to-block="' + escapeHtml(to ? to.id : '') + '" data-anchor-x="' + point.x + '" data-anchor-y="' + point.y + '" tabindex="0" role="button" aria-label="Train ' + label + ' · drag to set destination on the track">' + vehicles + '<text class="pinboard-train-label" x="' + (point.x + 10) + '" y="' + (point.y - 14) + '">' + label + '</text></g>';
     }).join('');
-    $('#layout-svg').setAttribute('viewBox', '0 0 980 350');
+    const dragPreview = '<g id="pinboard-drag-preview" class="pinboard-drag-preview" visibility="hidden"><circle cx="0" cy="0" r="11"></circle><circle class="pinboard-drag-preview-center" cx="0" cy="0" r="3"></circle><text x="14" y="-10">DEST</text></g>';
+    if (!app.layoutViewports.pinboard) fitGraphViewport();
+    applyLayoutViewport();
     $('#layout-svg').setAttribute('aria-label', 'Top-down train visualizer with block-colored track, clickable switches, and trains following the track spline');
-    $('#layout-svg').innerHTML = '<g class="pinboard-layer">' + edgeMarkup + nodeMarkup + turnoutMarkup + splinePointMarkup + trainMarkup + '</g>';
+    $('#layout-svg').innerHTML = '<g class="pinboard-layer">' + edgeMarkup + targetMarkup + nodeMarkup + turnoutMarkup + splinePointMarkup + trainMarkup + dragPreview + '</g>';
     const stageMode = $('#map-stage-mode');
     if (stageMode) stageMode.textContent = 'TRAIN VISUALIZER';
-    $('#graph-motion-note').textContent = 'Colored rail sections show block state. Click a switch dot to change its alignment; train cars follow the track spline.';
+    $('#graph-motion-note').textContent = 'Drag a stopped train to a rail section to set its destination. Movement uses calibration; real trains ask for confirmation. Cars follow the spline at H0 scale.';
     const stage = $('#map-stage');
     stage.onpointermove = (event) => {
       const point = pinboardPointFromEvent(event);
@@ -1957,12 +2006,29 @@
     if (event.button !== 0) return;
     event.preventDefault();
     const pointerId = event.pointerId;
-    app.pinboardTrainDrag = { trainId, pointerId };
+    const trainNode = $$('[data-pinboard-train-id]', $('#layout-svg')).find((node) => node.dataset.pinboardTrainId === trainId);
+    app.pinboardTrainDrag = { trainId, pointerId, startX: event.clientX, startY: event.clientY, moved: false, node: trainNode, anchorX: Number(trainNode && trainNode.dataset.anchorX) || 0, anchorY: Number(trainNode && trainNode.dataset.anchorY) || 0 };
     const move = (current) => {
-      if (app.pinboardTrainDrag && app.pinboardTrainDrag.pointerId != null && current.pointerId !== app.pinboardTrainDrag.pointerId) return;
+      const drag = app.pinboardTrainDrag;
+      if (!drag || (drag.pointerId != null && current.pointerId !== drag.pointerId)) return;
+      if (Math.hypot(current.clientX - drag.startX, current.clientY - drag.startY) > 5) drag.moved = true;
       const raw = pinboardPointFromEvent(current);
-      const next = nearestPinboardCoordinate(raw) || raw;
+      const trackTarget = nearestPinboardCoordinate(raw);
+      const next = trackTarget || raw;
       app.pinboardCursor = next;
+      if (drag.moved) {
+        const currentNode = drag.node && drag.node.isConnected ? drag.node : $$('[data-pinboard-train-id]', $('#layout-svg')).find((node) => node.dataset.pinboardTrainId === trainId);
+        if (currentNode) {
+          drag.node = currentNode;
+          currentNode.classList.add('is-dragging');
+          currentNode.setAttribute('transform', 'translate(' + (next.x - drag.anchorX) + ' ' + (next.y - drag.anchorY) + ')');
+        }
+      }
+      const preview = $('#pinboard-drag-preview');
+      if (preview) {
+        preview.setAttribute('visibility', drag.moved && trackTarget ? 'visible' : 'hidden');
+        preview.setAttribute('transform', 'translate(' + next.x + ' ' + next.y + ')');
+      }
       const display = $('#pinboard-coordinate');
       if (display) display.textContent = formatPinboardCoordinate(next);
     };
@@ -1971,7 +2037,17 @@
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
+      const moved = app.pinboardTrainDrag && app.pinboardTrainDrag.moved;
+      if (app.pinboardTrainDrag && app.pinboardTrainDrag.node) {
+        app.pinboardTrainDrag.node.classList.remove('is-dragging');
+        app.pinboardTrainDrag.node.removeAttribute('transform');
+      }
+      const preview = $('#pinboard-drag-preview');
+      if (preview) preview.setAttribute('visibility', 'hidden');
       app.pinboardTrainDrag = null;
+      if (!current || current.type !== 'pointerup') return;
+      if (!moved) { selectTrain(trainId); return; }
+      app.suppressCanvasClickUntil = Date.now() + 350;
       const raw = pinboardPointFromEvent(current);
       const target = nearestPinboardCoordinate(raw);
       if (!target) {
@@ -1979,22 +2055,22 @@
         return;
       }
       const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
-      const response = await sendCommand({ type: simulated ? 'place_train_on_track' : 'move_train_to_coordinate', train_id: trainId, x: target.x, y: target.y });
+      const response = await sendCommand({ type: 'move_train_to_coordinate', train_id: trainId, x: target.x, y: target.y });
+      if (!response) return;
+      const train = (response.trains || []).find((item) => item.id === trainId);
+      const coordinate = train && train.target_coordinate;
+      const routeBlocks = coordinate && Array.isArray(coordinate.route_node_ids) ? coordinate.route_node_ids : [];
+      const route = routeBlocks.length ? ': ' + routeBlocks.map((block) => String(block).toUpperCase()).join(' → ') : '';
       if (simulated) {
-        if (response) showToast(`${trainId} moved along the track.`, 'success');
+        const started = await sendCommand({ type: 'execute_coordinate_move', train_id: trainId, confirm: true });
+        if (started) showToast(`${trainId} moving to its destination${route}.`, 'success');
         return;
       }
-      if (response) {
-        const train = (response.trains || []).find((item) => item.id === trainId);
-        const coordinate = train && train.target_coordinate;
-        const blocks = coordinate && Array.isArray(coordinate.route_node_ids) ? coordinate.route_node_ids : [];
-        const durationMs = Number(coordinate && coordinate.estimated_duration_ms);
-        const duration = Number.isFinite(durationMs) && durationMs > 0 ? ` · ~${Math.ceil(durationMs / 1000)} s` : '';
-        const route = blocks.length ? `: ${blocks.map((block) => String(block).toUpperCase()).join(' → ')}` : '';
-        showToast('Coordinate target planned for ' + trainId + route + duration, 'success');
-        if (window.confirm('Execute this calibrated movement now? The train will move briefly and then stop.')) {
-          await sendCommand({ type: 'execute_coordinate_move', train_id: trainId, confirm: true });
-        }
+      const durationMs = Number(coordinate && coordinate.estimated_duration_ms);
+      const duration = Number.isFinite(durationMs) && durationMs > 0 ? ` · ~${Math.ceil(durationMs / 1000)} s` : '';
+      showToast('Destination set for ' + trainId + route + duration, 'success');
+      if (window.confirm('Move this train to the marked destination now?')) {
+        await sendCommand({ type: 'execute_coordinate_move', train_id: trainId, confirm: true });
       }
     };
     window.addEventListener('pointermove', move);
@@ -3392,6 +3468,56 @@
     return point.matrixTransform(svg.getScreenCTM().inverse());
   }
 
+  function beginLayoutPan(event) {
+    if (!['dispatch', 'layout'].includes(app.workspace) || !['graph', 'pinboard'].includes(app.layoutView)) return;
+    if (event.button !== 0 && event.button !== 1) return;
+    const forcePan = event.button === 1 || app.panKeyDown || event.altKey;
+    const interactive = event.target.closest('.block-node, .pinboard-node, .pinboard-train, .pinboard-spline-point, .pinboard-turnout, .signal-node, .turntable-node');
+    if (interactive && !forcePan) return;
+    const svg = $('#layout-svg');
+    const view = app.layoutViewports[app.layoutView === 'pinboard' ? 'pinboard' : 'graph'] || svg.viewBox.baseVal;
+    app.panDrag = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startPoint: svgPoint(event),
+      screenToSvg: svg.getScreenCTM().inverse(),
+      view: { x: view.x, y: view.y, width: view.width, height: view.height },
+      moved: false
+    };
+    $('#map-stage').classList.add('is-panning');
+    event.preventDefault();
+    event.stopPropagation();
+    window.addEventListener('pointermove', moveLayoutPan);
+    window.addEventListener('pointerup', endLayoutPan);
+    window.addEventListener('pointercancel', endLayoutPan);
+  }
+
+  function moveLayoutPan(event) {
+    const drag = app.panDrag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const svg = $('#layout-svg');
+    const pointer = svg.createSVGPoint();
+    pointer.x = event.clientX; pointer.y = event.clientY;
+    const point = pointer.matrixTransform(drag.screenToSvg);
+    const dx = point.x - drag.startPoint.x; const dy = point.y - drag.startPoint.y;
+    if (Math.abs(event.clientX - drag.startClientX) + Math.abs(event.clientY - drag.startClientY) > 3) drag.moved = true;
+    const view = { ...drag.view, x: drag.view.x - dx, y: drag.view.y - dy };
+    app.layoutViewports[app.layoutView === 'pinboard' ? 'pinboard' : 'graph'] = view;
+    svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.width} ${view.height}`);
+    event.preventDefault();
+  }
+
+  function endLayoutPan(event) {
+    if (!app.panDrag || (event && event.pointerId !== app.panDrag.pointerId)) return;
+    if (app.panDrag.moved) app.suppressCanvasClickUntil = Date.now() + 350;
+    app.panDrag = null;
+    $('#map-stage').classList.remove('is-panning');
+    window.removeEventListener('pointermove', moveLayoutPan);
+    window.removeEventListener('pointerup', endLayoutPan);
+    window.removeEventListener('pointercancel', endLayoutPan);
+  }
+
   function beginBlockDrag(event, blockId) {
     if (!app.layoutEditing || event.button !== 0) return;
     const block = app.state.layout.blocks.find((item) => item.id === blockId);
@@ -3712,6 +3838,13 @@
   }
 
   function setupEvents() {
+    const mapStage = $('#map-stage');
+    mapStage.addEventListener('pointerdown', beginLayoutPan, true);
+    document.addEventListener('keydown', (event) => {
+      if (event.code !== 'Space' || event.repeat || event.target.closest('input, textarea, select, button, [contenteditable="true"]')) return;
+      if (mapStage.matches(':hover') || document.activeElement === mapStage) { app.panKeyDown = true; event.preventDefault(); }
+    });
+    document.addEventListener('keyup', (event) => { if (event.code === 'Space') app.panKeyDown = false; });
     updateNativeControls = (preserveStatus = false) => {
       const available = Boolean(window.pywebview && window.pywebview.api && typeof window.pywebview.api.switch_mode === 'function');
       const wlan = selectedWlanProfile();
