@@ -170,6 +170,8 @@ class ControllerApplication:
     _recording_history: list[PlaybackPlan] = field(default_factory=list, init=False, repr=False)
     _automation_programs: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _scheduled_routines: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _playback_runs: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
+    _playback_results: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _coordinate_execution_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -362,9 +364,13 @@ class ControllerApplication:
                 return
             self._closed = True
             runtime = self.runtime
+            playback_workers = [run["worker"] for run in self._playback_runs.values()]
+            self._cancel_playbacks(reason="Controller closed")
 
         # Do not hold the application lock while joining workers: a worker can
         # be finishing a tick while waiting for this same lock.
+        for worker in playback_workers:
+            worker.join(timeout=0.2)
         try:
             self.stop_motion_clock()
         except Exception:
@@ -1399,8 +1405,110 @@ class ControllerApplication:
             # must never invalidate the underlying train command.
             return
 
+    def playback_state(self) -> list[dict[str, Any]]:
+        """Expose progress without serializing workers or cancellation events."""
+        with self._lock:
+            result = deepcopy(list(self._playback_results.values()))
+            now = time.monotonic()
+            for run in self._playback_runs.values():
+                item = dict(run["status"])
+                item["elapsed_s"] = round(min(item["duration_s"], max(0.0, now - run["started"])), 3)
+                result.append(item)
+            return result
+
+    def _finish_playback(self, train_id: str, run: dict[str, Any], status: str, detail: str = "") -> None:
+        """Invalidate a run before stopping so cancelled actions cannot resume it."""
+        if self._playback_runs.get(train_id) is not run:
+            return
+        self._playback_runs.pop(train_id)
+        run["cancel"].set()
+        try:
+            result = run["runtime"].track.stop_train(train_id)
+            if hasattr(result, "accepted") and not result.accepted:
+                raise ValueError(result.detail or "routine stop command was rejected")
+        except Exception as exc:
+            status = "failed"
+            detail = f"{detail + '; ' if detail else ''}Could not confirm train stop: {exc}"
+        finally:
+            control = run["runtime"].dispatcher.register_train(train_id)
+            control.manual_speed = control.automatic_speed = 0.0
+            train = next((item for item in self.trains if item.get("id") == train_id), None)
+            if train is not None:
+                train["speed"] = train["requested_speed_kmh"] = 0
+        item = dict(run["status"], status=status, detail=detail,
+                    elapsed_s=round(min(run["status"]["duration_s"], max(0.0, time.monotonic() - run["started"])), 3))
+        self._playback_results[train_id] = item
+        self.events.append({"type": run["event_type"] if status == "completed" else f"playback_{status}",
+                            "train_id": train_id, "action_count": item["action_count"], "detail": detail})
+
+    def _cancel_playbacks(self, train_id: str | None = None, *, reason: str = "Stopped by operator") -> None:
+        for active_id, run in list(self._playback_runs.items()):
+            if train_id is None or active_id == train_id:
+                self._finish_playback(active_id, run, "cancelled", reason)
+
+    def _playback_worker(self, train_id: str, run: dict[str, Any]) -> None:
+        """Wait outside the request lock, checking cancellation between actions."""
+        plan = run["plan"]
+        index = 0
+        try:
+            while not run["cancel"].is_set():
+                with self._lock:
+                    if self._playback_runs.get(train_id) is not run:
+                        return
+                    runtime = run["runtime"]
+                    control = runtime.dispatcher.register_train(train_id)
+                    if self._closed or self.runtime is not runtime or not self.track_power or control.mode is not run["mode"]:
+                        self._finish_playback(train_id, run, "cancelled", "Controller power or train mode changed")
+                        return
+                    train = next((item for item in self.trains if item.get("id") == train_id), None)
+                    if train is None:
+                        raise ValueError("routine train is no longer available")
+                    elapsed = time.monotonic() - run["started"]
+                    if index < len(plan.actions):
+                        action = plan.actions[index]
+                        remaining = max(0.0, action.timestamp - plan.started_at) - elapsed
+                        if remaining <= 0:
+                            if action.operation == "speed":
+                                command = runtime.dispatcher.automatic_speed if run["mode"] is ControlMode.AUTOMATIC else runtime.dispatcher.manual_speed
+                                result = command(train_id, float(action.speed))
+                            elif action.operation == "direction":
+                                result = runtime.track.set_train_direction(train_id, forward=action.direction == "forward")
+                            else:
+                                if not hasattr(runtime.track, "set_train_function"):
+                                    raise ValueError("the active track adapter does not support decoder functions")
+                                result = runtime.track.set_train_function(train_id, int(action.function_number), enabled=bool(action.enabled))
+                            if hasattr(result, "accepted") and not result.accepted:
+                                raise ValueError(result.detail or "routine action was rejected")
+                            if action.operation == "speed":
+                                maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
+                                train["speed"] = train["requested_speed_kmh"] = round(float(action.speed) * maximum)
+                            elif action.operation == "direction":
+                                train["direction"] = action.direction
+                            else:
+                                train.setdefault("decoder_function_states", {})[str(action.function_number)] = bool(action.enabled)
+                            index += 1
+                            run["status"]["completed_actions"] = index
+                            continue
+                    else:
+                        # Preserve a trailing Wait block, even if the last
+                        # actual command occurred earlier in the plan.
+                        remaining = plan.duration - elapsed
+                        if remaining <= 0:
+                            self._finish_playback(train_id, run, "completed")
+                            return
+                run["cancel"].wait(min(0.1, max(0.0, remaining)))
+        except Exception as exc:
+            with self._lock:
+                self._finish_playback(train_id, run, "failed", str(exc))
+
     def _playback_plan(self, plan: PlaybackPlan, payload: dict[str, Any], event_type: str) -> dict[str, Any]:
-        """Play a recorded or authored plan and leave the train in a safe stopped state."""
+        """Accept a plan promptly; its worker owns timing and the final stop."""
+        with self._lock:
+            return self._start_playback(plan, payload, event_type)
+
+    def _start_playback(self, plan: PlaybackPlan, payload: dict[str, Any], event_type: str) -> dict[str, Any]:
+        if self._closed:
+            raise ValueError("controller is closed")
         if self.runtime is None:
             raise ValueError("runtime is not available")
         if not self.track_power:
@@ -1411,46 +1519,40 @@ class ControllerApplication:
         train = next((item for item in self.trains if item.get("id") == train_id), None)
         if train is None:
             raise ValueError(f"Unknown train: {train_id}")
+        if any(member_id in self._playback_runs for member_id in self._coupled_train_ids(train_id)):
+            raise ValueError("a routine is already running for this train; stop it before starting another")
+        if train_id in self._scheduled_routines:
+            raise ValueError("a scheduled routine is already running for this train")
+        calibration = self.runtime.calibration.run
+        movement = self.runtime.coordinate_movement.status
+        if calibration is not None and calibration.status == "running" and calibration.train_id == train_id:
+            raise ValueError("stop train calibration before running a routine")
+        if movement is not None and movement.running and movement.request.train_id == train_id:
+            raise ValueError("stop coordinate movement before running a routine")
         control = self.runtime.dispatcher.register_train(train_id)
         is_automatic = control.mode is ControlMode.AUTOMATIC
         allow_automatic = payload.get("automatic") is True
         if is_automatic and not allow_automatic:
             raise ValueError("automatic-mode playback requires automatic=true")
-        maximum = max(1.0, float(train.get("maxSpeed", train.get("max_speed_kmh", 140)) or 140))
-        movement_attempted = False
-        playback_started = time.monotonic()
+        if control.mode is ControlMode.STOPPED:
+            control.mode = ControlMode.MANUAL
+            train["mode"] = ControlMode.MANUAL.value
+        status = {"train_id": self._ui_train_id(train_id), "program_id": payload.get("program_id"),
+                  "status": "running", "action_count": plan.action_count, "completed_actions": 0,
+                  "duration_s": plan.duration, "elapsed_s": 0.0, "detail": ""}
+        run = {"plan": plan, "runtime": self.runtime, "mode": control.mode,
+               "started": time.monotonic(), "cancel": threading.Event(), "status": status, "event_type": event_type}
+        worker = threading.Thread(target=self._playback_worker, args=(train_id, run), name=f"h0-playback-{train_id}", daemon=True)
+        run["worker"] = worker
+        self._playback_results.pop(train_id, None)
+        self._playback_runs[train_id] = run
         try:
-            for action in plan.actions:
-                target_delay = max(0.0, float(action.timestamp) - float(plan.started_at))
-                remaining = target_delay - (time.monotonic() - playback_started)
-                if remaining > 0:
-                    time.sleep(remaining)
-                if action.operation == "speed":
-                    if float(action.speed) > 0:
-                        movement_attempted = True
-                    command = self.runtime.dispatcher.automatic_speed if is_automatic else self.runtime.dispatcher.manual_speed
-                    result = command(train_id, float(action.speed))
-                elif action.operation == "direction":
-                    result = self.runtime.track.set_train_direction(train_id, forward=action.direction == "forward")
-                    if hasattr(result, "accepted") and result.accepted:
-                        train["direction"] = action.direction
-                else:
-                    if not hasattr(self.runtime.track, "set_train_function"):
-                        raise ValueError("the active track adapter does not support decoder functions")
-                    result = self.runtime.track.set_train_function(train_id, int(action.function_number), enabled=bool(action.enabled))
-                    train.setdefault("decoder_function_states", {})[str(action.function_number)] = bool(action.enabled)
-                if hasattr(result, "accepted") and not result.accepted:
-                    raise ValueError(result.detail or "recorded action was rejected")
-                if action.operation == "speed":
-                    train["speed"] = round(float(action.speed) * maximum)
-                    train["requested_speed_kmh"] = train["speed"]
-            self.events.append({"type": event_type, "train_id": train_id, "action_count": plan.action_count})
-            return self.recording_state()
-        finally:
-            if movement_attempted:
-                self.runtime.track.stop_train(train_id)
-            control.manual_speed = control.automatic_speed = 0.0
-            train["speed"] = train["requested_speed_kmh"] = 0
+            worker.start()
+        except Exception as exc:
+            self._finish_playback(train_id, run, "failed", str(exc))
+            raise
+        self.events.append({"type": "playback_started", "train_id": train_id, "action_count": plan.action_count})
+        return self.recording_state()
 
     def play_recording(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Play one stored recording and leave the train in a safe stopped state."""
@@ -1766,6 +1868,9 @@ class ControllerApplication:
         if not route.get("enabled", True):
             raise ValueError(f"cannot dispatch disabled route: {route_id}")
         canonical_train_id = self._canonical_train_id(train_id)
+        if canonical_train_id in self._playback_runs:
+            self.events.append({"type": "schedule_departure_skipped", "train_id": canonical_train_id, "reason": "routine playback already running"})
+            return None
         train = next((item for item in self.trains if str(item.get("id")) == canonical_train_id), None)
         if train is None:
             raise ValueError(f"Unknown train: {train_id}")
@@ -1847,6 +1952,9 @@ class ControllerApplication:
             raise ValueError("controller runtime unavailable")
         if not self.track_power:
             raise ValueError("switch track power on before scheduled routine execution")
+        if train_id in self._playback_runs:
+            self.events.append({"type": "schedule_routine_skipped", "train_id": train_id, "reason": "routine playback already running"})
+            return
         control = self.runtime.dispatcher.register_train(train_id)
         if control.mode is not ControlMode.AUTOMATIC:
             self.events.append({
@@ -1888,6 +1996,9 @@ class ControllerApplication:
         if self.runtime is None:
             raise ValueError("controller runtime unavailable")
         train_id = self._canonical_train_id(train_id)
+        if train_id in self._playback_runs:
+            self.events.append({"type": "schedule_departure_skipped", "train_id": train_id, "reason": "routine playback already running"})
+            return None
         train = next((item for item in self.trains if str(item.get("id")) == train_id), None)
         if train is None:
             raise ValueError(f"Unknown train: {train_id}")
@@ -2180,6 +2291,7 @@ class ControllerApplication:
                 "programming": self.programming_state(),
                 "recording": self.recording_state(),
                 "automationPrograms": self.automation_programs_state(),
+                "automationPlayback": self.playback_state(),
                 "coordinate_execution": self.runtime.coordinate_movement.status.as_dict()
                     if self.runtime is not None and self.runtime.coordinate_movement.status is not None else None,
                 "routes": deepcopy(self.routes),
@@ -2380,6 +2492,7 @@ class ControllerApplication:
             "programming": self.programming_state(),
             "recording": self.recording_state(),
             "automationPrograms": self.automation_programs_state(),
+            "automationPlayback": self.playback_state(),
             "coordinate_execution": self.runtime.coordinate_movement.status.as_dict() if self.runtime is not None and self.runtime.coordinate_movement.status is not None else None,
             "feedback": feedback,
             "layout": self._layout_payload(ui_blocks, ui_edges, ui_connection_limits, ui_turnouts),
@@ -2778,7 +2891,9 @@ class ControllerApplication:
                     )
                 routine_elapsed = (safe_steps * self.runtime.track.tick_seconds) if elapsed_seconds is None else max(0.0, elapsed_seconds)
                 self._advance_scheduled_routines(routine_elapsed)
-                self.runtime.tick(safe_steps)
+                cycle = self.runtime.tick(safe_steps)
+                for stopped_id in cycle.stopped_trains:
+                    self._cancel_playbacks(stopped_id, reason="Dispatcher stopped the train for route or occupancy safety")
                 if elapsed_seconds is None:
                     self._world_clock_seconds += safe_steps * 60
                     if self.runtime.scheduler.running:
@@ -2864,6 +2979,7 @@ class ControllerApplication:
         snapshot = self.runtime.layout_repository.load(selected_id)
         if snapshot is None:
             return None
+        self._cancel_playbacks(reason="Saved layout loaded")
         projected = snapshot_to_ui(snapshot)
         self.blocks = projected["blocks"]
         self.trains = projected["trains"]
@@ -3295,8 +3411,30 @@ class ControllerApplication:
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             kind = str(payload.get("type", "")).lower()
+            if kind in {"track_power", "power"} and not bool(payload.get("enabled", payload.get("value", True))):
+                self._cancel_playbacks(reason="Track power switched off")
+            elif kind in {"set_mode", "pause_simulation", "mode", "simulation_mode", "emergency_stop", "stop_all"}:
+                self._cancel_playbacks(reason="Controller mode changed or stopped")
+            elif kind in {"stop_train", "stop", "stop_automation_playback", "cancel_automation_playback",
+                          "set_train_mode", "switch_train_mode", "set_direction", "speed", "set_speed", "drive",
+                          "remove_train", "delete_train", "start_calibration", "calibrate_train",
+                          "move_train_to_coordinate", "move_to_coordinate", "execute_coordinate_move", "run_coordinate_move",
+                          "place_train_on_track", "place_train"}:
+                selected_id = self._canonical_train_id(str(payload.get("train_id", payload.get("id", ""))))
+                for member in self._coupled_trains(selected_id):
+                    self._cancel_playbacks(str(member["id"]), reason="Stopped by operator or another movement command")
             if kind in {"set_track_section", "add_spline_point"}:
                 self._command_track_section(kind, payload)
+            elif kind in {"stop_automation_playback", "cancel_automation_playback"}:
+                if not any(str(train.get("id")) == selected_id for train in self.trains):
+                    raise ValueError(f"Unknown train: {selected_id}")
+            elif kind in {"emergency_stop", "stop_all"}:
+                if self.runtime is not None:
+                    self.runtime.dispatcher.emergency_stop()
+                self._scheduled_routines.clear()
+                for train in self.trains:
+                    train.update(mode="stopped", speed=0, requested_speed_kmh=0)
+                self.events.append({"type": "emergency_stop"})
             elif kind == "set_connection_speed_limit":
                 left = str(payload.get("from", payload.get("from_block_id", ""))).strip().upper()
                 right = str(payload.get("to", payload.get("to_block_id", ""))).strip().upper()

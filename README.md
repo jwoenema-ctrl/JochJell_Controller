@@ -29,6 +29,12 @@ When running from Python, open the HTTP URL printed by the controller (normally
 to that local dashboard. The Python controller must be running for layout edits
 and other commands to be saved; `file://` pages cannot call its API.
 
+Routine playback starts in the background and reports progress in Automation.
+Use **Stop routine** to cancel it. Stopping the train, changing its control mode,
+or switching track power off also cancels playback. The controller sends a stop
+when playback finishes or fails. A command acknowledgement means the routine
+was accepted; completion and any runtime error appear in the routine status.
+
 ## What the product does
 
 JochJell Controller is organized around four layers:

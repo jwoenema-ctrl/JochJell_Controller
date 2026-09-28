@@ -247,7 +247,7 @@ async function shot(page, name) {
     const previous = before.layout.blocks.find(item => item.id === 'b05');
     return block && previous && (Number(block.x) !== Number(previous.x) || Number(block.y) !== Number(previous.y));
   }, movableBefore);
-  await movableBlock.click();
+  await movableBlock.press('Enter');
   page.once('dialog', dialog => dialog.accept());
   await page.locator('#delete-selected-block').click();
   await page.waitForFunction(async () => {

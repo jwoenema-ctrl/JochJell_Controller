@@ -263,6 +263,7 @@
             <button type="button" class="button button-soft" id="automation-clear-program">Clear blocks</button>
             <button type="button" class="button button-primary" id="automation-save-program">Save program</button>
             <button type="button" class="button button-soft" id="automation-run-program">Run program</button>
+            <button type="button" class="button button-soft" id="automation-stop-program" disabled>Stop routine</button>
           </div>
           <div class="automation-studio-grid">
             <aside class="automation-catalogue">
@@ -291,6 +292,7 @@
                 <div class="automation-empty-state" id="automation-empty-state">Drag an action block here to start a routine.</div>
               </div>
               <p class="settings-status" id="automation-status" role="status">Ready. Build a routine, then save it for later.</p>
+              <p class="settings-status is-hidden" id="automation-playback-status" role="status" aria-live="polite"></p>
             </section>
             <aside class="automation-inspector">
               <div class="automation-inspector-heading"><p class="eyebrow">SAVED PROGRAMS</p><h3>Routines</h3></div>

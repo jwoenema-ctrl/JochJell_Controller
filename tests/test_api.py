@@ -16,6 +16,17 @@ from backend.infrastructure.interfaces import CommandResult
 
 
 class ApiTests(unittest.TestCase):
+    def _wait_for_playback(self, app: ControllerApplication, train_id: str, expected: str = "completed") -> dict:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            state = app.state()
+            run = next((item for item in state["automationPlayback"] if item["train_id"] == train_id), None)
+            if run is not None and run["status"] != "running":
+                self.assertEqual(run["status"], expected, run.get("detail", ""))
+                return state
+            time.sleep(0.01)
+        self.fail(f"Playback did not finish for {train_id}")
+
     def test_sample_tick_moves_automatic_train_progress(self) -> None:
         app = ControllerApplication.sample()
         try:
@@ -63,6 +74,7 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(len(stopped["recording"]["history"]), 1)
             self.assertEqual(stopped["recording"]["history"][0]["action_count"], 1)
             replayed = app.command({"type": "play_recording", "index": 0, "confirm": True})
+            replayed = self._wait_for_playback(app, "t2")
             self.assertFalse(replayed["recording"]["active"])
             self.assertEqual(next(item for item in replayed["trains"] if item["id"] == "t2")["speed"], 0)
             control = app.runtime.dispatcher.trains["train-3"]
@@ -80,6 +92,7 @@ class ApiTests(unittest.TestCase):
             app.command({"type": "stop_recording"})
             app.command({"type": "set_direction", "train_id": "train-3", "direction": "forward"})
             replayed = app.command({"type": "play_recording", "index": 0, "confirm": True})
+            replayed = self._wait_for_playback(app, "t2")
             self.assertEqual(next(item for item in replayed["trains"] if item["id"] == "t2")["direction"], "Reverse")
         finally:
             app.close()
@@ -106,6 +119,7 @@ class ApiTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "automatic=true"):
                 app.command({"type": "play_recording", "index": 1, "confirm": True})
             replayed = app.command({"type": "play_recording", "index": 1, "confirm": True, "automatic": True})
+            replayed = self._wait_for_playback(app, "t1")
             self.assertEqual(next(item for item in replayed["trains"] if item["id"] == "t1")["speed"], 0)
         finally:
             app.close()
@@ -121,8 +135,9 @@ class ApiTests(unittest.TestCase):
             app.command({"type": "stop_train", "train_id": "train-3"})
             track = app.runtime.track
             with patch.object(track, "stop_train", wraps=track.stop_train) as stop_train,                  patch.object(track, "set_train_function", return_value=CommandResult(False, "set_train_function", "rejected")):
-                with self.assertRaisesRegex(ValueError, "rejected"):
-                    app.command({"type": "play_recording", "index": 0, "confirm": True})
+                app.command({"type": "play_recording", "index": 0, "confirm": True})
+                failed = self._wait_for_playback(app, "t2", "failed")
+                self.assertIn("rejected", failed["automationPlayback"][0]["detail"])
             self.assertTrue(stop_train.called)
             control = app.runtime.dispatcher.trains["train-3"]
             self.assertEqual((control.manual_speed, control.automatic_speed), (0.0, 0.0))
@@ -138,6 +153,7 @@ class ApiTests(unittest.TestCase):
             app.command({"type": "set_train_function", "train_id": "train-3", "function_number": 2, "enabled": True})
             app.command({"type": "stop_recording"})
             replayed = app.command({"type": "play_recording", "index": 0, "confirm": True})
+            replayed = self._wait_for_playback(app, "t2")
             train = next(item for item in replayed["trains"] if item["id"] == "t2")
             self.assertTrue(train["decoder_function_states"]["2"])
         finally:
@@ -1104,6 +1120,7 @@ class ApiTests(unittest.TestCase):
             self.assertNotIn("_compiled_actions", program)
 
             ran = app.command({"type": "play_automation_program", "program_id": "platform-arrival", "automatic": True, "confirm": True})
+            ran = self._wait_for_playback(app, "t2")
             train = next(item for item in ran["trains"] if item["id"] == "t2")
             self.assertEqual(train["speed"], 0)
             self.assertFalse(train["decoder_function_states"]["0"])

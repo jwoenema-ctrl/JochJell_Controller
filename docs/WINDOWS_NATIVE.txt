@@ -55,6 +55,8 @@ Release packaging:
   are temporary build outputs intended for verification.
 - Pushing a version tag matching v* runs all tests and executable smoke checks
   before the workflow creates the matching GitHub Release assets.
-- SHA256SUMS.txt records the SHA-256 checksums of the executable and ZIP. Releases
-  are create-once; retry with a new version tag rather than replacing published
-  assets.
+- SHA256SUMS.txt records the SHA-256 checksums of the executable and ZIP. Normally
+  publish a new version for fixes. When explicitly revising an existing release,
+  move its matching tag to the revised commit and rebuild all assets together.
+  The workflow replaces the executable, ZIP, checksums, and release notes after
+  its Windows checks pass. Existing installations must download the updated build.

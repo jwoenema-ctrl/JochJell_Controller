@@ -132,6 +132,7 @@
     automationDraft: { id: null, name: 'New train routine', trainId: '', blocks: [] },
     automationSelectedBlockId: null,
     automationPrograms: [],
+    automationRunPending: false,
     stateMutationRevision: 0,
     routeFlowSelectedId: null
   };
@@ -446,6 +447,7 @@
     if (value.programming) app.state.programming = value.programming;
     if (value.recording) app.state.recording = value.recording;
     if (Array.isArray(value.automationPrograms)) app.automationPrograms = value.automationPrograms;
+    if (Array.isArray(value.automationPlayback)) app.state.automationPlayback = value.automationPlayback;
     if (value.coordinate_execution !== undefined) app.state.coordinate_execution = value.coordinate_execution;
   }
 
@@ -498,7 +500,9 @@
       }
       return await response.json();
     } catch (error) {
-      if (error.name === 'AbortError') throw new Error('The controller took too long to respond. Check the Python console before retrying.');
+      if (error.name === 'AbortError') throw new Error(mutation
+        ? 'The controller did not acknowledge this command in time. It may already have started. Check the train and routine status before sending it again.'
+        : 'The controller took too long to respond. Check its connection and routine status.');
       if (error instanceof TypeError) throw new Error('Cannot reach the Python controller at ' + window.location.origin + '. Check that it is running and open the dashboard from its printed URL.');
       throw error;
     } finally {
@@ -565,7 +569,7 @@
       app.state.connection = { connected: false, simulated: false, label: 'Controller unavailable', detail: 'Check the local server' };
     }
     if (stateResult.status === 'fulfilled') showSettingsRuntime(unwrap(stateResult.value)?.runtime);
-    renderConnection(); renderSidebar(); renderGraph(); renderSystematicView(); renderStats();
+    renderConnection(); renderSidebar(); renderGraph(); renderSystematicView(); renderStats(); renderAutomationPlayback();
   }
 
   function applyTheme(theme) {
@@ -1149,6 +1153,33 @@
     programList.innerHTML = app.automationPrograms.length
       ? app.automationPrograms.map((program) => `<div class="automation-program-row" data-automation-program-id="${escapeHtml(program.id)}"><span><strong>${escapeHtml(program.name || program.id)}</strong><small>${escapeHtml(String(program.train_id || ''))} · ${escapeHtml(String((program.blocks || []).length))} blocks · ${escapeHtml(String(program.duration_s || 0))} s</small></span><span class="automation-program-row-actions"><button type="button" class="text-button" data-automation-program-action="load">Load</button><button type="button" class="text-button" data-automation-program-action="run">Run</button><button type="button" class="text-button danger-text" data-automation-program-action="delete">Delete</button></span></div>`).join('')
       : '<p class="settings-help">No saved routines yet. Build one and save it here.</p>';
+    renderAutomationPlayback();
+  }
+
+  function renderAutomationPlayback() {
+    const status = $('#automation-playback-status');
+    if (!status) return;
+    const runs = app.state.automationPlayback || [];
+    const run = runs.find((item) => item.train_id === app.automationDraft.trainId);
+    const running = run && run.status === 'running';
+    $('#automation-run-program').disabled = Boolean(running || app.automationRunPending);
+    $('#automation-stop-program').disabled = !running;
+    $$('#automation-program-list [data-automation-program-action="run"]').forEach((button) => {
+      const id = button.closest('[data-automation-program-id]').dataset.automationProgramId;
+      const program = app.automationPrograms.find((item) => item.id === id);
+      button.disabled = app.automationRunPending || runs.some((item) => item.status === 'running' && item.train_id === program?.train_id);
+    });
+    status.classList.toggle('is-hidden', !run && !app.automationRunPending);
+    if (app.automationRunPending && !running) {
+      status.textContent = 'Starting routine…';
+    } else if (run) {
+      const elapsed = Number(run.elapsed_s || 0).toFixed(1);
+      const duration = Number(run.duration_s || 0).toFixed(1);
+      if (running) status.textContent = `Routine running · ${run.completed_actions} / ${run.action_count} actions · ${elapsed} / ${duration} s. Stop routine to cancel.`;
+      else if (run.status === 'completed') status.textContent = 'Routine completed. Stop command sent to the train.';
+      else if (run.status === 'failed') status.textContent = `Routine failed: ${run.detail || 'Controller rejected an action.'}`;
+      else status.textContent = `Routine cancelled. ${run.detail || ''}`;
+    }
   }
 
   function addAutomationBlock(type) {
@@ -1216,9 +1247,23 @@
   }
 
   async function runAutomationProgram() {
-    if (!app.automationDraft.id && !(await saveAutomationProgram())) return;
-    if (!window.confirm('Run this train routine now? The train will be stopped when the routine finishes.')) return;
-    await sendCommand({ type: 'play_automation_program', program_id: app.automationDraft.id, confirm: true, automatic: true });
+    if (app.automationRunPending || (app.state.automationPlayback || []).some((run) => run.train_id === app.automationDraft.trainId && run.status === 'running')) return;
+    app.automationRunPending = true;
+    renderAutomationPlayback();
+    try {
+      if (!app.automationDraft.id && !(await saveAutomationProgram())) return;
+      if (!window.confirm('Run this train routine now? The train will be stopped when the routine finishes.')) return;
+      await sendCommand({ type: 'play_automation_program', program_id: app.automationDraft.id, confirm: true, automatic: true });
+    } finally {
+      app.automationRunPending = false;
+      renderAutomationPlayback();
+    }
+  }
+
+  async function stopAutomationProgram() {
+    const run = (app.state.automationPlayback || []).find((item) => item.train_id === app.automationDraft.trainId && item.status === 'running');
+    if (!run) return;
+    await sendCommand({ type: 'stop_automation_playback', train_id: run.train_id });
   }
 
   function loadAutomationProgram(id) {
@@ -4308,6 +4353,7 @@
     $('#automation-clear-program').addEventListener('click', clearAutomationProgram);
     $('#automation-save-program').addEventListener('click', saveAutomationProgram);
     $('#automation-run-program').addEventListener('click', runAutomationProgram);
+    $('#automation-stop-program').addEventListener('click', stopAutomationProgram);
     $('#start-calibration').addEventListener('click', startCalibration);
     $('#cancel-calibration').addEventListener('click', () => sendCommand({ type: 'cancel_calibration' }));
     $('#record-calibration').addEventListener('click', recordCalibration);
