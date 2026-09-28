@@ -67,7 +67,9 @@ class WlanReleaseContractTests(unittest.TestCase):
         ):
             self.assertIn(required, workflow)
 
-        self.assertNotIn("--clobber", workflow)
+        self.assertIn('if gh release view "$GITHUB_REF_NAME"', workflow)
+        self.assertIn('gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber', workflow)
+        self.assertIn('gh release edit "$GITHUB_REF_NAME"', workflow)
         self.assertIn("name: JochJell-Controller-Native-Windows-x64", workflow)
         self.assertLess(
             workflow.index("Test embedded app window"),
