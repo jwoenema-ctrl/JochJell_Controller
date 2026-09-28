@@ -13,6 +13,7 @@ import math
 import threading
 import time
 from typing import Any, Callable, Iterable, Mapping
+from backend.services.track_geometry import sample_track
 
 
 class MovementPlanValidationError(ValueError):
@@ -640,6 +641,7 @@ class CoordinateMovementPlanner:
             ax, ay = _center(self._block_by_id[left])
             bx, by = _center(self._block_by_id[right])
             points = ((ax, ay), *_edge_control_points(edge), (bx, by))
+            points = sample_track(points, edge) if isinstance(edge, Mapping) else points
             projected = _project_polyline(points, x, y)
             if projected is None:
                 continue
@@ -734,10 +736,8 @@ class CoordinateMovementPlanner:
                 continue
             if {edge_left, edge_right} != {left_id, right_id}:
                 continue
-            control_points = _edge_control_points(edge)
-            if edge_left != left_id:
-                control_points = tuple(reversed(control_points))
-            points = (_center(self._block_by_id[left_id]), *control_points, _center(self._block_by_id[right_id]))
+            points = (_center(self._block_by_id[edge_left]), *_edge_control_points(edge), _center(self._block_by_id[edge_right]))
+            points = sample_track(points, edge) if isinstance(edge, Mapping) else points
             layout_distance = sum(
                 math.hypot(points[index + 1][0] - points[index][0], points[index + 1][1] - points[index][1])
                 for index in range(len(points) - 1)

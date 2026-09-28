@@ -60,7 +60,8 @@ from backend.services.coordinate_move import (
 )
 from backend.services.automation_recording import PlaybackPlan, RecordedAction
 from backend.services.train_presence import SavedTrainPresenceService
-from backend.services.pinboard import nearest_track_coordinate
+from backend.services.pinboard import nearest_track_coordinate, block_center
+from backend.services.track_geometry import cubic_controls
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -125,6 +126,7 @@ class ControllerApplication:
     ])
     simulation_running: bool = True
     connection_limits: list[dict[str, Any]] = field(default_factory=list)
+    track_sections: list[dict[str, Any]] = field(default_factory=list)
     database_path: str = ":memory:"
     operating_plan_path: str | Path | None = None
     layout_id: str = "default"
@@ -677,6 +679,7 @@ class ControllerApplication:
             platforms=self.platforms,
             scans=self.scans,
             connection_limits=self.connection_limits,
+            track_sections=self.track_sections,
             revision=self.runtime.layout.snapshot().version if self.runtime is not None else 0,
         )
 
@@ -871,7 +874,7 @@ class ControllerApplication:
     def _apply_speed_policy(self, snapshot: LayoutSnapshot) -> None:
         try:
             self.runtime.track.configure_speed_limits(ConnectionSpeedPolicy(snapshot.connection_limits,
-                {train.id: train.max_speed_kmh for train in snapshot.trains}))
+                {train.id: train.max_speed_kmh for train in snapshot.trains}, snapshot.track_sections))
         except Exception:
             self.runtime.dispatcher.emergency_stop()
             for train in self.trains:
@@ -1901,7 +1904,7 @@ class ControllerApplication:
         current = str((motion.block_id if motion else train.get("block_id", "")) or "").strip().upper()
         direction = "forward" if self.runtime.track.get_train_direction(train_id) else "reverse"
         try:
-            planner_blocks = [{**block, "id": str(block.get("id", "")).strip().upper()} for block in self.blocks]
+            planner_blocks = [{**block, "id": str(block.get("id", "")).strip().upper()} for block in self._ui_blocks()]
             planner_edges = [{**edge, "from": str(edge.get("from", "")).strip().upper(), "to": str(edge.get("to", "")).strip().upper()} for edge in self._topology_edges()]
             plan = CoordinateMovementPlanner(planner_blocks, planner_edges, calibration).plan(
                 train_id, x, y, speed_kmh=10, direction=direction,
@@ -2256,6 +2259,7 @@ class ControllerApplication:
             "stations": list(self.stations),
             "signals": list(self.signals),
             "waypoints": list(self.waypoints),
+            "track_sections": deepcopy(self.track_sections),
             "turntables": list(self.turntables),
             "routes": deepcopy(self.routes),
             "platforms": list(self.platforms) or [
@@ -2438,14 +2442,17 @@ class ControllerApplication:
         waypoint_geometry = self._waypoint_geometry_index()
         return [self._edge_with_geometry(left, right, waypoint_geometry=waypoint_geometry) for left, right in ordered_links]
 
-    def _waypoint_geometry_index(self) -> dict[tuple[str, str], list[dict[str, float]]]:
-        index: dict[tuple[str, str], list[dict[str, float]]] = {}
-        for waypoint in sorted(self.waypoints, key=lambda item: str(item.get("id", ""))):
+    def _waypoint_geometry_index(self) -> dict[tuple[str, str], list[dict[str, Any]]]:
+        index: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        ranked = [(waypoint, rank + 1) for rank, waypoint in enumerate(sorted(self.waypoints, key=lambda item: str(item.get("id", ""))))]
+        for waypoint, rank in sorted(ranked, key=lambda item: (item[0].get("spline_order") if item[0].get("spline_order") is not None else item[1], str(item[0].get("id", "")))):
             nodes = sorted({str(value).upper() for value in waypoint.get("connected_node_ids", waypoint.get("connectedNodeIds", ()))})
             if len(nodes) < 2:
                 continue
             try:
-                point = {"x": float(waypoint.get("x", 0)), "y": float(waypoint.get("y", 0))}
+                point = {"x": float(waypoint.get("x", 0)), "y": float(waypoint.get("y", 0)),
+                         "id": str(waypoint.get("id", "")).upper(),
+                         "spline_order": waypoint.get("spline_order") if waypoint.get("spline_order") is not None else rank}
             except (TypeError, ValueError):
                 continue
             if math.isfinite(point["x"]) and math.isfinite(point["y"]):
@@ -2457,15 +2464,29 @@ class ControllerApplication:
 
     def _edge_with_geometry(
         self, left: str, right: str, *, status: str = "free",
-        waypoint_geometry: dict[tuple[str, str], list[dict[str, float]]] | None = None,
+        waypoint_geometry: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         edge = {"from": left, "to": right, "status": status}
         if waypoint_geometry is None:
             waypoint_geometry = self._waypoint_geometry_index()
         pair = tuple(sorted((str(left).upper(), str(right).upper())))
         control_points = [dict(point) for point in waypoint_geometry.get(pair, ())]
+        if str(left).upper() != pair[0]:
+            control_points.reverse()
         if control_points:
             edge["control_points"] = control_points
+        anchors = [str(left).upper(), *[point["id"] for point in control_points], str(right).upper()]
+        segments = []
+        for start, end in zip(anchors, anchors[1:]):
+            section = next((row for row in self.track_sections
+                            if {row["from"], row["to"]} == set(pair)
+                            and {row["start_anchor_id"], row["end_anchor_id"]} == {start, end}), {})
+            reversed_section = section.get("start_anchor_id") == end
+            segments.append({"start_anchor_id": start, "end_anchor_id": end,
+                             "control1": section.get("control2" if reversed_section else "control1"),
+                             "control2": section.get("control1" if reversed_section else "control2"),
+                             "speed_limit_kmh": section.get("speed_limit_kmh")})
+        edge["bezier_segments"] = segments
         return edge
 
     def _ui_connection_limits(self) -> list[dict[str, Any]]:
@@ -2856,6 +2877,7 @@ class ControllerApplication:
         self.routes = projected.get("routes", [])
         self.scans = projected.get("scans", self.scans)
         self.connection_limits = projected.get("connection_limits", [])
+        self.track_sections = projected.get("track_sections", [])
         if self.z21_host:
             self.runtime.dispatcher.emergency_stop()
             for train in self.trains:
@@ -2946,6 +2968,10 @@ class ControllerApplication:
                 item["connected_node_ids"] = self._layout_asset_id_list(value, "connected_node_ids")
             for alias in ("connectedNodeIds", "connected"):
                 item.pop(alias, None)
+            if item.get("spline_order") is not None:
+                item["spline_order"] = float(item["spline_order"])
+                if not math.isfinite(item["spline_order"]):
+                    raise ValueError("spline_order must be finite")
         elif asset_type == "turntable":
             if defaults or "name" in item:
                 item["name"] = str(item.get("name", display_id)).strip() or display_id
@@ -3028,6 +3054,7 @@ class ControllerApplication:
                 platforms=collections.get("platforms", self.platforms),
                 scans=self.scans,
                 connection_limits=self.connection_limits,
+                track_sections=collections.get("track_sections", self.track_sections),
                 revision=self.runtime.layout.snapshot().version if self.runtime is not None else 0,
             )
         except KeyError as exc:
@@ -3085,13 +3112,29 @@ class ControllerApplication:
             collection.pop(existing_index)
 
         candidates = {collection_name: collection}
+        previous_sections = self.track_sections
+        if asset_type == "waypoint":
+            # Remove handle/limit records for intervals that no longer exist
+            # after deleting a point or changing its connected nodes.
+            previous_waypoints = self.waypoints
+            self.waypoints = collection
+            try:
+                valid = {(str(edge["from"]).upper(), str(edge["to"]).upper(), section["start_anchor_id"], section["end_anchor_id"])
+                         for edge in self._ui_edges() for section in edge["bezier_segments"]}
+                candidates["track_sections"] = [row for row in self.track_sections
+                    if (row["from"], row["to"], row["start_anchor_id"], row["end_anchor_id"]) in valid
+                    or (row["to"], row["from"], row["end_anchor_id"], row["start_anchor_id"]) in valid]
+            finally:
+                self.waypoints = previous_waypoints
         self._validate_layout_asset_state(candidates, removed_type=asset_type if operation == "remove" else None, removed_id=selected_id if operation == "remove" else None)
         previous = getattr(self, collection_name)
         setattr(self, collection_name, collection)
+        self.track_sections = candidates.get("track_sections", self.track_sections)
         try:
             self._sync_runtime_from_ui()
         except Exception:
             setattr(self, collection_name, previous)
+            self.track_sections = previous_sections
             raise
         self.events.append({"type": f"{asset_type}_{'removed' if operation == 'remove' else 'added' if operation == 'add' else 'updated'}", f"{asset_type}_id": selected_id})
         return True
@@ -3168,10 +3211,93 @@ class ControllerApplication:
             raise ValueError(f"No route from {source_id} to {target_id}")
         return list(route.node_ids), route.algorithm.value
 
+    def _command_track_section(self, kind: str, payload: dict[str, Any]) -> None:
+        left, right = sorted((str(payload.get("from", "")).strip().upper(), str(payload.get("to", "")).strip().upper()))
+        if not left or left == right or not any({row["from"].upper(), row["to"].upper()} == {left, right} for row in self._ui_connections()):
+            raise ValueError("spline editing requires an existing connection")
+        edge = self._edge_with_geometry(left, right)
+        start = str(payload.get("start_anchor_id", "")).strip().upper()
+        end = str(payload.get("end_anchor_id", "")).strip().upper()
+        index = next((i for i, section in enumerate(edge["bezier_segments"])
+                      if {section["start_anchor_id"], section["end_anchor_id"]} == {start, end}), None)
+        if index is None:
+            raise ValueError("select two adjacent spline anchors")
+        segment = edge["bezier_segments"][index]
+        reversed_request = start != segment["start_anchor_id"]
+        start, end = segment["start_anchor_id"], segment["end_anchor_id"]
+        row = {"from": left, "to": right, **segment}
+        rows = deepcopy(self.track_sections)
+        # Normalize any older reverse-oriented record before updating it.
+        rows = [item for item in rows if not ({item["from"], item["to"]} == {left, right}
+                and {item["start_anchor_id"], item["end_anchor_id"]} == {start, end})]
+        previous_sections, previous_waypoints = self.track_sections, self.waypoints
+        waypoints = deepcopy(self.waypoints)
+        if kind == "set_track_section":
+            for key in ("control1", "control2", "speed_limit_kmh"):
+                if key not in payload:
+                    continue
+                target = ("control2" if key == "control1" else "control1") if reversed_request and key != "speed_limit_kmh" else key
+                value = payload[key]
+                if key.startswith("control") and value is not None:
+                    if not isinstance(value, dict) or not all(axis in value for axis in ("x", "y")):
+                        raise ValueError("Bezier handle requires x and y offsets")
+                    value = {axis: float(value[axis]) for axis in ("x", "y")}
+                row[target] = value
+            rows.append(row)
+        else:
+            waypoint_id = self._layout_asset_id(payload.get("waypoint_id"), "waypoint")
+            if any(str(item["id"]).upper() == waypoint_id for item in waypoints) or any(str(item["id"]).upper() == waypoint_id for item in self.blocks):
+                raise ValueError("spline point ID must be unique")
+            for rank, waypoint in enumerate(sorted(waypoints, key=lambda item: str(item.get("id", ""))), 1):
+                if waypoint.get("spline_order") is None:
+                    waypoint["spline_order"] = rank
+            blocks = {str(item["id"]).upper(): item for item in self._ui_blocks()}
+            controls = edge.get("control_points", [])
+            points = [block_center(blocks[left]), *[(point["x"], point["y"]) for point in controls], block_center(blocks[right])]
+            # Preserve neighboring curves when inserting an anchor changes the
+            # defaults inferred from the surrounding points.
+            for position, existing in enumerate(edge["bezier_segments"]):
+                if position == index:
+                    continue
+                first, second = cubic_controls(points, position, existing)
+                frozen = {"from": left, "to": right, **existing,
+                          "control1": {"x": first[0] - points[position][0], "y": first[1] - points[position][1]},
+                          "control2": {"x": second[0] - points[position + 1][0], "y": second[1] - points[position + 1][1]}}
+                rows = [item for item in rows if not ({item["from"], item["to"]} == {left, right}
+                        and {item["start_anchor_id"], item["end_anchor_id"]} == {existing["start_anchor_id"], existing["end_anchor_id"]})]
+                rows.append(frozen)
+            first, second = cubic_controls(points, index, segment)
+            def middle(a, b):
+                return ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+            a, b = points[index:index + 2]
+            p01, p12, p23 = middle(a, first), middle(first, second), middle(second, b)
+            p012, p123 = middle(p01, p12), middle(p12, p23)
+            anchor = middle(p012, p123)
+            order_before = controls[index - 1]["spline_order"] if index > 0 else (controls[0]["spline_order"] - 1 if controls else 0)
+            order_after = controls[index]["spline_order"] if index < len(controls) else order_before + 2
+            waypoints.append({"id": waypoint_id, "name": "Spline point", "connected_node_ids": [left, right],
+                              "x": anchor[0], "y": anchor[1], "spline_order": (order_before + order_after) / 2})
+            for start_id, end_id, p, q, c1, c2 in ((start, waypoint_id, a, anchor, p01, p012), (waypoint_id, end, anchor, b, p123, p23)):
+                rows.append({"from": left, "to": right, "start_anchor_id": start_id, "end_anchor_id": end_id,
+                             "control1": {"x": c1[0] - p[0], "y": c1[1] - p[1]},
+                             "control2": {"x": c2[0] - q[0], "y": c2[1] - q[1]},
+                             "speed_limit_kmh": segment.get("speed_limit_kmh")})
+        self.track_sections, self.waypoints = rows, waypoints
+        try:
+            candidate = self._domain_snapshot()
+            self.track_sections = snapshot_to_ui(candidate)["track_sections"]
+            self._sync_runtime_from_ui(apply_motion=False)
+        except Exception:
+            self.track_sections, self.waypoints = previous_sections, previous_waypoints
+            raise
+        self.events.append({"type": "spline_point_added" if kind == "add_spline_point" else "track_section_updated", "from": left, "to": right})
+
     def command(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             kind = str(payload.get("type", "")).lower()
-            if kind == "set_connection_speed_limit":
+            if kind in {"set_track_section", "add_spline_point"}:
+                self._command_track_section(kind, payload)
+            elif kind == "set_connection_speed_limit":
                 left = str(payload.get("from", payload.get("from_block_id", ""))).strip().upper()
                 right = str(payload.get("to", payload.get("to_block_id", ""))).strip().upper()
                 if not any(c["from"].upper() == left and c["to"].upper() == right for c in self._ui_connections()):
@@ -3200,7 +3326,7 @@ class ControllerApplication:
                         rule["train_speed_limits"] = {self._canonical_train_id(key): value for key, value in payload["train_speed_limits"].items()}
                 candidate = snapshot_from_ui(**{key: getattr(self, key) for key in
                     ("blocks", "turnouts", "trains", "schedules", "routes", "stations", "signals", "waypoints", "turntables", "platforms", "scans")},
-                    edges=self._topology_edges(), connection_limits=rows)
+                    edges=self._topology_edges(), connection_limits=rows, track_sections=self.track_sections)
                 self.connection_limits = snapshot_to_ui(candidate)["connection_limits"]
                 self.runtime.layout.replace(candidate)
                 self._apply_speed_policy(candidate)
@@ -3416,7 +3542,7 @@ class ControllerApplication:
                 if not calibration:
                     raise ValueError("record a calibration measurement for this train before coordinate movement")
                 try:
-                    planner_blocks = [{**block, "id": str(block.get("id", "")).strip().upper()} for block in self.blocks]
+                    planner_blocks = [{**block, "id": str(block.get("id", "")).strip().upper()} for block in self._ui_blocks()]
                     planner_edges = [{**edge, "from": str(edge.get("from", "")).strip().upper(), "to": str(edge.get("to", "")).strip().upper()} for edge in self._topology_edges()]
                     planner = CoordinateMovementPlanner(planner_blocks, planner_edges, calibration)
                     destination = planner.plan(
@@ -4034,6 +4160,7 @@ class ControllerApplication:
                     ("platform", self.platforms, ("blockId", "block_id")),
                     ("route", self.routes, ("source_block_id", "target_block_id", "node_ids", "path")),
                     ("connection speed limit", self.connection_limits, ("from", "to", "from_block_id", "to_block_id")),
+                    ("track section", self.track_sections, ("from", "to", "start_anchor_id", "end_anchor_id")),
                 ):
                     matches = references(collection, fields)
                     if matches:
@@ -4069,7 +4196,7 @@ class ControllerApplication:
                     if any(str(item["id"]).upper() == new_id for item in self.blocks):
                         raise ValueError("Block ID already exists")
                     collections = ("blocks", "turnouts", "trains", "stations", "signals",
-                                   "waypoints", "turntables", "platforms", "schedules", "routes", "scans", "connection_limits")
+                                   "waypoints", "turntables", "platforms", "schedules", "routes", "scans", "connection_limits", "track_sections")
                     updated = {key: rename_references(getattr(self, key), block_id, new_id)
                                for key in collections}
                     for item in updated["blocks"]:
@@ -4127,6 +4254,8 @@ class ControllerApplication:
                     block.pop("neighborIds", None)
                 self.connection_limits = [rule for rule in self.connection_limits
                     if {rule["from"], rule["to"]} != {left_id, right_id}]
+                self.track_sections = [section for section in self.track_sections
+                    if {section["from"], section["to"]} != {left_id, right_id}]
                 self._sync_runtime_from_ui()
                 self.events.append({"type": "blocks_disconnected", "from": left_id, "to": right_id})
             elif self._command_layout_asset(kind, payload):
@@ -4337,6 +4466,9 @@ class ControllerApplication:
                 self.events.append({"type": "schedule_simulated", "from_tick": current_tick, "until_tick": until_tick, "events": len(schedule_events)})
             elif kind == "save_layout":
                 self.save_layout(str(payload.get("layout_id", self.layout_id)), name=payload.get("name"))
+            elif kind == "load_layout":
+                if self.load_layout(str(payload.get("layout_id", self.layout_id))) is None:
+                    raise ValueError("No saved layout is available")
             elif kind in {"set_train_mode", "switch_train_mode"}:
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 train = next((item for item in self.trains if item["id"] == train_id), None)

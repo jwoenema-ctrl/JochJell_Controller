@@ -219,6 +219,12 @@
             <button type="button" class="button button-soft" id="save-connection-limit">Save speed limit</button>
             <p class="settings-help" id="connection-limit-status" role="status">Select a directed connection. Blank removes the default or makes a train inherit it.</p>
           </div>
+          <div class="spline-section-editor is-hidden" id="spline-section-editor">
+            <div><strong id="spline-section-name">Select a spline section</strong><p class="settings-help">Maximum speed in both directions. The lowest section limit applies across the connection.</p></div>
+            <label>Maximum km/h <input id="spline-section-speed" type="number" min="0" max="1000" step="0.1" placeholder="No section limit" aria-label="Selected spline section maximum speed in km/h" disabled></label>
+            <button type="button" class="button button-soft" id="save-spline-section-speed" disabled>Apply maximum speed</button>
+            <p class="settings-help" id="spline-section-status" role="status">Click a rail section to show its pull points and maximum speed.</p>
+          </div>
           <div class="map-stage" id="map-stage" tabindex="0" aria-label="Track canvas. Drag empty space to pan, or hold Space and drag anywhere.">
             <svg id="layout-svg" class="layout-svg" viewBox="0 0 980 350" role="img" aria-label="Track block node graph"></svg>
             <div class="map-stage-label top-left"><span class="pulse-dot"></span> <span id="map-stage-mode">LIVE BLOCK GRAPH</span> · <span id="pinboard-coordinate">Move over the board to read coordinates</span></div>
@@ -510,7 +516,7 @@
     </section>
 
     <footer class="footer-bar">
-      <span>JochJell Controller <span class="footer-muted">· JochJell · v0.2.1 · local workspace</span></span>
+      <span>JochJell Controller <span class="footer-muted">· JochJell · v0.2.13 · local workspace</span></span>
       <span><span class="footer-indicator"></span> <span id="footer-source">Embedded sample state</span> <span class="footer-muted">·</span> Last sync <span id="footer-sync">—</span></span>
     </footer>
   </div>

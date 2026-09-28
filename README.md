@@ -24,6 +24,11 @@ The native edition embeds the dashboard and does not require Python, a web serve
 
 The browser-launcher executable, `JochJell-Controller.exe`, is also available in build artifacts. It starts a local controller and opens the dashboard in your default browser. Keep its desktop controller window open while using it.
 
+When running from Python, open the HTTP URL printed by the controller (normally
+`http://127.0.0.1:8080`). Opening `frontend/index.html` from Explorer now redirects
+to that local dashboard. The Python controller must be running for layout edits
+and other commands to be saved; `file://` pages cannot call its API.
+
 ## What the product does
 
 JochJell Controller is organized around four layers:
@@ -108,6 +113,8 @@ Select the behavior in **Settings → Operations → Connected-block dispatch**.
 #### Pinboard and layout viewer
 
 The 2D pinboard lets you place trains and rolling stock on a track coordinate or drag a train marker to a calibrated destination. The planner checks direction, topology, occupancy and calibration before accepting a target. Execution is a separate confirmed action with a bounded stop timer.
+
+In **Train visualizer**, click **Edit layout**, then click a rail section to select it. Drag either yellow Bézier pull point to shape the curve. **＋ Spline point** inserts a point halfway along the selected curve while preserving its shape; drag the new point to reposition it. The selected section has a **Maximum km/h** field and **Apply maximum speed** button. Use **Save layout** to persist points, handles and limits. Section limits apply in both directions; the controller enforces the lowest section limit across the containing connection because physical position is reported by block.
 
 The photo-scan viewer displays uploaded PNG, JPEG or WebP layout photographs on a 3D surface. It supports orbit, zoom and scan anchors; it does not automatically reconstruct a full 3D railway from photographs.
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from typing import Iterable, Mapping
+from backend.services.track_geometry import sample_track
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ def nearest_track_coordinate(
         if left not in by_id or right not in by_id or left == right:
             continue
         points = (block_center(by_id[left]), *_control_points(edge), block_center(by_id[right]))
+        points = sample_track(points, edge)
         projected = _project_polyline(points, float(x), float(y))
         if projected is None:
             continue

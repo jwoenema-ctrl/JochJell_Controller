@@ -51,6 +51,20 @@ once per elapsed minute. Deliberate explicit step/fast-forward calls retain the
 existing timetable-minute stepping contract; `simulation.schedule_minutes` exposes
 that separate timetable cursor, including deliberate fast-forwards.
 
+## Visualizer section limits
+
+In the train visualizer's layout editor, select a rail section to set its maximum
+speed. Each section is the cubic Bézier curve between adjacent nodes or spline
+points. Its two handle offsets and optional `speed_limit_kmh` are stored in
+`track_sections` when saving the layout. Adding a spline point splits the
+selected curve and copies its limit to both resulting sections.
+
+Section limits apply in both directions and cap train-specific connection
+overrides too. The lowest section limit is enforced across the entire containing
+connection, including when physical traversal is unknown. Blank removes only
+that section's limit. Handle and waypoint edits also update the geometry used
+for train placement and coordinate destination planning.
+
 ## Physical track position is not invented
 
 R-BUS occupancy does not identify a locomotive or measure in-block position.

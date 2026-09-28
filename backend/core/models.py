@@ -245,10 +245,13 @@ class Waypoint:
     name: str = ""
     connected_node_ids: tuple[str, ...] = ()
     position: Point | None = None
+    spline_order: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _require_text(self.id, "id"))
         object.__setattr__(self, "name", self.name.strip())
+        if self.spline_order is not None and not math.isfinite(self.spline_order):
+            raise ValueError("spline_order must be finite")
         object.__setattr__(
             self,
             "connected_node_ids",
@@ -475,6 +478,37 @@ class ConnectionSpeedLimit:
         object.__setattr__(self, "train_speed_limits", overrides)
 
 
+@dataclass(frozen=True, slots=True)
+class TrackSection:
+    """Editable cubic between two anchors on one physical connection.
+
+    Handles are offsets from their respective anchors, so moving an anchor
+    carries its handle with it. Speed limits apply in both directions.
+    """
+
+    from_block_id: str
+    to_block_id: str
+    start_anchor_id: str
+    end_anchor_id: str
+    control1: Point | None = None
+    control2: Point | None = None
+    speed_limit_kmh: float | None = None
+
+    @property
+    def id(self) -> str:
+        return f"{self.from_block_id}>{self.to_block_id}:{self.start_anchor_id}>{self.end_anchor_id}"
+
+    def __post_init__(self) -> None:
+        for name in ("from_block_id", "to_block_id", "start_anchor_id", "end_anchor_id"):
+            _require_text(getattr(self, name), name)
+        if self.from_block_id == self.to_block_id or self.start_anchor_id == self.end_anchor_id:
+            raise ValueError("track section endpoints must differ")
+        if self.speed_limit_kmh is not None:
+            if isinstance(self.speed_limit_kmh, bool):
+                raise ValueError("speed limit must be a number")
+            object.__setattr__(self, "speed_limit_kmh", _require_non_negative(self.speed_limit_kmh, "speed limit"))
+
+
 _EntityT = TypeVar("_EntityT")
 
 
@@ -495,6 +529,7 @@ class LayoutSnapshot:
     routes: tuple[RouteDefinition, ...] = ()
     scans: tuple[PhotoScan, ...] = ()
     connection_limits: tuple[ConnectionSpeedLimit, ...] = ()
+    track_sections: tuple[TrackSection, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.revision, int) or self.revision < 0:
@@ -512,6 +547,7 @@ class LayoutSnapshot:
             "routes",
             "scans",
             "connection_limits",
+            "track_sections",
         ):
             values = tuple(getattr(self, field_name))
             ids = tuple(getattr(value, "id") for value in values)
@@ -536,6 +572,11 @@ class LayoutSnapshot:
             for train_id, _ in rule.train_speed_limits:
                 _require_reference(train_id, rule.id, "train", train_ids)
         graph_node_ids = block_ids | waypoint_ids | turntable_ids
+        for section in self.track_sections:
+            if (section.from_block_id, section.to_block_id) not in connections:
+                raise ValueError(f"track section references missing connection: {section.id}")
+            for anchor in (section.start_anchor_id, section.end_anchor_id):
+                _require_reference(anchor, section.id, "anchor", block_ids | waypoint_ids)
         for route in self.routes:
             for node_id in route.node_ids:
                 _require_reference(node_id, f"route {route.id}.node_ids", "graph node", graph_node_ids)

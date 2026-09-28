@@ -97,6 +97,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: JochJell-Controller-Native-Windows-x64
@@ -111,4 +112,10 @@ jobs:
             dist/JochJell-Controller-Native-Windows-x64.zip
             dist/SHA256SUMS.txt
           )
-          gh release create "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --notes "JochJell Controller $GITHUB_REF_NAME standalone Windows release with Roco 10814 WLAN support." --title "JochJell Controller $GITHUB_REF_NAME"
+          notes_file="docs/releases/$GITHUB_REF_NAME.md"
+          if [[ -f "$notes_file" ]]; then
+            notes=(--notes-file "$notes_file")
+          else
+            notes=(--notes "JochJell Controller $GITHUB_REF_NAME standalone Windows release with Roco 10814 WLAN support.")
+          fi
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag "${notes[@]}" --title "JochJell Controller $GITHUB_REF_NAME"

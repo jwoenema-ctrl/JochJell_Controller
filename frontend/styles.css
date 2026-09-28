@@ -523,6 +523,24 @@ body[data-workspace="trains"] .trains-subnav { display: flex; }
 .graph-editor-tools select, .pinboard-placement-tools select { min-height: 25px; min-width: 118px; border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; background: #0d192a; color: var(--text); font-size: 9px; }
 .graph-editor-arrow { color: var(--blue-bright); font-size: 12px; }
 
+.spline-section-editor { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 10px 18px; border-bottom: 1px solid var(--line); background: rgba(9,20,34,.32); font-size: 11px; }
+.spline-section-editor strong { color: var(--yellow); }
+.spline-section-editor p { margin: 4px 0 0; }
+.spline-section-editor label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.spline-section-editor input { width: 105px; padding: 6px 8px; color: var(--text); background: #0d192a; border: 1px solid var(--line); border-radius: 5px; }
+#spline-section-status { flex-basis: 100%; }
+.pinboard-section-selection { fill: none; stroke: transparent; stroke-width: 12; pointer-events: none; }
+.pinboard-track-section.is-selected .pinboard-section-selection { stroke: var(--yellow); stroke-opacity: .7; }
+.pinboard-section-hit { fill: none; stroke: transparent; stroke-width: 18; pointer-events: none; }
+.is-editing .pinboard-section-hit { pointer-events: stroke; cursor: pointer; }
+.pinboard-track-section:focus .pinboard-section-selection { stroke: var(--yellow); }
+.pinboard-bezier-control line { stroke: var(--yellow); stroke-width: 1.5; stroke-dasharray: 4 3; pointer-events: none; }
+.pinboard-bezier-handle { fill: #0d192a; stroke: var(--yellow); stroke-width: 2.5; cursor: grab; touch-action: none; }
+.pinboard-bezier-handle:active { cursor: grabbing; }
+.pinboard-bezier-handle:focus { fill: var(--yellow); }
+.pinboard-spline-point.is-selected circle { fill: var(--yellow); stroke: var(--yellow); stroke-width: 3; }
+.pinboard-spline-point.is-selected text { fill: var(--yellow); }
+
 @media (max-width: 1260px) {
   .app-shell { padding-right: 18px; padding-left: 18px; }
   .dashboard { grid-template-columns: 270px minmax(0, 1fr); gap: 14px; }

@@ -15,6 +15,7 @@ from backend.core.models import (
     Block,
     BlockState,
     ConnectionSpeedLimit,
+    TrackSection,
     LayoutSnapshot,
     Platform,
     PhotoScan,
@@ -101,6 +102,9 @@ def _build_entity(entity_type: type[_T], value: Any) -> _T:
     elif entity_type is Waypoint:
         data["connected_node_ids"] = _tuple(data.get("connected_node_ids"))
         data["position"] = _point(data.get("position"))
+    elif entity_type is TrackSection:
+        data["control1"] = _point(data.get("control1"))
+        data["control2"] = _point(data.get("control2"))
     elif entity_type is Turntable:
         data["connected_block_ids"] = _tuple(data.get("connected_block_ids"))
         data["position"] = _point(data.get("position"))
@@ -139,6 +143,7 @@ def snapshot_from_dict(value: Mapping[str, Any]) -> LayoutSnapshot:
         routes=tuple(_build_entity(RouteDefinition, item) for item in value.get("routes", ())),
         scans=tuple(_build_entity(PhotoScan, item) for item in value.get("scans", ())),
         connection_limits=tuple(_build_entity(ConnectionSpeedLimit, item) for item in value.get("connection_limits", ())),
+        track_sections=tuple(_build_entity(TrackSection, item) for item in value.get("track_sections", ())),
     )
 
 

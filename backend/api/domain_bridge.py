@@ -15,6 +15,7 @@ from backend.core.models import (
     Block,
     BlockState,
     ConnectionSpeedLimit,
+    TrackSection,
     LayoutSnapshot,
     Platform,
     Point,
@@ -110,6 +111,7 @@ def snapshot_from_ui(
     platforms: Iterable[Mapping[str, Any]] = (),
     scans: Iterable[Mapping[str, Any]] = (),
     connection_limits: Iterable[Mapping[str, Any]] = (),
+    track_sections: Iterable[Mapping[str, Any]] = (),
     revision: int = 0,
 ) -> LayoutSnapshot:
     """Build a validated domain snapshot from the current application state."""
@@ -184,7 +186,8 @@ def snapshot_from_ui(
         waypoint_id = str(value.get("id", "")).strip().upper()
         connected = tuple(str(item).strip().upper() for item in value.get("connected_node_ids", value.get("connected", ())) if str(item).strip())
         if waypoint_id:
-            domain_waypoints.append(Waypoint(waypoint_id, str(value.get("name", waypoint_id)), connected, _position(value)))
+            domain_waypoints.append(Waypoint(waypoint_id, str(value.get("name", waypoint_id)), connected, _position(value),
+                                            float(value["spline_order"]) if value.get("spline_order") is not None else None))
 
     domain_turntables: list[Turntable] = []
     for value in turntables:
@@ -390,6 +393,14 @@ def snapshot_from_ui(
             rule.get("speed_limit_kmh"),
             tuple((_canonical_train_id(key), value) for key, value in rule.get("train_speed_limits", {}).items()),
         ) for rule in connection_limits),
+        track_sections=tuple(TrackSection(
+            _canonical_block_id(section.get("from", section.get("from_block_id"))),
+            _canonical_block_id(section.get("to", section.get("to_block_id"))),
+            _canonical_block_id(section.get("start_anchor_id")),
+            _canonical_block_id(section.get("end_anchor_id")),
+            _anchor(section.get("control1")), _anchor(section.get("control2")),
+            section.get("speed_limit_kmh"),
+        ) for section in track_sections),
     )
 
 
@@ -461,6 +472,7 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
             "connected_node_ids": list(waypoint.connected_node_ids),
             "x": waypoint.position.x if waypoint.position else 0,
             "y": waypoint.position.y if waypoint.position else 0,
+            "spline_order": waypoint.spline_order,
         }
         for waypoint in snapshot.waypoints
     ]
@@ -573,4 +585,9 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
                                "speed_limit_kmh": rule.speed_limit_kmh,
                                "train_speed_limits": dict(rule.train_speed_limits)}
                               for rule in snapshot.connection_limits],
+        "track_sections": [{"from": section.from_block_id, "to": section.to_block_id,
+                            "start_anchor_id": section.start_anchor_id, "end_anchor_id": section.end_anchor_id,
+                            "control1": {"x": section.control1.x, "y": section.control1.y} if section.control1 else None,
+                            "control2": {"x": section.control2.x, "y": section.control2.y} if section.control2 else None,
+                            "speed_limit_kmh": section.speed_limit_kmh} for section in snapshot.track_sections],
     }
