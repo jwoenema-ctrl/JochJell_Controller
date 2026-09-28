@@ -150,6 +150,8 @@ class ControllerApplication:
     _motion_thread: threading.Thread | None = field(default=None, init=False, repr=False)
     _scheduler_remainder_seconds: float = field(default=0.0, init=False, repr=False)
     _world_clock_seconds: float = field(default=0.0, init=False, repr=False)
+    _world_clock_sampled_at: float = field(default_factory=time.monotonic, init=False, repr=False)
+    _world_clock_session: str = field(default_factory=lambda: str(time.time_ns()), init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _presence_state: dict[str, Any] = field(default_factory=lambda: {
         "results": [],
@@ -545,6 +547,7 @@ class ControllerApplication:
             if self._motion_thread and self._motion_thread.is_alive():
                 return
             self._motion_stop.clear()
+            self._world_clock_sampled_at = time.monotonic()
             self._motion_thread = threading.Thread(target=self._motion_loop, name="h0-motion", daemon=True)
             self._motion_thread.start()
 
@@ -554,15 +557,14 @@ class ControllerApplication:
         last_tick = time.monotonic()
         while not self._motion_stop.wait(max(0, next_tick - time.monotonic())):
             try:
-                now = time.monotonic()
-                elapsed = max(0.0, now - last_tick)
-                last_tick = now
                 with self._lock:
+                    now = time.monotonic()
+                    elapsed = max(0.0, now - max(last_tick, self._world_clock_sampled_at))
+                    last_tick = now
                     if self.track_power and (not self.simulation_mode or self.simulation_running):
-                        # Hardware checks can take longer than one cadence when
-                        # a WLAN packet is lost. Advance the world by the real
-                        # elapsed time instead of silently losing those minutes.
-                        self.tick(1, elapsed_seconds=elapsed if not self.simulation_mode else interval)
+                        # World time follows elapsed time in both modes, even
+                        # when controller work or a lost WLAN packet delays a tick.
+                        self.tick(1, elapsed_seconds=elapsed, clock_sampled_at=now)
                 next_tick += interval
                 if next_tick < time.monotonic() - interval:
                     # Never burst hardware commands after a suspended computer.
@@ -2247,6 +2249,21 @@ class ControllerApplication:
         with self._lock:
             return self._ui_snapshot()
 
+    def _world_clock_display_payload(self) -> dict[str, Any]:
+        """Anchor browser interpolation to the time accounted for by the clock."""
+        running = bool(
+            self._motion_thread and self._motion_thread.is_alive()
+            and not self._motion_stop.is_set() and not self._closed
+            and self.track_power and (not self.simulation_mode or self.simulation_running)
+        )
+        age = max(0.0, time.monotonic() - self._world_clock_sampled_at) if running else 0.0
+        return {
+            "world_clock_display_seconds": self._world_clock_seconds + age * 60,
+            "world_clock_running": running,
+            "world_clock_rate": 60,
+            "world_clock_session": self._world_clock_session,
+        }
+
     def live_payload(self) -> dict[str, Any]:
         """Return frequently changing dashboard data without large catalogues or images."""
         with self._lock:
@@ -2270,6 +2287,7 @@ class ControllerApplication:
                     "schedule_minutes": self.runtime.scheduler.world_current_tick if self.runtime is not None else 0,
                     "world_clock": world_clock,
                     "world_clock_seconds": self._world_clock_seconds,
+                    **self._world_clock_display_payload(),
                     "date": "Simulation",
                 },
                 "tick": snapshot["tick"],
@@ -2479,6 +2497,7 @@ class ControllerApplication:
                 "schedule_minutes": self.runtime.scheduler.world_current_tick,
                 "world_clock": world_clock,
                 "world_clock_seconds": self._world_clock_seconds,
+                **self._world_clock_display_payload(),
                 "date": "Simulation",
             },
             "tick": snapshot["tick"],
@@ -2876,7 +2895,10 @@ class ControllerApplication:
                 remaining -= count
             return self._ui_snapshot()
 
-    def tick(self, steps: int = 1, *, elapsed_seconds: float | None = None, force: bool = False) -> dict[str, Any]:
+    def tick(
+        self, steps: int = 1, *, elapsed_seconds: float | None = None,
+        force: bool = False, clock_sampled_at: float | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             safe_steps = max(1, min(int(steps), 100))
             if self.simulation_mode and not self.simulation_running and not force:
@@ -2920,6 +2942,7 @@ class ControllerApplication:
                     current_world_tick = self.runtime.scheduler.world_current_tick % WORLD_DAY_MINUTES
                     world_steps = (world_target_tick - current_world_tick) % WORLD_DAY_MINUTES
                     schedule_events = self._advance_repeating_world_schedule(world_steps)
+                self._world_clock_sampled_at = time.monotonic() if clock_sampled_at is None else clock_sampled_at
                 for schedule_event in schedule_events:
                     state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
                     schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]
@@ -3885,6 +3908,8 @@ class ControllerApplication:
                         self.track_power = previous_power
                         raise ValueError(result.detail or "track power command rejected")
                 self.track_power = requested_power
+                if requested_power and not previous_power:
+                    self._world_clock_sampled_at = time.monotonic()
                 if not requested_power:
                     for train in self.trains:
                         train["mode"] = ControlMode.STOPPED.value
@@ -4586,6 +4611,7 @@ class ControllerApplication:
                 schedule_events = self.runtime.scheduler.simulate_world(until_tick) if self.runtime is not None else ()
                 self.runtime.scheduler.current_tick = until_tick
                 self._world_clock_seconds = max(self._world_clock_seconds, until_tick * 60)
+                self._world_clock_sampled_at = time.monotonic()
                 for schedule_event in schedule_events:
                     state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
                     schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]
@@ -4636,6 +4662,7 @@ class ControllerApplication:
                         self.runtime.scheduler.pause()
                 elif kind == "resume_simulation":
                     self.simulation_running = True
+                    self._world_clock_sampled_at = time.monotonic()
                     if self.runtime is not None:
                         self.runtime.scheduler.start()
                 elif kind == "set_mode" and self.runtime is not None:

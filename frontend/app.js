@@ -133,6 +133,7 @@
     automationSelectedBlockId: null,
     automationPrograms: [],
     automationRunPending: false,
+    worldClockSample: null,
     stateMutationRevision: 0,
     routeFlowSelectedId: null
   };
@@ -449,6 +450,60 @@
     if (Array.isArray(value.automationPrograms)) app.automationPrograms = value.automationPrograms;
     if (Array.isArray(value.automationPlayback)) app.state.automationPlayback = value.automationPlayback;
     if (value.coordinate_execution !== undefined) app.state.coordinate_execution = value.coordinate_execution;
+    if (value.simulation) syncWorldClock(value);
+  }
+
+  function worldClockSeconds(now = performance.now()) {
+    const sample = app.worldClockSample;
+    if (!sample) {
+      const seconds = Number(app.state.simulation.world_clock_seconds);
+      if (Number.isFinite(seconds)) return seconds;
+      const [hours, minutes] = String(app.state.simulation.world_clock || '00:00').split(':').map(Number);
+      return ((hours || 0) * 60 + (minutes || 0)) * 60;
+    }
+    const age = Math.min(sample.maxAgeSeconds, Math.max(0, (now - sample.receivedAt) / 1000));
+    return sample.seconds + (sample.running ? age * sample.rate : 0);
+  }
+
+  function syncWorldClock(payload, now = performance.now()) {
+    const simulation = payload.simulation;
+    const seconds = Number(simulation.world_clock_display_seconds ?? simulation.world_clock_seconds);
+    if (!Number.isFinite(seconds)) { app.worldClockSample = null; return; }
+    const simulated = Boolean(app.state.connection?.simulated || app.state.mode === 'simulation');
+    const running = typeof simulation.world_clock_running === 'boolean'
+      ? simulation.world_clock_running
+      : Boolean(payload.motion_clock?.running && app.state.track_power && (!simulated || simulation.running));
+    const previous = app.worldClockSample;
+    const predicted = worldClockSeconds(now);
+    const session = simulation.world_clock_session ?? null;
+    // Small response-time differences must not make a running clock count
+    // backwards. A new controller session still resets it authoritatively.
+    const continuous = previous?.running && running && previous.session === session
+      && (session !== null || seconds >= predicted - 120);
+    app.worldClockSample = {
+      seconds: continuous ? Math.max(seconds, predicted) : seconds,
+      receivedAt: now,
+      running,
+      rate: Math.max(0, Number(simulation.world_clock_rate) || 60),
+      session,
+      // Stop extrapolating if the next dashboard request never completes.
+      maxAgeSeconds: Math.max(5, Number(app.settings.ui_refresh_ms) / 1000 + 5)
+    };
+    renderWorldClock(now);
+  }
+
+  function freezeWorldClock(now = performance.now()) {
+    if (!app.worldClockSample) return;
+    app.worldClockSample = { ...app.worldClockSample, seconds: worldClockSeconds(now), receivedAt: now, running: false };
+    renderWorldClock(now);
+  }
+
+  function renderWorldClock(now = performance.now()) {
+    const element = $('#world-clock');
+    if (!element) return;
+    const minutes = Math.floor(Math.max(0, worldClockSeconds(now)) / 60) % 1440;
+    const text = String(Math.floor(minutes / 60)).padStart(2, '0') + ':' + String(minutes % 60).padStart(2, '0');
+    if (element.textContent !== text) element.textContent = text;
   }
 
   function mergeTrainDatabaseRecords(records) {
@@ -528,6 +583,7 @@
         ? { ...app.state.connection, connected: false, simulated: true, label: 'Simulation online', detail: 'No physical trains connected' }
         : { ...app.state.connection, connected: Boolean(app.state.connection.connected), simulated: false, label: app.state.connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: app.state.connection.detail || 'Controller state loaded' };
     } else {
+      freezeWorldClock();
       app.state.connection = { connected: false, simulated: true, label: 'Simulation fallback', detail: 'Local sample state' };
     }
     renderAll();
@@ -535,8 +591,15 @@
     updateSync(successCount ? `${simulated ? 'Simulation API online' : 'Connected to controller'} · state loaded` : 'API unavailable · running embedded sample state', successCount ? 'success' : 'warning');
   }
 
-  async function pollController() {
-    if (document.visibilityState === 'hidden') return;
+  function pollController() {
+    if (document.visibilityState === 'hidden') return Promise.resolve();
+    if (!app.pollRequest) {
+      app.pollRequest = refreshController().finally(() => { app.pollRequest = null; });
+    }
+    return app.pollRequest;
+  }
+
+  async function refreshController() {
     const revision = app.stateMutationRevision;
     const results = await Promise.allSettled(['/api/live'].map((endpoint) => fetchJson(endpoint)));
     // A command or manual simulation tick may complete while this refresh is
@@ -565,6 +628,7 @@
       renderProgramming();
       updateSync('Controller state refreshed', 'success');
     } else {
+      freezeWorldClock();
       app.state.layout_info = null;
       app.state.connection = { connected: false, simulated: false, label: 'Controller unavailable', detail: 'Check the local server' };
     }
@@ -1402,6 +1466,7 @@
   }
 
   function renderSidebar() {
+    renderWorldClock();
     const train = selectedTrain();
     if (!train) return;
     const selectedMode = trainControlMode(train);
@@ -1426,7 +1491,6 @@
     $('#speed-command-status').textContent = `${train.actual_speed_kmh == null ? 'Commanded' : 'Actual'} ${Math.round(Number(train.actual_speed_kmh ?? train.speed) || 0)} km/h${train.speed_limit_kmh == null ? '' : ` · limit ${train.speed_limit_kmh} km/h`} · auto-applies`;
     renderSelectedTrainFunctions(train);
     $('#simulation-clock').textContent = app.state.simulation.clock || '00:00:00';
-    $('#world-clock').textContent = app.state.simulation.world_clock || '00:00';
     $('#world-clock-rate').textContent = '1 real min = 1 world hour';
     $('#simulation-date').textContent = app.state.simulation.date || 'Simulation date';
     $('#simulation-rate').textContent = app.simRate === 1 ? 'Real time' : `Real time · ${app.simRate}× step`;
@@ -2418,7 +2482,10 @@
   }
 
   function animateTrainMarkers(now) {
-    if (!document.hidden && ['dispatch', 'layout'].includes(app.workspace)) updateMotionMarkers(now);
+    if (!document.hidden) {
+      renderWorldClock(now);
+      if (['dispatch', 'layout'].includes(app.workspace)) updateMotionMarkers(now);
+    }
     window.requestAnimationFrame(animateTrainMarkers);
   }
 
@@ -3986,9 +4053,9 @@
     const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
     const remainder = String(seconds % 60).padStart(2, '0');
     app.state.simulation.clock = `${hours}:${minutes}:${remainder}`;
-    const worldParts = String(app.state.simulation.world_clock || '00:00').split(':').map(Number);
-    let worldMinutes = (worldParts[0] * 60) + worldParts[1] + app.simRate * 60;
-    worldMinutes %= 1440;
+    app.state.simulation.world_clock_seconds = worldClockSeconds() + app.simRate * 3600;
+    app.worldClockSample = null;
+    const worldMinutes = Math.floor(app.state.simulation.world_clock_seconds / 60) % 1440;
     app.state.simulation.world_clock = String(Math.floor(worldMinutes / 60)).padStart(2, '0') + ':' + String(worldMinutes % 60).padStart(2, '0');
     app.state.schedules.slice(0, 1).forEach((schedule) => { if (schedule.state === 'Boarding') schedule.state = 'Departing'; });
     renderSidebar(); renderSchedules();
@@ -4020,6 +4087,7 @@
     const button = $('#simulation-toggle');
     const wasRunning = Boolean(app.state.simulation.running);
     const shouldRun = !wasRunning;
+    freezeWorldClock();
     app.state.simulation.running = shouldRun;
     renderSidebar();
     if (button) button.disabled = true;
@@ -4363,6 +4431,13 @@
       navigator.clipboard?.writeText(text).then(() => showToast('Coordinate copied: ' + text, 'success')).catch(() => showToast(text, 'warning'));
     });
     window.addEventListener('pagehide', cancelSpeedDraft);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        window.clearTimeout(app.pollTimer);
+        renderWorldClock();
+        void pollController().finally(schedulePolling);
+      }
+    });
     $('#stop-train').addEventListener('click', () => setSpeed(0));
     $('#direction-forward').addEventListener('click', () => setDirection('forward'));
     $('#direction-reverse').addEventListener('click', () => setDirection('reverse'));

@@ -143,6 +143,8 @@ The dispatch plan can be:
 
 The simulation world clock advances faster than real time. One real second advances one model minute, so a 24-hour model day lasts 24 real minutes. Timetable events repeat after the clock returns to `00:00`; scheduled departures are not one-shot events.
 
+The visible world clock updates between dashboard refreshes, using time synchronized with the Python controller. It pauses with the simulation or track power and stops extrapolating when the controller is unavailable. Returning to a backgrounded tab refreshes the controller state immediately.
+
 ### Settings — connection, operation and workspace preferences
 
 Settings includes:
