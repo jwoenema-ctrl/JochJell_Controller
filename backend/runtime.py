@@ -153,12 +153,13 @@ class ControllerRuntime:
                     connected = self.connection.status.connected
                 if not connected:
                     self.dispatcher.emergency_stop()
-            self.track.tick()
+            snapshot = self.track.tick()
             if isinstance(self.track, Z21TrackSystem) and self.track.feedback_groups():
                 results = self.track.poll_feedback(self.track.feedback_groups())
                 if any(not result.accepted for result in results):
                     self.dispatcher.emergency_stop()
-            cycle = self.dispatcher.tick()
+                snapshot = self.track.get_snapshot()
+            cycle = self.dispatcher.tick(snapshot=snapshot)
         if cycle is None:
             cycle = self.dispatcher.tick()
         return cycle

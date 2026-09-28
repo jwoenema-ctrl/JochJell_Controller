@@ -97,6 +97,7 @@
     simRate: 1,
     zoom: 1,
     layoutViewports: { graph: null, pinboard: null },
+    layoutViewportManual: { graph: false, pinboard: false },
     panDrag: null,
     panKeyDown: false,
     suppressCanvasClickUntil: 0,
@@ -110,6 +111,8 @@
     editingTrainData: null,
     scanViewer: null,
     selectedScanId: 'sample-yard',
+    trainDatabaseRevision: null,
+    trainDatabaseIndex: null,
     scanObjectUrls: {},
     layoutEditing: false,
     layoutDrag: null,
@@ -347,10 +350,47 @@
     return payload;
   }
 
+  function sameSequence(left, right, equals = (a, b) => a === b) {
+    if (left === right) return true;
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((item, index) => equals(item, right[index]));
+  }
+
+  function samePoints(left, right) {
+    return sameSequence(left, right, (a, b) => a && b && a.x === b.x && a.y === b.y);
+  }
+
+  function sameLayoutGeometry(left, right) {
+    const sameRows = (key, equals) => sameSequence(left[key] || [], right[key] || [], equals);
+    const sameValues = (a, b) => sameSequence(a, b);
+    return sameRows('blocks', (a, b) => a.id === b.id && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height)
+      && sameRows('edges', (a, b) =>
+        (a.from || a.source || a.from_block_id || a.source_block_id) === (b.from || b.source || b.from_block_id || b.source_block_id)
+        && (a.to || a.target || a.to_block_id || a.target_block_id) === (b.to || b.target || b.to_block_id || b.target_block_id)
+        && samePoints(a.control_points || a.controlPoints, b.control_points || b.controlPoints))
+      && sameRows('waypoints', (a, b) => a.id === b.id && a.x === b.x && a.y === b.y
+        && sameValues(a.connected_node_ids || a.connectedNodeIds, b.connected_node_ids || b.connectedNodeIds))
+      && sameRows('turntables', (a, b) => a.id === b.id && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+        && sameValues(a.connected_block_ids || a.connectedBlockIds, b.connected_block_ids || b.connectedBlockIds))
+      && sameRows('turnouts', (a, b) => a.id === b.id && (a.from || a.entry_block_id) === (b.from || b.entry_block_id)
+        && (a.to || a.straight_block_id) === (b.to || b.straight_block_id)
+        && (a.alternate || a.diverging_block_id) === (b.alternate || b.diverging_block_id));
+  }
+
+  function resetAutomaticLayoutViewports() {
+    ['graph', 'pinboard'].forEach((key) => {
+      if (!app.layoutViewportManual[key]) app.layoutViewports[key] = null;
+    });
+  }
+
   function mergePayload(payload) {
     const value = unwrap(payload);
     if (!value || typeof value !== 'object') return;
-    if (value.layout) app.state.layout = { ...app.state.layout, ...value.layout };
+    if (value.layout) {
+      const nextLayout = { ...app.state.layout, ...value.layout };
+      if (!sameLayoutGeometry(app.state.layout, nextLayout)) resetAutomaticLayoutViewports();
+      app.state.layout = nextLayout;
+    }
     if (value.layout_info) app.state.layout_info = value.layout_info;
     if (Array.isArray(value.blocks)) app.state.layout.blocks = value.blocks;
     if (Array.isArray(value.edges)) app.state.layout.edges = value.edges;
@@ -378,7 +418,12 @@
         if (motionSamples.get(train.id)?.signature !== signature) motionSamples.set(train.id, { signature, receivedAt: now });
       });
     }
-    if (Array.isArray(value.trainDatabase)) mergeTrainDatabaseRecords(value.trainDatabase);
+    if (Array.isArray(value.trainDatabase)) {
+      mergeTrainDatabaseRecords(value.trainDatabase);
+      if (value.train_database_revision != null) app.trainDatabaseRevision = value.train_database_revision;
+    } else if (Array.isArray(value.trains) && Array.isArray(app.state.trainDatabase)) {
+      mergeTrainDatabaseRecords(app.state.trainDatabase);
+    }
     if (Array.isArray(value.trains) && value.trains.length && value.trains[0] && value.trains[0].train_id) mergeTrainDatabaseRecords(value.trains);
     if (Array.isArray(value.schedules)) app.state.schedules = value.schedules;
     if (Array.isArray(value.scans)) app.state.scans = value.scans;
@@ -400,11 +445,22 @@
   }
 
   function mergeTrainDatabaseRecords(records) {
-    app.state.trainDatabase = Array.isArray(records) ? records : [];
-    const byId = Object.fromEntries(app.state.trainDatabase.map((record) => [String(record.train_id), record]));
+    const nextRecords = Array.isArray(records) ? records : [];
+    if (app.state.trainDatabase !== nextRecords || !app.trainDatabaseIndex) {
+      const byId = Object.fromEntries(nextRecords.map((record) => [String(record.train_id), record]));
+      const byAddress = new Map();
+      nextRecords.forEach((record) => {
+        if (record.decoder_address == null || record.decoder_address === '') return;
+        const address = String(record.decoder_address);
+        if (!byAddress.has(address)) byAddress.set(address, record);
+      });
+      app.state.trainDatabase = nextRecords;
+      app.trainDatabaseIndex = { byId, byAddress };
+    }
+    const { byId, byAddress } = app.trainDatabaseIndex;
     app.state.trains = (app.state.trains || []).map((train) => {
       const match = byId[String(train.id)]
-        || app.state.trainDatabase.find((record) => String(record.decoder_address || '') === String(train.number || ''));
+        || byAddress.get(String(train.number || ''));
       if (!match) return train;
       const rollingStock = Array.isArray(match.rolling_stock) ? match.rolling_stock : [];
       return {
@@ -442,19 +498,13 @@
 
   async function bootstrap() {
     loadAppSettings();
-    const endpoints = ['/api/state', '/api/layout', '/api/trains', '/api/train-database'];
+    const endpoints = ['/api/state'];
     const results = await Promise.allSettled(endpoints.map((endpoint) => fetchJson(endpoint)));
     let successCount = 0;
     results.forEach((result, index) => {
       if (result.status !== 'fulfilled') return;
       successCount += 1;
-      if (index === 1) {
-        app.state.layout = { ...app.state.layout, ...unwrap(result.value) };
-        if (Array.isArray(app.state.layout.routes)) app.state.routes = app.state.layout.routes;
-      }
-      else if (index === 2) app.state.trains = Array.isArray(result.value) ? result.value : (unwrap(result.value).trains || app.state.trains);
-      else if (index === 3) mergeTrainDatabaseRecords(unwrap(result.value).trains || []);
-      else mergePayload(result.value);
+      mergePayload(result.value);
     });
 
     app.source = successCount ? 'api' : 'sample';
@@ -462,49 +512,39 @@
       const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
       app.state.connection = simulated
         ? { ...app.state.connection, connected: false, simulated: true, label: 'Simulation online', detail: 'No physical trains connected' }
-        : { ...app.state.connection, connected: Boolean(app.state.connection.connected), simulated: false, label: app.state.connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: app.state.connection.detail || `${successCount}/${endpoints.length} endpoints responding` };
+        : { ...app.state.connection, connected: Boolean(app.state.connection.connected), simulated: false, label: app.state.connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: app.state.connection.detail || 'Controller state loaded' };
     } else {
       app.state.connection = { connected: false, simulated: true, label: 'Simulation fallback', detail: 'Local sample state' };
     }
     renderAll();
     const simulated = Boolean(app.state.connection && app.state.connection.simulated);
-    updateSync(successCount ? `${simulated ? 'Simulation API online' : 'Connected to controller'} · ${successCount}/${endpoints.length} endpoints responding` : 'API unavailable · running embedded sample state', successCount ? 'success' : 'warning');
+    updateSync(successCount ? `${simulated ? 'Simulation API online' : 'Connected to controller'} · state loaded` : 'API unavailable · running embedded sample state', successCount ? 'success' : 'warning');
   }
 
   async function pollController() {
     if (document.visibilityState === 'hidden') return;
     const revision = app.stateMutationRevision;
-    const results = await Promise.allSettled(['/api/connection', '/api/feedback', '/api/state', '/api/settings'].map((endpoint) => fetchJson(endpoint)));
-    // A command or manual simulation tick may complete while this parallel
-    // refresh is in flight. Do not let that older snapshot restore the clock
-    // or pause state after the newer command response was applied.
+    const results = await Promise.allSettled(['/api/live'].map((endpoint) => fetchJson(endpoint)));
+    // A command or manual simulation tick may complete while this refresh is
+    // in flight. Do not let an older snapshot restore the clock or pause state.
     if (revision !== app.stateMutationRevision) return;
-    const connectionResult = results[0];
-    if (connectionResult && connectionResult.status === 'fulfilled') {
-      const connection = unwrap(connectionResult.value) || {};
-      const simulated = Boolean(connection.simulated || connection.mode === 'simulation');
-      app.state.connection = { ...app.state.connection, ...connection, simulated, connected: simulated ? false : Boolean(connection.connected), label: simulated ? 'Simulation online' : connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: simulated ? 'No physical trains connected' : connection.detail || 'No diagnostic detail returned by the controller' };
-    } else {
-      app.state.connection = { connected: false, simulated: false, label: 'Controller unavailable', detail: 'Check the local server' };
-    }
-    const feedbackResult = results[1];
-    if (feedbackResult && feedbackResult.status === 'fulfilled') {
-      const feedback = unwrap(feedbackResult.value) || {};
-      if (typeof feedback.healthy === 'boolean' || feedback.error || feedback.mapped_contacts != null) {
-        app.state.feedback = { ...app.state.feedback, ...feedback };
+    const stateResult = results[0];
+    if (stateResult.status === 'fulfilled') {
+      mergePayload(stateResult.value);
+      const live = unwrap(stateResult.value) || {};
+      const databaseRevision = live.train_database_revision;
+      if (databaseRevision != null && databaseRevision !== app.trainDatabaseRevision) {
+        try {
+          const database = unwrap(await fetchJson('/api/train-database')) || {};
+          if (revision !== app.stateMutationRevision) return;
+          if (Array.isArray(database.trains)) {
+            mergeTrainDatabaseRecords(database.trains);
+            app.trainDatabaseRevision = databaseRevision;
+          }
+        } catch (_) {
+          // Keep the last complete catalogue and retry when the revision is seen again.
+        }
       }
-      const occupancy = feedback.occupied_blocks || {};
-      if (Object.keys(occupancy).length) {
-        app.state.layout.blocks = (app.state.layout.blocks || []).map((block) => {
-          const occupants = occupancy[block.id] || occupancy[String(block.id).toUpperCase()] || [];
-          return occupants.length ? { ...block, status: 'occupied' } : block;
-        });
-      }
-    }
-    if (results[2].status === 'fulfilled') {
-      const lastConnection = app.state.connection;
-      mergePayload(results[2].value);
-      app.state.connection = lastConnection;
       renderTrainList();
       renderSchedules();
       renderInventory();
@@ -512,8 +552,9 @@
       updateSync('Controller state refreshed', 'success');
     } else {
       app.state.layout_info = null;
+      app.state.connection = { connected: false, simulated: false, label: 'Controller unavailable', detail: 'Check the local server' };
     }
-    if (results[3].status === 'fulfilled') showSettingsRuntime(results[3].value.runtime);
+    if (stateResult.status === 'fulfilled') showSettingsRuntime(unwrap(stateResult.value)?.runtime);
     renderConnection(); renderSidebar(); renderGraph(); renderSystematicView(); renderStats();
   }
 
@@ -1495,12 +1536,14 @@
         const bottom = Math.max(...items.map((item) => (Number(item.y) || 0) + (Number(item.height) || 0))) + 70;
         app.layoutViewports.pinboard = { x: left, y: top, width: Math.max(980, right - left), height: Math.max(350, bottom - top) };
       }
+      app.layoutViewportManual.pinboard = false;
       applyLayoutViewport();
       return;
     }
     const items = [...(layout.blocks || []), ...(layout.waypoints || []), ...(layout.turntables || [])];
     if (!items.length) {
       app.layoutViewports.graph = { x: 0, y: 0, width: 980, height: 350 };
+      app.layoutViewportManual.graph = false;
       applyLayoutViewport();
       return;
     }
@@ -1509,6 +1552,7 @@
     const right = Math.max(...items.map((item) => (Number(item.x) || 0) + (Number(item.width) || 140))) + 70;
     const bottom = Math.max(...items.map((item) => (Number(item.y) || 0) + (Number(item.height) || 56))) + 65;
     app.layoutViewports.graph = { x: left, y: top, width: Math.max(320, right - left), height: Math.max(220, bottom - top) };
+    app.layoutViewportManual.graph = false;
     applyLayoutViewport();
   }
 
@@ -3503,7 +3547,9 @@
     const dx = point.x - drag.startPoint.x; const dy = point.y - drag.startPoint.y;
     if (Math.abs(event.clientX - drag.startClientX) + Math.abs(event.clientY - drag.startClientY) > 3) drag.moved = true;
     const view = { ...drag.view, x: drag.view.x - dx, y: drag.view.y - dy };
-    app.layoutViewports[app.layoutView === 'pinboard' ? 'pinboard' : 'graph'] = view;
+    const key = app.layoutView === 'pinboard' ? 'pinboard' : 'graph';
+    app.layoutViewports[key] = view;
+    app.layoutViewportManual[key] = true;
     svg.setAttribute('viewBox', `${view.x} ${view.y} ${view.width} ${view.height}`);
     event.preventDefault();
   }
@@ -4157,6 +4203,7 @@
 
   function changeZoom(amount) {
     app.zoom = Math.max(.75, Math.min(1.35, app.zoom + amount));
+    app.layoutViewportManual[app.layoutView === 'pinboard' ? 'pinboard' : 'graph'] = true;
     $('#layout-svg').style.transform = `scale(${app.zoom})`;
     $('#layout-zoom-label').textContent = `${Math.round(app.zoom * 100)}%`;
   }

@@ -52,8 +52,10 @@ class Z21TrackSystem:
         """Last accepted command, not a measured physical velocity."""
         return self._effective_speeds.get(train_id, 0.0)
 
-    def get_train_speed_limit(self, train_id: str) -> float | None:
-        motion = next((m for m in self._snapshot.trains if m.train_id == train_id), None)
+    def get_train_speed_limit(self, train_id: str, *, motion: TrainMotion | None = None,
+                              snapshot: TrackSnapshot | None = None) -> float | None:
+        if motion is None and snapshot is None:
+            motion = next((m for m in self._snapshot.trains if m.train_id == train_id), None)
         if motion and motion.block_id in motion.route:
             return self._speed_policy.limit_kmh(train_id, next_connection(motion.block_id, motion.route, motion.direction))
         limits = [value for edge in self._speed_policy.rules

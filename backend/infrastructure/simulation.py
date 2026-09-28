@@ -76,6 +76,7 @@ class SimulatedTrackSystem:
         self._trains: dict[str, _Train] = {}
         self._authorities: dict[str, tuple[str, ...]] = {}
         self._signals: dict[str, _Signal] = {}
+        self._signals_by_block: dict[str, dict[str, _Signal]] = {}
         self._turnouts: dict[str, int] = {}
         self._train_functions: dict[str, dict[int, bool]] = {}
         self._powered = True
@@ -92,9 +93,15 @@ class SimulatedTrackSystem:
         return self._speed_policy.normalized_limit(train.train_id,
             next_connection(train.block_id, train.route, train.direction))
 
-    def get_train_speed_limit(self, train_id: str) -> float | None:
+    def get_train_speed_limit(self, train_id: str, *, motion: TrainMotion | None = None,
+                              snapshot: TrackSnapshot | None = None) -> float | None:
         with self._lock:
             train = self._trains.get(train_id)
+            if motion is not None:
+                return self._speed_policy.limit_kmh(
+                    train_id,
+                    next_connection(str(motion.block_id), tuple(motion.route), int(motion.direction)),
+                )
             return self._speed_policy.limit_kmh(train_id,
                 next_connection(train.block_id, train.route, train.direction)) if train else None
 
@@ -112,6 +119,7 @@ class SimulatedTrackSystem:
             for signal in self._signals.values():
                 if signal.protects_block_id == old:
                     signal.protects_block_id = new
+            self._reindex_signals()
 
     def add_block(self, block_id: str) -> None:
         """Register a block name for occupancy validation and display."""
@@ -369,7 +377,15 @@ class SimulatedTrackSystem:
             if not protected:
                 raise ValueError("protects_block_id is required for a new signal")
             self._blocks.add(protected)
-            self._signals[selected_id] = _Signal(selected_id, protected, selected_aspect)
+            if existing is not None and existing.protects_block_id != protected:
+                previous_signals = self._signals_by_block.get(existing.protects_block_id)
+                if previous_signals is not None:
+                    previous_signals.pop(selected_id, None)
+                    if not previous_signals:
+                        self._signals_by_block.pop(existing.protects_block_id, None)
+            signal = _Signal(selected_id, protected, selected_aspect)
+            self._signals[selected_id] = signal
+            self._signals_by_block.setdefault(protected, {})[selected_id] = signal
             self._refresh_safety_targets()
         return CommandResult(True, "set_signal", "signal updated")
 
@@ -528,10 +544,17 @@ class SimulatedTrackSystem:
         if authority is not None and next_block not in authority:
             return _SafetyBoundary(1.0 - train.position, "blocked_authority", next_block)
 
-        for signal in self._signals.values():
-            if signal.protects_block_id == next_block and signal.aspect in self._RESTRICTIVE_SIGNAL_ASPECTS:
-                return _SafetyBoundary(1.0 - train.position, "restrictive_signal", next_block)
+        signals = self._signals_by_block.get(next_block)
+        if signals:
+            for signal in signals.values():
+                if signal.aspect in self._RESTRICTIVE_SIGNAL_ASPECTS:
+                    return _SafetyBoundary(1.0 - train.position, "restrictive_signal", next_block)
         return None
+
+    def _reindex_signals(self) -> None:
+        self._signals_by_block.clear()
+        for signal in self._signals.values():
+            self._signals_by_block.setdefault(signal.protects_block_id, {})[signal.signal_id] = signal
 
     def _hold_at_boundary(self, train: _Train) -> None:
         train.position = min(train.position, 1.0 - self._BOUNDARY_EPSILON)

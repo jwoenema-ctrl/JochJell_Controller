@@ -171,10 +171,11 @@ class Dispatcher:
             stopped.append(train_id)
         return tuple(stopped)
 
-    def tick(self) -> DispatchCycle:
+    def tick(self, snapshot: object | None = None) -> DispatchCycle:
         """Run route/safety checks and apply safe automatic targets."""
 
-        snapshot = self.track_system.get_snapshot()
+        if snapshot is None:
+            snapshot = self.track_system.get_snapshot()
         occupancy = getattr(snapshot, "occupied_blocks", {})
         reservations: Mapping[str, str] = {}
         updates = ()

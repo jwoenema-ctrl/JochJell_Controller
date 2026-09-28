@@ -194,7 +194,7 @@ async function shot(page, name) {
   await page.getByRole('button', { name: 'Edit layout', exact: true }).click();
   assert.equal(await page.locator('#layout-info-panel').isVisible(), true);
   assert.match(await page.locator('#layout-info-metrics').textContent(), /Not measured in simulation/);
-  await page.getByRole('button', { name: '2D pinboard', exact: true }).click();
+  await page.locator('button[data-layout-view="pinboard"]').click();
   assert.equal(await page.locator('#graph-editor-tools').isVisible(), true, 'Pinboard editing should expose graph connections');
   await page.locator('#add-layout-block').click();
   await page.waitForFunction(() => document.querySelector('#block-count').textContent === '5');
@@ -254,7 +254,7 @@ async function shot(page, name) {
     const state = await fetch('/api/state').then(response => response.json());
     return state.layout.blocks.length === 4 && !state.layout.blocks.some(item => item.id === 'b05');
   });
-  await page.getByRole('button', { name: '2D pinboard', exact: true }).click();
+  await page.locator('button[data-layout-view="pinboard"]').click();
   const pinboardTrain = page.locator('#layout-svg .pinboard-train').first();
   assert.ok(await pinboardTrain.count(), 'Pinboard should render an active train marker');
   assert.equal(await page.locator('#pinboard-placement-tools').isVisible(), true, 'Pinboard should expose train placement controls');

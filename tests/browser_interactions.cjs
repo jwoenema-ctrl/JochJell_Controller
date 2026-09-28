@@ -66,6 +66,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   await page.waitForFunction(() => document.querySelector('#settings-native-status').textContent === 'Test cancellation: z21');
   assert.deepEqual(errors, []);
   await page.locator('[data-workspace="layout"]').click();
+  await page.locator('button[data-layout-view="editor"]').click();
   await page.locator('#connection-from').selectOption('b01');
   await page.locator('#connection-to').selectOption('b02');
   await page.locator('#connection-limit-speed').fill('40');
@@ -101,7 +102,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   snapshot.trains = [{ ...snapshot.trains[0], position: 'B01', motion: { block_id: 'b01', from_block_id: 'b01', to_block_id: 'b02', position: .2, speed: .1, source: 'simulation', time_seconds: 10, tick_seconds: .1 } }];
   await motionPage.route('**/api/**', async route => {
     const endpoint = new URL(route.request().url()).pathname;
-    const payloads = { '/api/state': snapshot, '/api/layout': snapshot.layout, '/api/trains': snapshot.trains, '/api/train-database': { trains: [] }, '/api/connection': snapshot.connection };
+    const payloads = { '/api/state': snapshot, '/api/live': snapshot, '/api/layout': snapshot.layout, '/api/trains': snapshot.trains, '/api/train-database': { trains: [] }, '/api/connection': snapshot.connection };
     if (endpoint in payloads) await route.fulfill({ json: payloads[endpoint] }); else await route.continue();
   });
   await motionPage.goto(`http://127.0.0.1:${port}/#layout`);
