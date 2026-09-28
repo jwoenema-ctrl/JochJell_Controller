@@ -467,6 +467,9 @@ body .empty-state { font-size: 13px; }
 .settings-card .settings-row:last-of-type { border-bottom: 0; }
 .settings-card .settings-row > div:first-child { min-width: 0; }
 .settings-card .settings-control { max-width: 260px; }
+.settings-clock-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.settings-clock-control .button { white-space: nowrap; }
+#settings-world-clock-reset { grid-column: 1 / -1; }
 .settings-card .settings-help { max-width: 650px; }
 .settings-wlan-row { margin: 10px 0 4px; }
 .settings-actions { position: sticky; bottom: 12px; z-index: 4; margin-top: 0; padding: 13px 16px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: var(--shadow); backdrop-filter: blur(14px); }

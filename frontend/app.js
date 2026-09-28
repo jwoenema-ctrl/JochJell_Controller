@@ -224,7 +224,7 @@
     });
   }
 
-  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
+  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true, world_day_minutes: 24 }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
   app.settings = clone(DEFAULT_SETTINGS);
   app.settingsDirty = false;
   app.settingsLoaded = false;
@@ -476,15 +476,16 @@
     const previous = app.worldClockSample;
     const predicted = worldClockSeconds(now);
     const session = simulation.world_clock_session ?? null;
+    const rate = Number(simulation.world_clock_rate) || (1440 / (Number(app.settings.operations.world_day_minutes) || 24));
     // Small response-time differences must not make a running clock count
-    // backwards. A new controller session still resets it authoritatively.
-    const continuous = previous?.running && running && previous.session === session
+    // backwards. A new controller session or clock edit resets the anchor.
+    const continuous = previous?.running && running && previous.session === session && previous.rate === rate
       && (session !== null || seconds >= predicted - 120);
     app.worldClockSample = {
       seconds: continuous ? Math.max(seconds, predicted) : seconds,
       receivedAt: now,
       running,
-      rate: Math.max(0, Number(simulation.world_clock_rate) || 60),
+      rate,
       session,
       // Stop extrapolating if the next dashboard request never completes.
       maxAgeSeconds: Math.max(5, Number(app.settings.ui_refresh_ms) / 1000 + 5)
@@ -499,11 +500,18 @@
   }
 
   function renderWorldClock(now = performance.now()) {
-    const element = $('#world-clock');
-    if (!element) return;
+    const dayMinutes = Number(app.state.simulation.world_day_minutes ?? app.settings.operations.world_day_minutes) || 24;
+    const rateElement = $('#world-clock-rate');
+    if (rateElement) {
+      const rateText = dayMinutes === 1440 ? '24 real hours = 1 world day' : `${dayMinutes} real min = 1 world day`;
+      if (rateElement.textContent !== rateText) rateElement.textContent = rateText;
+    }
     const minutes = Math.floor(Math.max(0, worldClockSeconds(now)) / 60) % 1440;
     const text = String(Math.floor(minutes / 60)).padStart(2, '0') + ':' + String(minutes % 60).padStart(2, '0');
-    if (element.textContent !== text) element.textContent = text;
+    ['#world-clock', '#settings-world-clock-current'].forEach((selector) => {
+      const element = $(selector);
+      if (element && element.textContent !== text) element.textContent = text;
+    });
   }
 
   function mergeTrainDatabaseRecords(records) {
@@ -667,6 +675,7 @@
     $('#setting-confirm-power-actions').checked = settings.operations.confirm_power_actions;
     $('#setting-connected-blocks').checked = settings.operations.connected_blocks;
     $('#setting-default-simulation-rate').value = String(settings.operations.default_simulation_rate);
+    $('#setting-world-day-minutes').value = String(settings.operations.world_day_minutes);
     app.simRate = Number(settings.operations.default_simulation_rate) || 1;
     applyInterfaceSettings(settings);
     $('#setting-z21-host').value = settings.z21_host;
@@ -766,6 +775,7 @@
     try {
       const response = await fetchJson('/api/settings');
       app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, interface: { ...DEFAULT_SETTINGS.interface, ...(response.settings || {}).interface }, operations: { ...DEFAULT_SETTINGS.operations, ...(response.settings || {}).operations }, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
+      mergePayload(response);
       app.settingsLoaded = true;
       workspaceLayout?.receiveSettings(response.settings);
       if (!app.settingsDirty) {
@@ -789,7 +799,7 @@
       z21_wlan_enabled: $('#setting-z21-wlan').checked,
       ui_refresh_ms: Number($('#setting-ui-refresh').value) * 1000,
       interface: { density: $('#setting-interface-density').value, show_connection_detail: $('#setting-show-connection-detail').checked, reduce_motion: $('#setting-reduce-motion').checked },
-      operations: { confirm_power_actions: $('#setting-confirm-power-actions').checked, default_simulation_rate: Number($('#setting-default-simulation-rate').value), connected_blocks: $('#setting-connected-blocks').checked },
+      operations: { confirm_power_actions: $('#setting-confirm-power-actions').checked, default_simulation_rate: Number($('#setting-default-simulation-rate').value), connected_blocks: $('#setting-connected-blocks').checked, world_day_minutes: Number($('#setting-world-day-minutes').value) },
       routing: { adaptive: $('#setting-routing-adaptive').checked, busy_interval_ms: Number($('#setting-routing-busy').value) * 1000, idle_interval_ms: Number($('#setting-routing-idle').value) * 1000 }
     };
     button.disabled = true;
@@ -797,6 +807,8 @@
     try {
       const response = await fetchJson('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
       app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, interface: { ...DEFAULT_SETTINGS.interface, ...(response.settings || {}).interface }, operations: { ...DEFAULT_SETTINGS.operations, ...(response.settings || {}).operations }, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
+      app.stateMutationRevision += 1;
+      mergePayload(response);
       workspaceLayout?.receiveSettings(response.settings);
       app.settingsLoaded = true; app.settingsDirty = false;
       applyTheme(app.settings.theme); applyInterfaceSettings(app.settings); renderSettings(); schedulePolling(); showSettingsRuntime(response.runtime);
@@ -1491,15 +1503,16 @@
     $('#speed-command-status').textContent = `${train.actual_speed_kmh == null ? 'Commanded' : 'Actual'} ${Math.round(Number(train.actual_speed_kmh ?? train.speed) || 0)} km/h${train.speed_limit_kmh == null ? '' : ` · limit ${train.speed_limit_kmh} km/h`} · auto-applies`;
     renderSelectedTrainFunctions(train);
     $('#simulation-clock').textContent = app.state.simulation.clock || '00:00:00';
-    $('#world-clock-rate').textContent = '1 real min = 1 world hour';
     $('#simulation-date').textContent = app.state.simulation.date || 'Simulation date';
-    $('#simulation-rate').textContent = app.simRate === 1 ? 'Real time' : `Real time · ${app.simRate}× step`;
+    $('#simulation-rate').textContent = !app.state.connection.simulated || app.simRate === 1 ? 'Real time' : `Real time · ${app.simRate}× step`;
     $('#simulation-state').textContent = app.state.simulation.running ? 'RUNNING' : 'PAUSED';
     $('#simulation-toggle').textContent = app.state.simulation.running ? 'Pause' : 'Resume';
     $('#track-power-toggle').textContent = app.powerPending ? 'Changing power…' : app.state.track_power === false ? 'Power on' : 'Power off';
     $('#track-power-toggle').disabled = Boolean(app.powerPending);
     $('#layout-power-toggle').onclick = toggleTrackPower;
     $('#simulation-rate-select').value = String(app.simRate);
+    $('#simulation-rate-select').disabled = !app.state.connection.simulated;
+    $('#simulation-tick').title = 'Advance one real minute of model time. Scheduled departures crossed by this step may start trains.';
     $$('.control-mode').forEach((button) => button.classList.toggle('is-active', button.dataset.controlMode === app.controlMode));
     $$('.mode-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.workspace === app.workspace));
   }
@@ -4045,20 +4058,39 @@
     finally { app.directionPending = false; renderSidebar(); }
   }
 
-  function localTick() {
-    const parts = String(app.state.simulation.clock || '00:00:00').split(':').map(Number);
-    let seconds = (parts[0] * 3600) + (parts[1] * 60) + parts[2] + (60 * app.simRate);
-    seconds %= 86400;
-    const hours = String(Math.floor(seconds / 3600)).padStart(2, '0');
-    const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
-    const remainder = String(seconds % 60).padStart(2, '0');
-    app.state.simulation.clock = `${hours}:${minutes}:${remainder}`;
-    app.state.simulation.world_clock_seconds = worldClockSeconds() + app.simRate * 3600;
-    app.worldClockSample = null;
-    const worldMinutes = Math.floor(app.state.simulation.world_clock_seconds / 60) % 1440;
-    app.state.simulation.world_clock = String(Math.floor(worldMinutes / 60)).padStart(2, '0') + ':' + String(worldMinutes % 60).padStart(2, '0');
-    app.state.schedules.slice(0, 1).forEach((schedule) => { if (schedule.state === 'Boarding') schedule.state = 'Departing'; });
-    renderSidebar(); renderSchedules();
+  async function setWorldClock(reset = false) {
+    const input = $('#setting-world-clock-time');
+    const setButton = $('#settings-world-clock-set');
+    const resetButton = $('#settings-world-clock-reset');
+    const status = $('#settings-world-clock-status');
+    if (setButton.disabled || resetButton.disabled) return;
+    const time = reset ? '00:00' : input.value;
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+      status.textContent = 'Choose a time from 00:00 to 23:59.';
+      input.focus();
+      return;
+    }
+    input.disabled = setButton.disabled = resetButton.disabled = true;
+    status.textContent = reset ? 'Resetting world clock…' : 'Setting world clock…';
+    app.stateMutationRevision += 1;
+    try {
+      const response = await fetchJson(reset ? '/api/world-clock/reset' : '/api/world-clock/set', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reset ? {} : { time })
+      });
+      app.stateMutationRevision += 1;
+      mergePayload(response);
+      app.source = 'api';
+      input.value = time;
+      status.textContent = `World clock ${reset ? 'reset' : 'set'} to ${time}. Timetable continues from this time.`;
+      updateSync('World clock time acknowledged by controller', 'success');
+      renderAll();
+    } catch (error) {
+      status.textContent = `World clock change was not acknowledged: ${error.message}`;
+      showToast(error.message, 'warning');
+    } finally {
+      input.disabled = setButton.disabled = resetButton.disabled = false;
+    }
   }
 
   async function tickSimulation() {
@@ -4066,17 +4098,19 @@
     if (button) button.disabled = true;
     app.stateMutationRevision += 1;
     try {
-      const response = await fetchJson('/api/simulation/tick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ seconds: 60, rate: app.simRate }) });
+      const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
+      const response = await fetchJson(simulated ? '/api/simulation/tick' : '/api/world-clock/advance', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(simulated ? { seconds: 60, rate: app.simRate } : { seconds: 60 })
+      });
       mergePayload(response);
       app.source = 'api';
-      const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
-      app.state.connection = { ...app.state.connection, connected: !simulated, simulated, label: simulated ? 'Simulation API online' : 'Z21 controller online', detail: 'Simulation tick acknowledged' };
-      updateSync('Simulation tick acknowledged by controller', 'success');
+      app.state.connection = { ...app.state.connection, simulated, detail: simulated ? 'Simulation tick acknowledged' : 'World clock advance acknowledged' };
+      updateSync(simulated ? 'Simulation tick acknowledged by controller' : 'World clock advanced by controller', 'success');
       renderAll();
     } catch (error) {
-      localTick();
-      updateSync('Simulation tick applied locally', 'warning');
-      showToast('Simulation advanced locally; API is unavailable.', 'warning');
+      updateSync('Clock advance was not acknowledged by the controller', 'warning');
+      showToast(error.message, 'warning');
     } finally {
       if (button) button.disabled = false;
       renderSidebar();
@@ -4278,7 +4312,10 @@
       });
     }));
     $('#app-settings-form').addEventListener('submit', saveAppSettings);
-    $('#app-settings-form').addEventListener('input', () => { app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; renderWlanPresentation(app.settingsRuntime); updateNativeControls(); });
+    $('#app-settings-form').addEventListener('input', (event) => { if (event.target.id === 'setting-world-clock-time') return; app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; renderWlanPresentation(app.settingsRuntime); updateNativeControls(); });
+    $('#settings-world-clock-set').addEventListener('click', () => setWorldClock());
+    $('#settings-world-clock-reset').addEventListener('click', () => setWorldClock(true));
+    $('#setting-world-clock-time').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); setWorldClock(); } });
     $('#setting-theme').addEventListener('change', (event) => applyTheme(event.target.value));
     const previewInterface = () => applyInterfaceSettings({ interface: { density: $('#setting-interface-density').value, show_connection_detail: $('#setting-show-connection-detail').checked, reduce_motion: $('#setting-reduce-motion').checked } });
     $('#setting-interface-density').addEventListener('change', previewInterface);

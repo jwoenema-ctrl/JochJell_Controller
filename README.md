@@ -116,6 +116,8 @@ There are two dispatch styles:
 
 Select the behavior in **Settings → Operations → Connected-block dispatch**. In one-block mode, a route needs a saved routine block to create movement. A path containing only track nodes has no speed instruction and cannot move a train by itself.
 
+Saved routine blocks start at the timetable departure in either setting. With connected-block dispatch enabled, a route containing track nodes retains its block reservations while the routines provide speed and decoder actions. A routine-only service uses the train's current logical block instead of retaining a previous service's destination. Routine actions follow their authored timing from departure; they do not wait for individual track nodes. Stop commands, power-off, control changes, and dispatcher safety stops cancel scheduled routines.
+
 #### Pinboard and layout viewer
 
 The 2D pinboard lets you place trains and rolling stock on a track coordinate or drag a train marker to a calibrated destination. The planner checks direction, topology, occupancy and calibration before accepting a target. Execution is a separate confirmed action with a bounded stop timer.
@@ -141,15 +143,21 @@ The dispatch plan can be:
 - **Destination coordinate** — use a calibrated pinboard destination;
 - **Timetable only** — display the service without issuing movement.
 
-The simulation world clock advances faster than real time. One real second advances one model minute, so a 24-hour model day lasts 24 real minutes. Timetable events repeat after the clock returns to `00:00`; scheduled departures are not one-shot events.
+By default, one real second advances one model minute, so a 24-hour model day lasts 24 real minutes. In **Settings → Operations → World clock day length**, choose **12 minutes**, **24 minutes** (default), **48 minutes**, or **24 hours** per model day. The saved choice applies to both simulation and hardware immediately while preserving the current model time. Train speeds and routine durations continue to use real-time timing. Timetable events repeat after the clock returns to `00:00`; scheduled departures are not one-shot events.
 
 The visible world clock updates between dashboard refreshes, using time synchronized with the Python controller. It pauses with the simulation or track power and stops extrapolating when the controller is unavailable. Returning to a backgrounded tab refreshes the controller state immediately.
 
+In **Settings → Operations → Set world clock time**, enter a 24-hour `HH:MM` time and click **Set time**, or click **Reset to 00:00** to return to midnight. These controls apply immediately in simulation and on hardware, even while paused or with track power off. They retain the selected day length and running/paused state. The timetable resumes from the chosen time: events at or before that time are skipped, and departures crossed later are dispatched normally (departures at the chosen minute next occur on the following model day). Rewinding allows future departures to occur again when their time is reached. Existing train movement and routine durations keep their real-time timing.
+
 The controller checks scheduled departures independently of dashboard refreshes. Delayed clock updates process every crossed timetable minute, retaining complete model days when catching up.
+
+**Tick +1 min** advances one real minute's worth of model time: two model hours with a 12-minute day, one model hour with the default 24-minute day, 30 model minutes with a 48-minute day, or one model minute with a 24-hour day. On hardware, the button advances timetable time and processes due departures without fast-forwarding physical movement or running routine durations; track power must be on. In simulation, the selected fast-forward multiplier also applies. Failed requests show an error instead of advancing only the browser's clock.
 
 ### Settings — connection, operation and workspace preferences
 
 Settings includes:
+
+- world clock day length: 12 minutes, 24 minutes (default), 48 minutes, or 24 hours;
 
 - light, dark or device-following theme;
 - compact or comfortable interface density;

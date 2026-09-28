@@ -151,6 +151,7 @@ class ControllerApplication:
     _scheduler_remainder_seconds: float = field(default=0.0, init=False, repr=False)
     _world_clock_seconds: float = field(default=0.0, init=False, repr=False)
     _world_clock_sampled_at: float = field(default_factory=time.monotonic, init=False, repr=False)
+    _world_clock_rate_offset: float = field(default=0.0, init=False, repr=False)
     _world_clock_session: str = field(default_factory=lambda: str(time.time_ns()), init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _presence_state: dict[str, Any] = field(default_factory=lambda: {
@@ -494,14 +495,25 @@ class ControllerApplication:
             }
             if include_settings:
                 result["settings"] = deepcopy(self._settings)
+            result["simulation"] = {
+                "world_clock_seconds": self._world_clock_seconds,
+                **self._world_clock_display_payload(),
+            }
             return result
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             patch = payload.get("settings", payload)
             previous_connected_blocks = self._connected_blocks_enabled()
+            previous_clock_rate = self._world_clock_rate()
+            clock_was_running = self._world_clock_display_payload()["world_clock_running"]
             validated = validate_settings(patch, self._settings)
             self._settings = self._settings_repository.save(validated)
+            if clock_was_running:
+                # Preserve time already elapsed at the old rate, without
+                # executing timetable actions during a settings save.
+                age = max(0.0, time.monotonic() - self._world_clock_sampled_at)
+                self._world_clock_rate_offset += age * (previous_clock_rate - self._world_clock_rate())
             if previous_connected_blocks != self._connected_blocks_enabled():
                 self._sync_runtime_from_ui(apply_motion=False)
             self._routing_wake.set()
@@ -547,7 +559,7 @@ class ControllerApplication:
             if self._motion_thread and self._motion_thread.is_alive():
                 return
             self._motion_stop.clear()
-            self._world_clock_sampled_at = time.monotonic()
+            self._reset_world_clock_sample()
             self._motion_thread = threading.Thread(target=self._motion_loop, name="h0-motion", daemon=True)
             self._motion_thread.start()
 
@@ -878,6 +890,40 @@ class ControllerApplication:
                 scheduler.start(tick=legacy_tick, world_tick=0)
                 events.extend(scheduler.events_at(0))
         return tuple(events)
+
+    def _advance_world_clock_time(self, world_seconds: float) -> tuple[RuntimeScheduleEvent, ...]:
+        previous_world_minute = int(self._world_clock_seconds // 60)
+        self._world_clock_seconds += max(0.0, world_seconds)
+        elapsed_world_minutes = int(self._world_clock_seconds // 60) - previous_world_minute
+        if self.runtime is None:
+            return ()
+        world_target_tick = int(self._world_clock_seconds // 60) % WORLD_DAY_MINUTES
+        current_world_tick = self.runtime.scheduler.world_current_tick % WORLD_DAY_MINUTES
+        world_steps = (world_target_tick - current_world_tick) % WORLD_DAY_MINUTES
+        # Keep complete model days when a clock update crosses midnight.
+        world_steps += (elapsed_world_minutes // WORLD_DAY_MINUTES) * WORLD_DAY_MINUTES
+        return self._advance_repeating_world_schedule(world_steps)
+
+    def _handle_schedule_events(self, schedule_events: tuple[RuntimeScheduleEvent, ...]) -> None:
+        for schedule_event in schedule_events:
+            state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
+            schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]
+            row = next((item for item in self.schedules if item.get("id") == schedule_id), None)
+            if row is not None:
+                row["state"] = state
+                if schedule_event.kind.value == "departure":
+                    dispatch_mode = str(row.get("dispatch_mode", "") or "").lower()
+                    if dispatch_mode == "route" or row.get("route_id"):
+                        self._schedule_route_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
+                    elif dispatch_mode == "coordinate" or row.get("destination_coordinate"):
+                        self._schedule_coordinate_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
+            self._publish_domain_event(ScheduleStateChanged(
+                schedule_id=schedule_id,
+                status=ScheduleStatus.COMPLETED if state == "Arrived" else ScheduleStatus.ACTIVE,
+            ))
+            self.events.append({"type": f"schedule_{schedule_event.kind.value}", "schedule_id": schedule_id,
+                                "stop_id": schedule_event.stop.stop_id, "train_id": schedule_event.stop.train_id,
+                                "tick": schedule_event.tick})
 
     def _apply_speed_policy(self, snapshot: LayoutSnapshot) -> None:
         try:
@@ -1447,6 +1493,26 @@ class ControllerApplication:
         for active_id, run in list(self._playback_runs.items()):
             if train_id is None or active_id == train_id:
                 self._finish_playback(active_id, run, "cancelled", reason)
+        for active_id in list(self._scheduled_routines):
+            if train_id is not None and active_id != train_id:
+                continue
+            self._scheduled_routines.pop(active_id)
+            detail = reason
+            try:
+                if self.runtime is not None:
+                    result = self.runtime.track.stop_train(active_id)
+                    if hasattr(result, "accepted") and not result.accepted:
+                        raise ValueError(result.detail or "scheduled routine stop was rejected")
+            except Exception as exc:
+                detail += f"; could not confirm train stop: {exc}"
+            finally:
+                if self.runtime is not None:
+                    control = self.runtime.dispatcher.register_train(active_id)
+                    control.manual_speed = control.automatic_speed = 0.0
+                train = next((item for item in self.trains if str(item.get("id")) == active_id), None)
+                if train is not None:
+                    train["speed"] = train["requested_speed_kmh"] = 0
+            self.events.append({"type": "schedule_routine_cancelled", "train_id": active_id, "detail": detail})
 
     def _playback_worker(self, train_id: str, run: dict[str, Any]) -> None:
         """Wait outside the request lock, checking cancellation between actions."""
@@ -1878,40 +1944,59 @@ class ControllerApplication:
             raise ValueError(f"Unknown train: {train_id}")
         path = tuple(str(item).upper() for item in route.get("node_ids", ()) if str(item).strip())
         flow = deepcopy(route.get("flow", []))
+        connected_blocks = self._connected_blocks_enabled()
+        plan = self._scheduled_route_plan(route, canonical_train_id)
+        if plan is not None or not connected_blocks:
+            for raw_block in flow:
+                if isinstance(raw_block, dict) and str(raw_block.get("type", raw_block.get("kind", ""))).strip().lower() in {"sync", "sync_locomotive"}:
+                    self._apply_scheduled_route_sync(canonical_train_id, str(raw_block.get("locomotive_id", raw_block.get("train_id", raw_block.get("value", "")))))
         train["scheduled_route_id"] = route_id
         train["scheduled_route_name"] = str(route.get("name", route_id))
-        if self._connected_blocks_enabled() and path:
+        if connected_blocks and path:
             self.runtime.route_updater.set_route(canonical_train_id, path)
             if hasattr(self.runtime.track, "set_train_route"):
                 result = self.runtime.track.set_train_route(canonical_train_id, path)
                 if hasattr(result, "accepted") and not result.accepted:
                     raise ValueError(result.detail or "scheduled route was rejected")
-            self._start_scheduled_movement(canonical_train_id, train)
+            if plan is None:
+                self._start_scheduled_movement(canonical_train_id, train)
             train["destination_block_id"] = path[-1]
             train["route"] = list(path)
             self._publish_domain_event(RouteChanged(train_id=canonical_train_id, route=path))
-        elif not self._connected_blocks_enabled():
-            for raw_block in flow:
-                if isinstance(raw_block, dict) and str(raw_block.get("type", raw_block.get("kind", ""))).strip().lower() in {"sync", "sync_locomotive"}:
-                    self._apply_scheduled_route_sync(canonical_train_id, str(raw_block.get("locomotive_id", raw_block.get("train_id", raw_block.get("value", "")))))
-            plan = self._scheduled_route_plan(route, canonical_train_id)
-            if plan is not None:
-                self._start_scheduled_routine(canonical_train_id, train, plan)
-            elif path:
-                self.events.append({
-                    "type": "schedule_route_block_path_skipped",
-                    "schedule_id": str(schedule.get("id", "")),
-                    "train_id": canonical_train_id,
-                    "route_id": route_id,
-                    "reason": "connected-block dispatch is disabled",
-                })
+        elif connected_blocks and plan is not None:
+            # A routine-only service has no block destination. Clear the
+            # previous service's path so planning cannot replace the routine
+            # with unrelated block movement on the next refresh.
+            motion = next((item for item in self.runtime.track.get_snapshot().trains if item.train_id == canonical_train_id), None)
+            current_block = str((motion.block_id if motion is not None else train.get("block_id", "")) or "").upper()
+            if not current_block:
+                raise ValueError("scheduled routine requires the train's current block")
+            self.runtime.route_updater.release_train(canonical_train_id)
+            self.runtime.route_updater.set_route(canonical_train_id, (current_block,))
+            if hasattr(self.runtime.track, "set_train_route"):
+                result = self.runtime.track.set_train_route(canonical_train_id, (current_block,))
+                if hasattr(result, "accepted") and not result.accepted:
+                    raise ValueError(result.detail or "scheduled routine block was rejected")
+            train["route"] = [current_block]
+            train["destination_block_id"] = current_block
+        if plan is not None:
+            self._start_scheduled_routine(canonical_train_id, train, plan)
+        elif not connected_blocks and path:
+            self.events.append({
+                "type": "schedule_route_block_path_skipped",
+                "schedule_id": str(schedule.get("id", "")),
+                "train_id": canonical_train_id,
+                "route_id": route_id,
+                "reason": "connected-block dispatch is disabled",
+            })
         target = {
             "route_id": route_id,
             "name": str(route.get("name", route_id)),
             "node_ids": [item.lower() for item in path],
             "flow": flow,
             "schedule_id": str(schedule.get("id", "")),
-            "execution_mode": "connected_blocks" if self._connected_blocks_enabled() else "one_block_routines",
+            "execution_mode": ("connected_blocks_routines" if path else "route_routines") if connected_blocks and plan is not None
+                else "connected_blocks" if connected_blocks else "one_block_routines",
         }
         self.events.append({
             "type": "schedule_route_bound", "schedule_id": str(schedule.get("id", "")),
@@ -1948,7 +2033,7 @@ class ControllerApplication:
             raise ValueError(result.detail or "scheduled automatic movement was rejected")
 
     def _start_scheduled_routine(self, train_id: str, train: dict[str, Any], plan: PlaybackPlan) -> None:
-        """Start a compiled route routine in one-block mode."""
+        """Start a compiled timetable routine in either block-dispatch mode."""
 
         if self.runtime is None:
             raise ValueError("controller runtime unavailable")
@@ -2258,11 +2343,20 @@ class ControllerApplication:
         )
         age = max(0.0, time.monotonic() - self._world_clock_sampled_at) if running else 0.0
         return {
-            "world_clock_display_seconds": self._world_clock_seconds + age * 60,
+            "world_clock_display_seconds": self._world_clock_seconds + (age * self._world_clock_rate() + self._world_clock_rate_offset if running else 0.0),
             "world_clock_running": running,
-            "world_clock_rate": 60,
+            "world_clock_rate": self._world_clock_rate(),
+            "world_day_minutes": self._settings["operations"]["world_day_minutes"],
             "world_clock_session": self._world_clock_session,
         }
+
+    def _world_clock_rate(self) -> float:
+        """Model seconds per real second for the chosen real-time day length."""
+        return WORLD_DAY_MINUTES / self._settings["operations"]["world_day_minutes"]
+
+    def _reset_world_clock_sample(self, sampled_at: float | None = None) -> None:
+        self._world_clock_sampled_at = time.monotonic() if sampled_at is None else sampled_at
+        self._world_clock_rate_offset = 0.0
 
     def live_payload(self) -> dict[str, Any]:
         """Return frequently changing dashboard data without large catalogues or images."""
@@ -2895,6 +2989,56 @@ class ControllerApplication:
                 remaining -= count
             return self._ui_snapshot()
 
+    def set_world_clock(self, value: str) -> dict[str, Any]:
+        """Reposition timetable time without replaying departures in the jump."""
+        if not isinstance(value, str) or re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", value) is None:
+            raise ValueError("Choose a world clock time from 00:00 to 23:59 (HH:MM)")
+        hours, minutes = map(int, value.split(":"))
+        target_minutes = hours * 60 + minutes
+        with self._lock:
+            if self.runtime is None or self._closed:
+                raise ValueError("controller runtime unavailable")
+            display = self._world_clock_display_payload()
+            previous_seconds = display["world_clock_display_seconds"]
+            scheduler = self.runtime.scheduler
+            scheduler_was_running = scheduler.running
+            scheduler.reset(tick=scheduler.current_tick, world_tick=target_minutes)
+            if scheduler_was_running:
+                scheduler.start()
+            self._world_clock_seconds = float(target_minutes * 60)
+            # Keep the motion sample intact so a running routine retains its
+            # elapsed real time. Discard only world time before this clock edit.
+            age = max(0.0, time.monotonic() - self._world_clock_sampled_at) if display["world_clock_running"] else 0.0
+            self._world_clock_rate_offset = -age * self._world_clock_rate()
+            # A fresh anchor lets all browser tabs accept backward clock edits.
+            self._world_clock_session = str(time.time_ns())
+            self.events.append({"type": "world_clock_set", "time": value,
+                                "previous_world_seconds": previous_seconds})
+            return self._ui_snapshot()
+
+    def advance_world_clock(self, seconds: float = 60) -> dict[str, Any]:
+        """Advance timetable time without advancing physical motion or routines."""
+        if not math.isfinite(seconds) or not 0 < seconds <= 600:
+            raise ValueError("Choose a positive clock interval of at most 600 real seconds")
+        with self._lock:
+            if self.runtime is None or self._closed:
+                raise ValueError("controller runtime unavailable")
+            if not self.simulation_mode and not self.track_power:
+                raise ValueError("switch track power on before advancing the hardware timetable")
+            scheduler_was_running = self.runtime.scheduler.running
+            if not scheduler_was_running:
+                self.runtime.scheduler.start()
+            try:
+                schedule_events = self._advance_world_clock_time(seconds * self._world_clock_rate())
+                self._handle_schedule_events(schedule_events)
+                self._sync_ui_from_runtime()
+                self.events.append({"type": "world_clock_advanced", "real_seconds": seconds,
+                                    "world_seconds": seconds * self._world_clock_rate()})
+                return self._ui_snapshot()
+            finally:
+                if not scheduler_was_running:
+                    self.runtime.scheduler.pause()
+
     def tick(
         self, steps: int = 1, *, elapsed_seconds: float | None = None,
         force: bool = False, clock_sampled_at: float | None = None,
@@ -2924,12 +3068,11 @@ class ControllerApplication:
                     else:
                         schedule_events = ()
                 else:
-                    # One real second advances the model world by one minute.
-                    # That produces a 24-minute model day while the simulation
-                    # clock continues to show ordinary elapsed seconds.
-                    previous_world_minute = int(self._world_clock_seconds // 60)
-                    self._world_clock_seconds += max(0.0, elapsed_seconds) * 60
-                    elapsed_world_minutes = int(self._world_clock_seconds // 60) - previous_world_minute
+                    # The selected day length scales timetable time only;
+                    # train movement and routine duration use elapsed seconds.
+                    world_elapsed = max(0.0, elapsed_seconds) * self._world_clock_rate()
+                    if clock_sampled_at is not None:
+                        world_elapsed += self._world_clock_rate_offset
                     schedule_steps = 0
                     if self.runtime.scheduler.running:
                         self._scheduler_remainder_seconds += elapsed_seconds
@@ -2938,35 +3081,9 @@ class ControllerApplication:
                         # Keep the legacy simulation-minute counter available
                         # for explicit diagnostics and existing integrations.
                         self.runtime.scheduler.advance(schedule_steps)
-                    # The scheduler is reset to minute 0 at a model-day
-                    # boundary, while the UI counter remains absolute.
-                    world_target_tick = int(self._world_clock_seconds // 60) % WORLD_DAY_MINUTES
-                    current_world_tick = self.runtime.scheduler.world_current_tick % WORLD_DAY_MINUTES
-                    world_steps = (world_target_tick - current_world_tick) % WORLD_DAY_MINUTES
-                    # Modulo identifies the time of day, but must not discard
-                    # complete model days crossed by a delayed controller cycle.
-                    world_steps += (elapsed_world_minutes // WORLD_DAY_MINUTES) * WORLD_DAY_MINUTES
-                    schedule_events = self._advance_repeating_world_schedule(world_steps)
-                self._world_clock_sampled_at = time.monotonic() if clock_sampled_at is None else clock_sampled_at
-                for schedule_event in schedule_events:
-                    state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
-                    schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]
-                    row = next((item for item in self.schedules if item.get("id") == schedule_id), None)
-                    if row is not None:
-                        row["state"] = state
-                        if schedule_event.kind.value == "departure":
-                            dispatch_mode = str(row.get("dispatch_mode", "") or "").lower()
-                            if dispatch_mode == "route" or row.get("route_id"):
-                                self._schedule_route_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
-                            elif dispatch_mode == "coordinate" or row.get("destination_coordinate"):
-                                self._schedule_coordinate_target(row, schedule_event.stop.stop_id, schedule_event.stop.train_id)
-                    self._publish_domain_event(
-                        ScheduleStateChanged(
-                            schedule_id=schedule_id,
-                            status=ScheduleStatus.COMPLETED if state == "Arrived" else ScheduleStatus.ACTIVE,
-                        )
-                    )
-                    self.events.append({"type": f"schedule_{schedule_event.kind.value}", "schedule_id": schedule_id, "stop_id": schedule_event.stop.stop_id, "train_id": schedule_event.stop.train_id, "tick": schedule_event.tick})
+                    schedule_events = self._advance_world_clock_time(world_elapsed)
+                self._reset_world_clock_sample(clock_sampled_at)
+                self._handle_schedule_events(schedule_events)
                 if force and self.simulation_mode and not scheduler_was_running:
                     self.runtime.scheduler.pause()
                 self._sync_ui_from_runtime()
@@ -3914,7 +4031,7 @@ class ControllerApplication:
                         raise ValueError(result.detail or "track power command rejected")
                 self.track_power = requested_power
                 if requested_power and not previous_power:
-                    self._world_clock_sampled_at = time.monotonic()
+                    self._reset_world_clock_sample()
                 if not requested_power:
                     for train in self.trains:
                         train["mode"] = ControlMode.STOPPED.value
@@ -4616,7 +4733,7 @@ class ControllerApplication:
                 schedule_events = self.runtime.scheduler.simulate_world(until_tick) if self.runtime is not None else ()
                 self.runtime.scheduler.current_tick = until_tick
                 self._world_clock_seconds = max(self._world_clock_seconds, until_tick * 60)
-                self._world_clock_sampled_at = time.monotonic()
+                self._reset_world_clock_sample()
                 for schedule_event in schedule_events:
                     state = "Arrived" if schedule_event.kind.value == "arrival" else "Departed"
                     schedule_id = str(schedule_event.stop.stop_id).split("#", 1)[0]
@@ -4667,7 +4784,7 @@ class ControllerApplication:
                         self.runtime.scheduler.pause()
                 elif kind == "resume_simulation":
                     self.simulation_running = True
-                    self._world_clock_sampled_at = time.monotonic()
+                    self._reset_world_clock_sample()
                     if self.runtime is not None:
                         self.runtime.scheduler.start()
                 elif kind == "set_mode" and self.runtime is not None:
@@ -4822,6 +4939,15 @@ class ControllerHandler(BaseHTTPRequestHandler):
                 return self._send_json(self.application.upload_scan(self._read_json(max_bytes=MAX_UPLOAD_BODY_BYTES)), HTTPStatus.CREATED)
             if parsed.path == "/api/commands":
                 return self._send_json(self.application.command(self._read_json()))
+            if parsed.path == "/api/world-clock/advance":
+                payload = self._read_json()
+                return self._send_json(self.application.advance_world_clock(float(payload.get("seconds", 60))))
+            if parsed.path == "/api/world-clock/set":
+                payload = self._read_json()
+                return self._send_json(self.application.set_world_clock(payload.get("time")))
+            if parsed.path == "/api/world-clock/reset":
+                self._read_json()
+                return self._send_json(self.application.set_world_clock("00:00"))
             if parsed.path == "/api/train-catalogue":
                 payload = self._read_json()
                 content = payload.get("content", payload.get("catalogue", payload.get("trains")))
