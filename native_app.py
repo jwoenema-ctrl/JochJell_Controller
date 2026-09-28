@@ -96,7 +96,7 @@ def main():
             assert window.evaluate_js("document.querySelector('#direction-reverse').getAttribute('aria-pressed')") == 'true'
             window.evaluate_js("document.querySelector('[data-workspace=\"layout\"]').click()")
             assert window.evaluate_js("getComputedStyle(document.querySelector('#layout-info-panel')).display") != 'none'
-            assert window.evaluate_js("document.querySelector('#layout-info-metrics').textContent.includes('Route operations')")
+            assert window.evaluate_js("document.querySelector('#layout-info-counts').textContent.includes('Active routes')"), 'Layout information did not show the active route count'
             assert not window.evaluate_js("document.querySelector('#block-id').readOnly")
             window.evaluate_js("document.querySelector('[data-workspace=\"settings\"]').click()")
             assert window.evaluate_js("typeof window.pywebview.api.switch_mode") == "function"
