@@ -145,6 +145,8 @@ The simulation world clock advances faster than real time. One real second advan
 
 The visible world clock updates between dashboard refreshes, using time synchronized with the Python controller. It pauses with the simulation or track power and stops extrapolating when the controller is unavailable. Returning to a backgrounded tab refreshes the controller state immediately.
 
+The controller checks scheduled departures independently of dashboard refreshes. Delayed clock updates process every crossed timetable minute, retaining complete model days when catching up.
+
 ### Settings — connection, operation and workspace preferences
 
 Settings includes:

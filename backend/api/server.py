@@ -2927,7 +2927,9 @@ class ControllerApplication:
                     # One real second advances the model world by one minute.
                     # That produces a 24-minute model day while the simulation
                     # clock continues to show ordinary elapsed seconds.
+                    previous_world_minute = int(self._world_clock_seconds // 60)
                     self._world_clock_seconds += max(0.0, elapsed_seconds) * 60
+                    elapsed_world_minutes = int(self._world_clock_seconds // 60) - previous_world_minute
                     schedule_steps = 0
                     if self.runtime.scheduler.running:
                         self._scheduler_remainder_seconds += elapsed_seconds
@@ -2941,6 +2943,9 @@ class ControllerApplication:
                     world_target_tick = int(self._world_clock_seconds // 60) % WORLD_DAY_MINUTES
                     current_world_tick = self.runtime.scheduler.world_current_tick % WORLD_DAY_MINUTES
                     world_steps = (world_target_tick - current_world_tick) % WORLD_DAY_MINUTES
+                    # Modulo identifies the time of day, but must not discard
+                    # complete model days crossed by a delayed controller cycle.
+                    world_steps += (elapsed_world_minutes // WORLD_DAY_MINUTES) * WORLD_DAY_MINUTES
                     schedule_events = self._advance_repeating_world_schedule(world_steps)
                 self._world_clock_sampled_at = time.monotonic() if clock_sampled_at is None else clock_sampled_at
                 for schedule_event in schedule_events:
