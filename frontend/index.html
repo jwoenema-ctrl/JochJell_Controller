@@ -40,12 +40,6 @@
       </div>
     </header>
 
-    <div class="sync-ribbon" id="sync-ribbon" role="status" aria-live="polite">
-      <span class="ribbon-icon">◌</span>
-      <span id="sync-message">Loading control state…</span>
-      <span class="ribbon-time" id="sync-time">—</span>
-    </div>
-
     <main class="dashboard">
       <aside class="sidebar">
         <section class="panel control-panel">
@@ -82,7 +76,7 @@
               <p class="eyebrow">SELECTED TRAIN</p>
               <h2 id="selected-train-name">IC 184 Aurora</h2>
             </div>
-            <span class="train-badge" id="selected-train-badge">184</span>
+            <input class="train-badge" id="selected-train-badge" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" value="184" placeholder="DCC" autocomplete="off" spellcheck="false" aria-label="Select train by DCC address" title="Type a saved DCC address to select a train. Enter confirms; Escape cancels.">
           </div>
           <div class="selected-train-route">
             <span id="selected-train-origin">Amsterdam Centraal</span><span class="route-line"></span><span id="selected-train-destination">Utrecht</span>
@@ -151,18 +145,22 @@
             <span class="health-score" id="health-score">Checking</span>
           </div>
           <div class="health-list">
-            <div class="health-row"><span class="health-check">✓</span><span>State controller</span><span class="health-value">Ready</span></div>
+            <div class="health-row health-sync-status" id="sync-ribbon" role="status" aria-live="polite">
+              <span class="ribbon-icon" aria-hidden="true">◌</span>
+              <div><span id="sync-message">Loading control state…</span><span class="ribbon-time">Last sync <time id="health-sync">—</time></span></div>
+            </div>
             <div class="health-row"><span class="health-check">✓</span><span>Route planner</span><span class="health-value">A* / BFS</span></div>
             <div class="health-row"><span class="health-check">✓</span><span>Block feedback</span><span class="health-value" id="feedback-health">Simulated</span></div>
             <div class="health-row"><span class="health-check warning">!</span><span>Connection checker</span><span class="health-value" id="checker-health">Standby</span></div>
+            <div class="health-row health-connection-status"><span class="health-connection-dot" aria-hidden="true"></span><span id="health-source">Embedded sample state</span></div>
           </div>
+          <div class="health-app-info"><span>JochJell Controller</span><span>JochJell · v0.2.14 · local workspace</span></div>
         </section>
       </aside>
 
       <section class="workspace" aria-label="Controller workspace">
         <div class="workspace-heading">
           <div>
-            <p class="eyebrow" id="workspace-context">YOUR RAILWAY</p>
             <h2 id="workspace-title" tabindex="-1">Dispatch</h2>
           </div>
           <div class="workspace-tools">
@@ -181,9 +179,21 @@
         </nav>
         <section class="panel layout-info" id="layout-info-panel" aria-labelledby="layout-info-title">
           <div class="layout-info-heading"><h3 id="layout-info-title">Layout information</h3><button type="button" class="button button-soft" id="layout-power-toggle">Power off</button></div>
-          <div id="layout-info-metrics" class="layout-info-metrics"></div>
-          <p id="layout-info-trains"></p>
-          <small id="layout-info-note"></small>
+          <div id="layout-info-metrics">
+            <div class="layout-info-power"><span class="layout-power-status" id="layout-power-status" data-state="unknown"><i aria-hidden="true"></i><strong id="layout-track-power">Track power unknown</strong></span><span id="layout-power-source">Waiting for controller</span></div>
+            <div id="layout-info-counts" class="layout-info-metrics"></div>
+            <p class="layout-info-alert" id="layout-info-alert" role="status" hidden></p>
+            <details class="layout-info-details">
+              <summary><span>Train details</span><span class="layout-info-summary" id="layout-train-modes">—</span></summary>
+              <ul class="layout-info-train-list" id="layout-info-trains"></ul>
+              <p class="layout-info-note">Positions use controller assignments and available track feedback.</p>
+            </details>
+            <details class="layout-info-details">
+              <summary><span>Electrical readings</span><span class="layout-info-summary" id="layout-electrical-summary">Unavailable</span></summary>
+              <dl class="layout-info-readings" id="layout-info-readings"></dl>
+              <p class="layout-info-note" id="layout-info-note"></p>
+            </details>
+          </div>
         </section>
         <section class="panel map-panel" id="layout-panel">
           <div class="map-toolbar">
@@ -365,13 +375,22 @@
             </div>
             <div class="train-table-head"><span>TRAIN</span><span>POSITION</span><span>STATUS</span><span>SPEED</span></div>
             <div class="train-list" id="train-list"></div>
-            <p class="settings-status train-presence-status" id="train-presence-status" role="status">No train presence scan run yet.</p>
+            <div class="train-presence-status" id="train-presence-status" data-state="idle" role="status" aria-live="polite" aria-atomic="true">
+              <div class="train-presence-heading"><strong>Train presence scan</strong><span class="train-presence-badge" id="train-presence-state">Not scanned</span></div>
+              <p id="train-presence-message">Use “Ping saved DCC IDs” to check your saved train addresses.</p>
+              <div class="train-presence-results" id="train-presence-results" hidden>
+                <span data-result="detected"><strong id="train-presence-detected">0</strong> Detected</span>
+                <span data-result="unknown"><strong id="train-presence-unknown">0</strong> Unknown</span>
+                <span data-result="errors"><strong id="train-presence-errors">0</strong> Errors</span>
+              </div>
+              <p class="train-presence-note" id="train-presence-note" hidden></p>
+            </div>
           </section>
 
           <section class="panel train-editor-panel" id="train-editor-panel">
             <div class="panel-heading">
               <div><p class="eyebrow">TRAIN PROFILE</p><h2>Settings & data sheet</h2></div>
-              <div class="panel-heading-actions"><button type="button" class="text-button danger-text" id="remove-train">Remove train</button><button class="icon-button small" id="close-editor" title="Collapse train editor">×</button></div>
+              <div class="panel-heading-actions"><button type="button" class="text-button danger-text" id="remove-train">Remove train</button><button type="button" class="icon-button small" id="close-editor" title="Collapse train profile" aria-label="Collapse train profile" aria-expanded="true" aria-controls="train-editor-panel"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
             </div>
             <div class="editor-tabs">
               <button class="editor-tab is-active" data-editor-tab="datasheet">Data sheet</button>
@@ -386,15 +405,17 @@
           <section class="panel rolling-stock-panel" id="rolling-stock-panel">
             <div class="panel-heading">
               <div><p class="eyebrow">FLEET INVENTORY</p><h2>Rolling stock</h2></div>
-              <span class="tiny-status" id="inventory-summary">0 vehicles</span>
+              <div class="inventory-toolbar">
+                <label class="inventory-search"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><input id="inventory-search" type="search" placeholder="Search catalogue…" aria-label="Search inventory by catalogue, length or type"></label>
+                <span class="tiny-status" id="inventory-summary">0 vehicles</span>
+              </div>
             </div>
             <div class="inventory-editor">
-              <input id="inventory-search" placeholder="Search catalogue, length or type" aria-label="Search rolling stock inventory">
-              <input id="inventory-id" placeholder="Catalogue ID" aria-label="Rolling stock catalogue ID">
-              <input id="inventory-name" placeholder="Name" aria-label="Rolling stock name">
-              <select id="inventory-type" aria-label="Rolling stock type"><option value="coach">Coach</option><option value="wagon">Wagon</option><option value="locomotive">Locomotive</option><option value="vehicle">Vehicle</option></select>
-              <input id="inventory-length" type="number" min="0" step="0.1" placeholder="Length (mm)" aria-label="Rolling stock length in millimetres">
-              <input id="inventory-quantity" type="number" min="0" step="1" value="0" aria-label="Rolling stock quantity">
+              <label for="inventory-id">Catalogue ID<input id="inventory-id" placeholder="e.g. Roco 44780" autocomplete="off"></label>
+              <label for="inventory-name">Name<input id="inventory-name" placeholder="Vehicle name"></label>
+              <label for="inventory-type">Type<select id="inventory-type"><option value="coach">Coach</option><option value="wagon">Wagon</option><option value="locomotive">Locomotive</option><option value="vehicle">Vehicle</option></select></label>
+              <label for="inventory-length">Length (mm)<input id="inventory-length" type="number" min="0" step="0.1" placeholder="e.g. 264"></label>
+              <label for="inventory-quantity">Quantity<input id="inventory-quantity" type="number" min="0" step="1" value="0"></label>
               <button type="button" class="button button-soft" id="save-inventory">Save quantity</button>
             </div>
             <div class="inventory-list" id="inventory-list"></div>
@@ -519,10 +540,6 @@
       </div>
     </section>
 
-    <footer class="footer-bar">
-      <span>JochJell Controller <span class="footer-muted">· JochJell · v0.2.13 · local workspace</span></span>
-      <span><span class="footer-indicator"></span> <span id="footer-source">Embedded sample state</span> <span class="footer-muted">·</span> Last sync <span id="footer-sync">—</span></span>
-    </footer>
   </div>
 
   <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>

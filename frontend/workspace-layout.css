@@ -1,9 +1,39 @@
 /* Load after minimal.css. Nodes are rearranged in DOM order for keyboard users. */
-.workspace-layout-enabled > .workspace { display: flex; flex-direction: column; gap: 20px; }
+.workspace-layout-enabled > .workspace { display: flex; flex-direction: column; gap: 20px; container-type: inline-size; container-name: controller-workspace; }
 .workspace-layout-enabled > .workspace > .lower-grid,
 .workspace-layout-enabled > .workspace > .bottom-grid { display: none !important; }
 .workspace-layout-enabled > .workspace > .panel { margin-top: 0; margin-bottom: 0; flex-shrink: 0; }
 .workspace-layout-enabled > .workspace > .workspace-heading { margin-bottom: 0; }
+.workspace-layout-enabled > .workspace > .trains-subnav { flex-shrink: 0; margin-bottom: 0; }
+.automation-planning-panels,
+.home-overview-panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 20px; min-width: 0; flex-shrink: 0; }
+.automation-planning-panels > .panel,
+.home-overview-panels > .panel { min-width: 0; margin: 0; }
+.home-overview-panels .layout-info-heading { flex-wrap: wrap; }
+.automation-planning-panels .automation-studio-toolbar label { min-width: 0; }
+.automation-planning-panels .automation-studio-toolbar input,
+.automation-planning-panels .automation-studio-toolbar select { width: 100%; min-width: 0; }
+body[data-workspace="layout"] .workspace-layout-enabled { grid-template-columns: 340px minmax(0, 1fr); }
+body[data-workspace="layout"] .workspace-layout-enabled > .workspace { grid-column: 2; grid-row: 1; }
+.automation-sidebar { display: flex; flex-direction: column; gap: 16px; grid-column: 1; grid-row: 1; min-width: 0; }
+.automation-sidebar > .panel { min-width: 0; margin: 0; flex-shrink: 0; }
+.automation-sidebar:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
+.automation-sidebar .layout-info { padding: 16px 14px; }
+.automation-sidebar .layout-info-heading { flex-wrap: wrap; margin-bottom: 14px; }
+.automation-sidebar .layout-info-metrics { gap: 12px; }
+.automation-sidebar .layout-info-metrics strong { font-size: 18px; }
+.automation-sidebar .layout-info small { font-size: 11px; line-height: 1.5; }
+:is(.automation-sidebar, .home-overview-panels) .panel-heading { flex-wrap: wrap; gap: 10px; padding: 16px 14px; }
+:is(.automation-sidebar, .home-overview-panels) .panel-heading h2 { font-size: 15px; }
+:is(.automation-sidebar, .home-overview-panels) .panel-heading-actions { width: 100%; justify-content: flex-start; gap: 8px 12px; }
+:is(.automation-sidebar, .home-overview-panels) .schedule-header { display: none; }
+:is(.automation-sidebar, .home-overview-panels) .schedule-row { grid-template-columns: 48px minmax(0, 1fr) 64px; gap: 6px 8px; padding: 12px 14px; }
+:is(.automation-sidebar, .home-overview-panels) .schedule-row .schedule-time { grid-column: 1; grid-row: 1; align-self: start; padding-top: 3px; }
+:is(.automation-sidebar, .home-overview-panels) .schedule-row .schedule-service { grid-column: 2; grid-row: 1; }
+:is(.automation-sidebar, .home-overview-panels) .schedule-row .schedule-route { grid-column: 2 / 4; grid-row: 2; }
+:is(.automation-sidebar, .home-overview-panels) .schedule-row .platform-tag { grid-column: 1; grid-row: 3; justify-self: start; }
+:is(.automation-sidebar, .home-overview-panels) .schedule-row .schedule-state { grid-column: 2 / 4; grid-row: 3; }
+:is(.automation-sidebar, .home-overview-panels) .schedule-row .schedule-actions { grid-column: 3; grid-row: 1; }
 body[data-workspace="dispatch"] .workspace-layout-enabled[data-control-side="right"],
 body[data-workspace="trains"] .workspace-layout-enabled[data-control-side="right"] { grid-template-columns: minmax(0, 1fr) 278px; }
 .workspace-layout-settings h4 { font-size: 14px; margin: 20px 0 10px; }
@@ -16,9 +46,28 @@ body[data-workspace="trains"] .workspace-layout-enabled[data-control-side="right
 .workspace-layout-settings button:focus-visible,
 .workspace-layout-settings select:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
 .workspace-layout-settings button:disabled { opacity: .45; cursor: default; }
+@media (min-width: 1101px) {
+  .automation-sidebar {
+    position: sticky;
+    top: 10px;
+    align-self: start;
+    max-height: calc(100vh - 20px);
+    max-height: calc(100dvh - 20px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+}
 @media (max-width: 1100px) {
+  .automation-planning-panels,
+  .home-overview-panels { grid-template-columns: minmax(0, 1fr); }
+  body[data-workspace="layout"] .workspace-layout-enabled { grid-template-columns: minmax(0, 1fr); }
+  body[data-workspace="layout"] .workspace-layout-enabled > .workspace { grid-column: 1; grid-row: 2; }
   body[data-workspace="dispatch"] .workspace-layout-enabled[data-control-side],
   body[data-workspace="trains"] .workspace-layout-enabled[data-control-side] { grid-template-columns: minmax(0, 1fr); }
+}
+@container controller-workspace (max-width: 900px) {
+  .automation-planning-panels,
+  .home-overview-panels { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 480px) {
   .workspace-panel-order li { flex-wrap: wrap; }

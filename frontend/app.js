@@ -177,6 +177,7 @@
   // A dial draft is separate from measured speed: requesting zero is not proof
   // that a locomotive has stopped. Only acknowledged state unlocks direction.
   let speedTimer = null;
+  let trainAddressTimer = null;
   let speedEpoch = 0;
   let speedDraft = null;
   let speedInFlight = Promise.resolve();
@@ -839,8 +840,7 @@
 
   function updateSync(message, tone) {
     $('#sync-message').textContent = message;
-    $('#sync-time').textContent = `Updated ${nowTime()}`;
-    $('#footer-sync').textContent = nowTime();
+    $('#health-sync').textContent = nowTime();
     $('#sync-ribbon').dataset.tone = tone || '';
   }
 
@@ -1113,7 +1113,7 @@
     $('#inventory-summary').textContent = `${total} vehicle${total === 1 ? '' : 's'}`;
     const query = String($('#inventory-search')?.value || '').trim().toLowerCase();
     const filtered = items.filter((item) => !query || [item.id, item.name, item.type, item.manufacturer, item.model, item.length_mm].some((value) => String(value ?? '').toLowerCase().includes(query)));
-    host.innerHTML = filtered.length ? filtered.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}${item.length_mm ? ` · ${escapeHtml(item.length_mm)} mm` : ''}</small></span><span class="inventory-type">${escapeHtml(item.type || 'rolling stock')}</span><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : `<div class="empty-state">${query ? 'No catalogue entries match that search.' : 'No rolling stock is assigned to a saved consist yet.'}</div>`;
+    host.innerHTML = filtered.length ? filtered.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}${item.length_mm ? ` · ${escapeHtml(item.length_mm)} mm` : ''}</small></span><span class="inventory-type">${escapeHtml(item.type || 'rolling stock')}</span><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : `<div class="inventory-empty">${query ? 'No catalogue entries match that search.' : 'No rolling stock in your inventory yet.'}</div>`;
   }
 
   async function saveInventory() {
@@ -1473,13 +1473,23 @@
     $('#health-score').textContent = feedbackFailed ? 'Check' : connection.simulated ? 'Simulation' : connection.connected ? 'Online' : 'Offline';
     $('#feedback-health').textContent = feedbackFailed ? 'Unavailable' : connection.connected ? 'Live feedback' : connection.simulated ? 'Simulated' : 'Unknown';
     $('#checker-health').textContent = feedbackFailed ? 'Safe stop required' : connection.connected ? 'Verified' : 'Standby';
-    $('#footer-source').textContent = feedbackFailed ? 'Feedback unavailable · safe stop' : connection.connected ? 'Z21 API connected' : connection.simulated ? 'Simulation API' : 'Embedded sample state';
-    $('.footer-indicator').style.background = feedbackFailed ? 'var(--red)' : connection.connected ? 'var(--green)' : 'var(--yellow)';
+    $('#health-source').textContent = feedbackFailed ? 'Feedback unavailable · safe stop' : connection.connected ? 'Z21 API connected' : connection.simulated ? 'Simulation API' : 'Embedded sample state';
+    $('.health-connection-dot').style.background = feedbackFailed ? 'var(--red)' : connection.connected ? 'var(--green)' : 'var(--yellow)';
   }
 
   function renderSidebar() {
     renderWorldClock();
     const train = selectedTrain();
+    const addressInput = $('#selected-train-badge');
+    addressInput.disabled = !train;
+    // Preserve a focused address draft during polling, but update it when
+    // selection changes through another control or the roster is replaced.
+    if (!train || document.activeElement !== addressInput || addressInput.dataset.trainId !== String(train.id)) {
+      clearTimeout(trainAddressTimer);
+      addressInput.value = String(train?.number || '');
+      addressInput.dataset.trainId = train ? String(train.id) : '';
+      addressInput.removeAttribute('aria-invalid');
+    }
     if (!train) return;
     const selectedMode = trainControlMode(train);
     app.controlMode = selectedMode === 'stopped' ? 'safe' : selectedMode;
@@ -1492,7 +1502,6 @@
     });
     $('#direction-status').textContent = app.directionPending ? 'Sending direction…' : app.speedSending ? 'Waiting for speed confirmation…' : trainControlMode(train) === 'automatic' ? 'Switch this train to manual to change direction.' : Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 ? 'Stop and wait for the train to halt before reversing.' : 'Choose decoder direction. Speed stays at zero.';
     $('#selected-train-name').textContent = train.name || `Train ${train.number || ''}`;
-    $('#selected-train-badge').textContent = train.number || '—';
     $('#selected-train-origin').textContent = train.origin || 'Origin';
     $('#selected-train-destination').textContent = train.destination || 'Destination';
     const dialSpeed = speedChoices.has(train.id) ? speedChoices.get(train.id) : Number(train.speed) || 0;
@@ -2659,14 +2668,34 @@
       return `<button class="train-row ${train.id === app.selectedTrainId ? 'is-selected' : ''}" data-train-id="${escapeHtml(train.id)}"><span class="train-cell-main"><strong>${escapeHtml(train.name || `Train ${train.number}`)}</strong><small>${escapeHtml(mode)} · #${escapeHtml(train.number || '—')}${destination ? ` · → ${escapeHtml(destination)}` : ''}</small></span><span class="train-position">${escapeHtml(train.position || '—')}</span><span class="train-status ${train.status === 'Delayed' ? 'warning' : ''}"><i class="signal-dot ${train.status === 'Delayed' ? 'yellow' : 'green'}"></i>${escapeHtml(train.status || 'Unknown')}</span><span class="train-speed">${Math.round(Number(train.speed) || 0)}<small> km/h</small></span></button>`;
     }).join('') : `<div class="empty-state">${empty}</div>`;
     $$('.train-row', $('#train-list')).forEach((row) => row.addEventListener('click', () => selectTrain(row.dataset.trainId)));
+    renderTrainPresence();
+  }
+
+  function renderTrainPresence() {
     const presence = app.state.presence || {};
     const summary = presence.summary || {};
     const stationKnown = (presence.results || []).filter((item) => item.response && item.response.known_to_station).length;
-    $('#train-presence-status').textContent = presence.running
-      ? 'Scanning saved DCC IDs… the controller remains responsive.'
-      : summary.total
-      ? summary.detected + ' detected · ' + summary.unknown + ' unknown · ' + summary.errors + ' errors.' + (stationKnown ? ` ${stationKnown} known to Z21 only; RailCom is required for physical detection.` : ' Presence is based on available track feedback.')
-      : 'No train presence scan run yet.';
+    const total = Number(summary.total) || 0;
+    const errors = Number(summary.errors) || 0;
+    const completed = Boolean(presence.completed_at || total || errors || presence.error);
+    const state = presence.running ? 'running' : presence.error ? 'error' : completed ? (errors ? 'warning' : 'complete') : 'idle';
+    const label = { idle: 'Not scanned', running: 'Scanning…', error: 'Scan failed', warning: 'Needs attention', complete: 'Scan complete' }[state];
+    const message = presence.running ? 'Checking saved DCC addresses. Results will appear here.'
+      : presence.error ? 'The scan could not finish. Try scanning again.'
+      : completed ? (total ? `Checked ${total} saved DCC ${total === 1 ? 'address' : 'addresses'}.` : 'No saved train addresses were available to scan.')
+      : 'Use “Ping saved DCC IDs” to check your saved train addresses.';
+    const note = presence.running || !completed ? '' : presence.error ? String(presence.error)
+      : stationKnown ? `${stationKnown} known to Z21 only. RailCom is required to confirm physical presence.`
+      : total ? 'Detection uses available track feedback. Unknown means presence could not be confirmed.' : '';
+    $('#train-presence-status').dataset.state = state;
+    [
+      ['#train-presence-state', label], ['#train-presence-message', message], ['#train-presence-note', note],
+      ['#train-presence-detected', String(Number(summary.detected) || 0)],
+      ['#train-presence-unknown', String(Number(summary.unknown) || 0)], ['#train-presence-errors', String(errors)]
+    ].forEach(([selector, text]) => { const element = $(selector); if (element.textContent !== text) element.textContent = text; });
+    $('#train-presence-results').hidden = Boolean(presence.running || !completed || !total);
+    $('#train-presence-note').hidden = !note;
+    $('#train-presence-errors').parentElement.dataset.hasErrors = String(errors > 0);
   }
 
   function trainDataCollections(train) {
@@ -3565,19 +3594,25 @@
     const info = app.state.layout_info;
     $('#route-count').textContent = info ? info.active_routes : '—';
     const power = info && info.power || {};
+    const powered = Boolean(power.available ? power.track_power : app.state.track_power);
+    $('#layout-track-power').textContent = info ? `Track power ${powered ? 'on' : 'off'}` : 'Track power unknown';
+    $('#layout-power-status').dataset.state = !info ? 'unknown' : power.short_circuit ? 'fault' : powered ? 'on' : 'off';
+    $('#layout-power-source').textContent = !info ? 'Waiting for controller' : power.available ? 'Z21 reported' : app.state.connection.simulated ? 'Simulation' : 'Commanded state';
     const metrics = [
-      ['Track power', !info ? 'Unknown' : power.available ? (power.track_power ? 'On' : 'Off') : (app.state.track_power ? 'On' : 'Off'), power.available ? 'Z21 reported' : app.state.connection.simulated ? 'Simulation' : 'Commanded state'],
-      ['Consumption', power.available ? power.estimated_watts.toFixed(1) + ' W' : 'Unavailable', power.available ? 'Estimated track load' : power.reason || 'No readings'],
-      ['Current / voltage', power.available ? power.current_a.toFixed(2) + ' A / ' + power.voltage_v.toFixed(1) + ' V' : '—', power.short_circuit ? 'Short circuit detected' : 'Z21 measurements'],
-      ['Trains on track', info ? info.train_count : '—', 'Assigned positions'],
-      ['Blocks occupied', info ? info.occupied_blocks + ' / ' + info.block_count : '—', 'Occupied / total'],
-      ['Manual trains', info ? info.manual_trains : '—', 'Manual control'],
-      ['Automatic trains', info ? info.automatic_trains : '—', 'Automatic control'],
-      ['Route operations', info ? info.active_routes : '—', 'Executing or waiting for clearance']
+      ['Trains', info ? info.train_count : '—'],
+      ['Occupied blocks', info ? info.occupied_blocks + ' / ' + info.block_count : '—'],
+      ['Active routes', info ? info.active_routes : '—']
     ];
-    $('#layout-info-metrics').innerHTML = metrics.map(([label, value, note]) => '<div><small>' + escapeHtml(label) + '</small><strong>' + escapeHtml(String(value)) + '</strong><small>' + escapeHtml(note) + '</small></div>').join('');
-    $('#layout-info-trains').textContent = info ? (info.trains.length ? info.trains.map(t => t.name + ' · ' + t.block_id + ' (' + t.mode + ')').join('  |  ') : 'No trains assigned to the track.') : 'Waiting for controller information.';
-    $('#layout-info-note').textContent = (info ? info.stopped_trains + ' stopped · ' : '') + 'Positions are controller assignments, with occupancy feedback where available. Power readings are not mains energy usage.';
+    $('#layout-info-counts').innerHTML = metrics.map(([label, value]) => '<div><small>' + escapeHtml(label) + '</small><strong>' + escapeHtml(String(value)) + '</strong></div>').join('');
+    $('#layout-train-modes').textContent = info ? `${info.automatic_trains} auto · ${info.manual_trains} manual${info.stopped_trains ? ` · ${info.stopped_trains} stopped` : ''}` : '—';
+    $('#layout-info-trains').innerHTML = info && info.trains.length ? info.trains.map(t => '<li><span>' + escapeHtml(t.name) + '</span><small>' + escapeHtml(t.block_id) + ' · ' + escapeHtml(t.mode) + '</small></li>').join('') : '<li>' + (info ? 'No trains assigned to the track.' : 'Waiting for controller information.') + '</li>';
+    const reading = (value, precision, unit) => power.available && value != null && Number.isFinite(Number(value)) ? Number(value).toFixed(precision) + ' ' + unit : '—';
+    const consumption = reading(power.estimated_watts, 1, 'W');
+    $('#layout-electrical-summary').textContent = power.available ? consumption : 'Unavailable';
+    $('#layout-info-readings').innerHTML = [['Consumption', consumption], ['Current', reading(power.current_a, 2, 'A')], ['Voltage', reading(power.voltage_v, 1, 'V')]].map(([label, value]) => '<div><dt>' + label + '</dt><dd>' + value + '</dd></div>').join('');
+    $('#layout-info-note').textContent = power.available ? 'Estimated track load. Mains energy use is not measured.' : power.reason || 'No power readings available.';
+    $('#layout-info-alert').textContent = power.short_circuit ? 'Short circuit detected.' : '';
+    $('#layout-info-alert').hidden = !power.short_circuit;
     $('#layout-power-toggle').textContent = app.powerPending ? 'Changing power…' : app.state.track_power ? 'Power off' : 'Power on';
     $('#layout-power-toggle').disabled = Boolean(app.powerPending);
     const block = selectedBlock();
@@ -3689,7 +3724,6 @@
     $('.search-box').classList.toggle('is-hidden', !['dispatch', 'trains'].includes(page));
     const titles = { dispatch: 'Home', layout: 'Automation', trains: 'Your trains', timetable: 'Timetable', scans: '3D workspace' };
     $('#workspace-title').textContent = titles[page] || 'Settings';
-    $('#workspace-context').textContent = `${app.state.layout.blocks.length} blocks · ${app.state.trains.length} trains`;
     $$('.mode-tab').forEach((button) => {
       const active = button.dataset.workspace === page;
       button.classList.toggle('is-active', active);
@@ -3712,14 +3746,42 @@
     $(page === 'settings' ? '#settings-title' : '#workspace-title').focus({ preventScroll: true });
   }
 
-  function selectTrain(id) {
+  function selectTrain(id, { openTrains = true } = {}) {
     if (!app.state.trains.some((train) => train.id === id)) return;
     cancelSpeedDraft();
     app.selectedTrainId = id;
     app.consistDraft = null;
     renderSidebar(); renderTrainList(); renderEditor(); renderAssembler();
-    if (app.workspace === 'dispatch') navigateWorkspace('trains');
+    if (app.workspace === 'dispatch' && openTrains) navigateWorkspace('trains');
     showToast(`${selectedTrain().name} selected`, 'success');
+  }
+
+  function selectTrainByAddress({ reportMissing = false, restoreInvalid = false } = {}) {
+    clearTimeout(trainAddressTimer);
+    const input = $('#selected-train-badge');
+    const value = input.value.trim();
+    const valid = /^[0-9]{1,4}$/.test(value) && Number(value) > 0;
+    const matches = valid ? app.state.trains.filter((train) => train.number != null && train.number !== '' && Number(train.number) === Number(value)) : [];
+    if (matches.length === 1) {
+      input.removeAttribute('aria-invalid');
+      input.value = String(matches[0].number);
+      if (matches[0].id !== selectedTrain()?.id) {
+        selectTrain(matches[0].id, { openTrains: false });
+        renderGraph(); renderSystematicView();
+      }
+      return;
+    }
+    if (!reportMissing) return;
+    const message = !valid ? 'Enter a saved DCC address from 1 to 9999.'
+      : matches.length > 1 ? `Several trains use DCC address ${Number(value)}. Select one from the train list.`
+      : `No saved train has DCC address ${Number(value)}.`;
+    showToast(message, 'warning');
+    if (restoreInvalid) {
+      input.value = String(selectedTrain()?.number || '');
+      input.removeAttribute('aria-invalid');
+    } else {
+      input.setAttribute('aria-invalid', 'true');
+    }
   }
 
   function selectBlock(id) {
@@ -4422,6 +4484,26 @@
       renderGraph(); updateWorkspaceVisibility();
     }));
     $$('.editor-tab').forEach((button) => button.addEventListener('click', () => { app.editorTab = button.dataset.editorTab; renderEditor(); }));
+    const addressInput = $('#selected-train-badge');
+    addressInput.addEventListener('focus', () => addressInput.select());
+    addressInput.addEventListener('input', (event) => {
+      clearTimeout(trainAddressTimer);
+      addressInput.removeAttribute('aria-invalid');
+      if (!event.isComposing) trainAddressTimer = setTimeout(() => selectTrainByAddress(), 500);
+    });
+    addressInput.addEventListener('blur', () => selectTrainByAddress({ reportMissing: true, restoreInvalid: true }));
+    addressInput.addEventListener('keydown', (event) => {
+      if (event.isComposing) return;
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        selectTrainByAddress({ reportMissing: true });
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        clearTimeout(trainAddressTimer);
+        addressInput.value = String(selectedTrain()?.number || '');
+        addressInput.removeAttribute('aria-invalid');
+      }
+    });
     $('#speed-slider').addEventListener('input', (event) => queueSpeed(event.target.value));
     $('#speed-slider').addEventListener('change', flushSpeedDraft);
     $('#speed-slider').addEventListener('pointerup', flushSpeedDraft);
@@ -4565,7 +4647,15 @@
     });
     $('#save-consist').addEventListener('click', saveConsist);
     $('#remove-train').addEventListener('click', removeSelectedTrain);
-    $('#close-editor').addEventListener('click', () => { $('#train-editor-panel').classList.toggle('is-collapsed'); showToast($('#train-editor-panel').classList.contains('is-collapsed') ? 'Train profile collapsed' : 'Train profile expanded', 'success'); });
+    $('#close-editor').addEventListener('click', () => {
+      const collapsed = $('#train-editor-panel').classList.toggle('is-collapsed');
+      const button = $('#close-editor');
+      const label = collapsed ? 'Expand train profile' : 'Collapse train profile';
+      button.setAttribute('aria-expanded', String(!collapsed));
+      button.setAttribute('aria-label', label);
+      button.title = label;
+      showToast(collapsed ? 'Train profile collapsed' : 'Train profile expanded', 'success');
+    });
   }
 
   function changeZoom(amount) {

@@ -77,7 +77,7 @@
     section.innerHTML = `<div class="settings-section-heading"><h3 id="workspace-layout-heading">Panel arrangement</h3><p>Choose a panel order for each page. Changes preview immediately; save to keep them on this controller.</p></div>
       <div class="settings-row"><div><label for="workspace-layout-page">Page to arrange</label><p class="settings-help">Only panels available on this page are listed. The schematic view appears when selected.</p></div><div class="settings-control"><select id="workspace-layout-page"></select></div></div>
       <div class="settings-row" data-sidebar-placement><div><label for="workspace-layout-side">Control panels position</label><p class="settings-help">On narrow screens, panels stack in reading order.</p></div><div class="settings-control"><select id="workspace-layout-side"><option value="left">Left of workspace</option><option value="right">Right of workspace</option></select></div></div>
-      <h4>Main panels — top to bottom</h4><ol class="workspace-panel-order" data-panel-list="order"></ol>
+      <h4>Main panels — top to bottom</h4><p class="settings-help" data-planning-pair-help hidden></p><ol class="workspace-panel-order" data-panel-list="order"></ol>
       <div data-sidebar-order><h4>Control panels — top to bottom</h4><ol class="workspace-panel-order" data-panel-list="sidebar_order"></ol></div>
       <div class="workspace-layout-actions"><button type="button" class="button button-soft" data-layout-action="reset-page">Reset this page</button><button type="button" class="button button-soft" data-layout-action="reset-all">Reset all pages</button><button type="button" class="button button-soft" data-layout-action="discard">Discard arrangement changes</button><button type="button" class="button button-primary" data-layout-action="save">Save arrangement</button></div>
       <p id="workspace-layout-status" class="settings-status" role="status" aria-live="polite">Loading panel arrangement…</p><button type="button" class="button button-soft" data-layout-retry hidden>Retry loading arrangement</button>`;
@@ -95,6 +95,27 @@
     // available to the same arrangement controls immediately.
     for (const id of new Set(Object.values(MAIN).flat())) if (nodes[id]) workspace.append(nodes[id]);
     for (const id of SIDEBAR) if (nodes[id]) sidebar.append(nodes[id]);
+    let homeOverview = null;
+    if (nodes.timetable && nodes['layout-info']) {
+      homeOverview = doc.createElement('div');
+      homeOverview.className = 'home-overview-panels is-hidden';
+      workspace.append(homeOverview);
+    }
+    let planningPair = null;
+    if (nodes.automation && nodes.routes) {
+      planningPair = doc.createElement('div');
+      planningPair.className = 'automation-planning-panels is-hidden';
+      planningPair.append(nodes.automation, nodes.routes);
+      workspace.append(planningPair);
+    }
+    let automationSidebar = null;
+    if (nodes['layout-info'] || nodes.timetable) {
+      automationSidebar = doc.createElement('aside');
+      automationSidebar.className = 'automation-sidebar is-hidden';
+      automationSidebar.setAttribute('aria-label', 'Layout information and timetable');
+      automationSidebar.tabIndex = 0;
+      dashboard.append(automationSidebar);
+    }
     dashboard.classList.add('workspace-layout-enabled');
     function reorder(parent, items, anchor = null) {
       for (const item of items) {
@@ -108,10 +129,37 @@
       activePage = page;
       const preference = draft.pages[page];
       if (!preference || disposed) return;
-      dashboard.dataset.controlSide = preference.sidebar_side;
+      dashboard.dataset.controlSide = page === 'layout' ? 'left' : preference.sidebar_side;
+      homeOverview?.classList.toggle('is-hidden', page !== 'dispatch');
+      planningPair?.classList.toggle('is-hidden', page !== 'layout');
+      automationSidebar?.classList.toggle('is-hidden', page !== 'layout');
+      if (page === 'dispatch' && homeOverview) {
+        reorder(homeOverview, [nodes.timetable, nodes['layout-info']]);
+      }
+      if (page === 'layout' && automationSidebar) {
+        // Reuse the live panels, retaining controls and listeners. Other pages
+        // move them back into the workspace through their usual panel order.
+        reorder(automationSidebar, [nodes['layout-info'], nodes.timetable]);
+      }
+      let planningPairAdded = false;
+      const orderedPanels = preference.order.flatMap(id => {
+        if (page === 'dispatch' && homeOverview && ['layout-info', 'timetable'].includes(id)) return [];
+        if (page === 'layout' && automationSidebar && ['layout-info', 'timetable'].includes(id)) return [];
+        if (page === 'layout' && planningPair && ['automation', 'routes'].includes(id)) {
+          if (planningPairAdded) return [];
+          planningPairAdded = true;
+          return [planningPair];
+        }
+        return [nodes[id]];
+      });
       // DOM order follows visual order, including keyboard navigation.
-      reorder(dashboard, preference.sidebar_side === 'right' ? [workspace, sidebar] : [sidebar, workspace]);
-      reorder(workspace, preference.order.map(id => nodes[id]), workspace.querySelector('.workspace-heading'));
+      const dashboardOrder = page === 'layout' && automationSidebar
+        ? [automationSidebar, workspace, sidebar]
+        : preference.sidebar_side === 'right' ? [workspace, sidebar, automationSidebar] : [sidebar, workspace, automationSidebar];
+      reorder(dashboard, dashboardOrder);
+      // Keep section navigation ahead of the configurable panels on every
+      // page change, so the Trains tabs remain at the top of the workspace.
+      reorder(workspace, [workspace.querySelector('.trains-subnav'), ...(page === 'dispatch' && homeOverview ? [homeOverview] : []), ...orderedPanels], workspace.querySelector('.workspace-heading'));
       reorder(sidebar, preference.sidebar_order.map(id => nodes[id]));
       // This panel previously inherited visibility from .lower-grid.
       nodes.trains?.classList.toggle('is-hidden', !MAIN[page].includes('trains'));
@@ -122,6 +170,11 @@
       query('#workspace-layout-side').value = preference.sidebar_side;
       query('[data-sidebar-placement]').hidden = !preference.sidebar_order.length;
       query('[data-sidebar-order]').hidden = !preference.sidebar_order.length;
+      const pairedPanelHelp = query('[data-planning-pair-help]');
+      pairedPanelHelp.hidden = !['dispatch', 'layout'].includes(editingPage);
+      pairedPanelHelp.textContent = editingPage === 'dispatch'
+        ? 'On Home, Timetable and Layout information stay together at the top, side by side on wide screens. The remaining panels follow the order below.'
+        : 'On Automation, Layout information and Timetable stay in the left sidebar. Train automation and Route plans share one row on wide screens; the first of these two entries determines where that row appears.';
       for (const key of ['order', 'sidebar_order']) {
         const list = query(`[data-panel-list="${key}"]`); list.replaceChildren();
         preference[key].forEach((id, index, order) => {
