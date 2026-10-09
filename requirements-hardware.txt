@@ -1,0 +1,2 @@
+# Needed only for the XpressNet LI-USB serial PC interface.
+pyserial==3.5

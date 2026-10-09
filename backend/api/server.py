@@ -40,10 +40,12 @@ from backend.core.events import (
     TurnoutPositionChanged,
 )
 from backend.core.models import BlockState, LayoutSnapshot, ScheduleStatus, SignalAspect, TrainMode, TurnoutPosition
+from backend.core.decoder import normalize_decoder_protocol
 from backend.core.routing import RouteAlgorithm, find_route
 from backend.infrastructure.train_catalogue import TrainCatalogue, export_csv, export_json, import_csv, import_json
 from backend.infrastructure.train_database import DecoderFunctionMapping, MaintenanceRecord, RollingStockInventoryRecord, RollingStockRecord, TrainModel
 from backend.infrastructure.settings import SQLiteSettingsRepository, validate_settings
+from backend.infrastructure.hardware import hardware_profile, hardware_profiles, validate_hardware, Z21_COMPATIBLE_SYSTEMS
 from backend.infrastructure.operating_plan import OperatingPlanRepository
 from backend.infrastructure.wlan import WindowsRouteAPI, preflight_z21_wlan
 from backend.infrastructure.scan_store import MAX_UPLOAD_BODY_BYTES, ScanStore
@@ -59,6 +61,7 @@ from backend.services.coordinate_move import (
     calibrated_distance_duration_ms,
 )
 from backend.services.automation_recording import PlaybackPlan, RecordedAction
+from backend.services.track_triggers import TrackTriggerController
 from backend.services.train_presence import SavedTrainPresenceService
 from backend.services.pinboard import nearest_track_coordinate, block_center
 from backend.services.track_geometry import cubic_controls
@@ -135,6 +138,8 @@ class ControllerApplication:
     z21_port: int = 21105
     z21_transport_profile: str = "lan"
     z21_transport_status: dict[str, Any] | None = None
+    hardware_system: str = "simulation"
+    hardware_connection: dict[str, Any] | None = None
     feedback_map: dict[tuple[int, int], str] = field(default_factory=dict)
     runtime: ControllerRuntime | None = field(default=None, repr=False)
     scan_directory: str | Path | None = None
@@ -177,6 +182,7 @@ class ControllerApplication:
     _playback_results: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _coordinate_execution_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _rolling_stock_function_states: dict[int, dict[str, bool]] = field(default_factory=dict, init=False, repr=False)
+    _track_trigger_controller: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compose the domain runtime once and mirror the initial UI fixture into it."""
@@ -196,14 +202,28 @@ class ControllerApplication:
         scan_directory = self.scan_directory or (Path(self.database_path).resolve().parent / "scans" if self.database_path != ":memory:" else SCAN_DIR)
         self._scan_store = ScanStore(scan_directory)
         if self.runtime is None:
-            if self.z21_host:
+            if self.hardware_system != "simulation":
+                config = validate_hardware(self.hardware_connection or {**self._settings["hardware"], "system": self.hardware_system})
+                self.hardware_connection = config
+                self.runtime = ControllerRuntime.create_hardware(
+                    config["system"], host=config["host"], port=config["port"],
+                    serial_port=config["serial_port"], baudrate=config["baudrate"],
+                    decoder_protocol=config["decoder_protocol"], transport=config["transport"], database_path=self.database_path,
+                    feedback_map=self.feedback_map,
+                )
+                self.simulation_mode = False
+                if config["system"] in Z21_COMPATIBLE_SYSTEMS:
+                    self.z21_host, self.z21_port = config["host"], config["port"]
+            elif self.z21_host:
                 self.runtime = ControllerRuntime.create_z21(self.z21_host, port=self.z21_port, database_path=self.database_path, feedback_map=self.feedback_map)
+                self.hardware_system = "z21"
+                self.hardware_connection = validate_hardware({**self._settings["hardware"], "system": "z21", "host": self.z21_host, "port": self.z21_port})
                 self.simulation_mode = False
             else:
                 self.runtime = ControllerRuntime.create(database_path=self.database_path)
         self.runtime.connection.check()
         self._restore_formation_metadata()
-        if self.z21_host:
+        if self._physical_hardware:
             self.track_power = False
             for train in self.trains:
                 train.update(mode="stopped", speed=0, requested_speed_kmh=0)
@@ -216,7 +236,100 @@ class ControllerApplication:
             self.schedules = deepcopy(self._loaded_operating_plan["schedules"])
             self._sync_scheduler()
         self._restore_automation_programs()
+        self._track_trigger_controller = TrackTriggerController(self, (self._loaded_operating_plan or {}).get("track_triggers", []))
         self._persist_operating_plan()
+
+    @property
+    def _physical_hardware(self) -> bool:
+        return self.hardware_system != "simulation" or bool(self.z21_host)
+
+    def _active_hardware_profile(self):
+        return hardware_profile("z21" if self.hardware_system == "simulation" and self.z21_host else self.hardware_system)
+
+    def connect_hardware(self, *, disconnect: bool = False) -> None:
+        """Replace the transport while preserving the live plan and databases."""
+        if self._presence_state.get("running"):
+            raise ValueError("wait for the train presence scan to finish before changing hardware")
+        config = validate_hardware({"system": "simulation"}) if disconnect else validate_hardware(self._settings["hardware"])
+        _, _, transport_status = startup_hardware({**self._settings, "hardware": config}, {"H0_TRACK_SYSTEM": config["system"]})
+        # Cancel workers before replacing their shared runtime's transport.
+        self._cancel_playbacks(reason="Hardware connection changed")
+        if self._track_trigger_controller:
+            self._track_trigger_controller.cancel_all()
+        if self.runtime.recording.active:
+            self._recording_history.append(self.runtime.recording.stop())
+        self.runtime.coordinate_movement.close()
+        self.runtime.calibration.close()
+        self.runtime.dispatcher.emergency_stop()
+        power = self.runtime.track.set_power(False)
+        self.track_power = False
+        for train in self.trains:
+            train.update(mode="stopped", speed=0, requested_speed_kmh=0)
+        if self._physical_hardware and not power.accepted:
+            raise ValueError(power.detail or "could not switch the current station's track power off")
+        # Close first: stations such as Märklin use a fixed local receive port.
+        previous = self.hardware_connection or {"system": self._active_hardware_profile().id}
+        self.runtime.close_track(self.runtime.track)
+        candidate = None
+        try:
+            candidate = self.runtime.create_track(config, feedback_map=self._track_trigger_controller.feedback_for_profile(config["system"]) if self._track_trigger_controller else self.feedback_map)
+            if config["system"] != "simulation":
+                status = candidate.check_connection()
+                if not status.connected:
+                    raise ValueError(status.detail or "the selected station did not respond")
+                result = candidate.set_power(False)
+                if not result.accepted:
+                    raise ValueError(result.detail or "the selected station did not confirm track power off")
+        except Exception as exc:
+            if candidate is not None:
+                self.runtime.close_track(candidate)
+            # A failed station change leaves a stopped simulator, never a
+            # closed adapter or an implicitly activated different station.
+            self._install_track(self.runtime.create_track(validate_hardware({"system": "simulation"})),
+                                validate_hardware({"system": "simulation"}))
+            self.events.append({"type": "hardware_connection_failed", "system": config["system"], "detail": str(exc)})
+            raise ValueError(str(exc)) from exc
+        try:
+            self._install_track(candidate, config)
+        except Exception as exc:
+            self.runtime.close_track(candidate)
+            self._install_track(self.runtime.create_track(validate_hardware({"system": "simulation"})),
+                                validate_hardware({"system": "simulation"}))
+            raise ValueError(f"Station connection could not load the train catalogue: {exc}") from exc
+        self.z21_transport_status = transport_status
+        self.events.append({"type": "hardware_connected", "system": config["system"], "previous_system": previous["system"]})
+
+    def _install_track(self, track, config: dict[str, Any]) -> None:
+        for train_id in tuple(self.runtime.dispatcher.trains):
+            self.runtime.dispatcher.unregister_train(train_id)
+        self.runtime.replace_track(track, hardware_system=config["system"], decoder_protocol=config["decoder_protocol"])
+        self.hardware_system = config["system"]
+        self.hardware_connection = deepcopy(config)
+        self.simulation_mode = config["system"] == "simulation"
+        self.z21_host = config["host"] if config["system"] in Z21_COMPATIBLE_SYSTEMS else None
+        self.z21_port = config["port"]
+        self.z21_transport_profile = config["transport"]
+        self.z21_transport_status = None
+        self._power_telemetry = {"available": False, "reason": "No electrical readings received"}
+        self._rolling_stock_function_states.clear()
+        self._presence_state.update(results=[], summary={"total": 0, "detected": 0, "unknown": 0, "errors": 0},
+                                    started_at=None, completed_at=None, error=None)
+        self._programming_state.update(last_request=None, last_address_request=None, last_read=None, supported=False)
+        for train in self.trains:
+            train["decoder_function_states"] = {}
+        self._sync_runtime_from_ui(apply_motion=False)
+        if self.simulation_mode:
+            self.runtime.track.set_power(False)
+        connection = self.runtime.connection.check()
+        if not self.simulation_mode and not connection.status.connected:
+            raise ValueError(connection.status.detail or "station disconnected during activation")
+        self._reset_world_clock_sample()
+        if self._track_trigger_controller:
+            self._track_trigger_controller.rebase()
+
+    def _require_capability(self, capability: str) -> None:
+        if not self._active_hardware_profile().capabilities.get(capability, False):
+            raise ValueError(f"{self._active_hardware_profile().label} does not support {capability.replace('_', ' ')} in this controller")
 
     def _persist_operating_plan(self) -> None:
         """Persist timetable rows and authored routines in the sidecar file."""
@@ -225,7 +338,8 @@ class ControllerApplication:
             {key: deepcopy(value) for key, value in program.items() if key != "_compiled_actions"}
             for program in self._automation_programs
         ]
-        self._operating_plan_repository.save(self.schedules, routines)
+        triggers = self._track_trigger_controller.definitions if self._track_trigger_controller else (self._loaded_operating_plan or {}).get("track_triggers", [])
+        self._operating_plan_repository.save(self.schedules, routines, triggers)
 
     def _restore_automation_programs(self) -> None:
         """Restore persisted routines and rebuild their train-specific actions."""
@@ -282,6 +396,8 @@ class ControllerApplication:
         z21_port: int = 21105,
         z21_transport_profile: str = "lan",
         z21_transport_status: dict[str, Any] | None = None,
+        hardware_system: str = "simulation",
+        hardware_connection: dict[str, Any] | None = None,
         feedback_map: dict[tuple[int, int], str] | None = None,
     ) -> "ControllerApplication":
         return cls(
@@ -351,6 +467,8 @@ class ControllerApplication:
             z21_port=z21_port,
             z21_transport_profile=z21_transport_profile,
             z21_transport_status=deepcopy(z21_transport_status),
+            hardware_system=hardware_system,
+            hardware_connection=deepcopy(hardware_connection),
             feedback_map=dict(feedback_map or {}),
         )
 
@@ -367,6 +485,8 @@ class ControllerApplication:
             if self._closed:
                 return
             self._closed = True
+            if self._track_trigger_controller:
+                self._track_trigger_controller.cancel_all()
             runtime = self.runtime
             playback_workers = [run["worker"] for run in self._playback_runs.values()]
             self._cancel_playbacks(reason="Controller closed")
@@ -440,28 +560,38 @@ class ControllerApplication:
         """Read saved preferences and live status, without probing any device."""
 
         with self._lock:
-            next_host = os.environ.get("H0_Z21_HOST") or self._settings["z21_host"]
-            next_port = int(os.environ.get("H0_Z21_PORT") or self._settings["z21_port"])
-            next_profile = "wlan" if self._settings["z21_wlan_enabled"] else "lan"
-            active_profile = self.z21_transport_profile if self.z21_host else "simulation"
-            restart_required = bool(self.z21_host and (
-                self.z21_host != next_host
-                or self.z21_port != next_port
+            selected = deepcopy(self._settings["hardware"])
+            if selected["system"] in Z21_COMPATIBLE_SYSTEMS:
+                selected["host"] = os.environ.get("H0_Z21_HOST") or selected["host"]
+                selected["port"] = int(os.environ.get("H0_Z21_PORT") or selected["port"])
+            next_host, next_port = selected["host"], selected["port"]
+            next_profile = selected["transport"]
+            active = self._active_hardware_profile()
+            active_config = self.hardware_connection or {"system": active.id, "host": self.z21_host,
+                "port": self.z21_port, "transport": self.z21_transport_profile}
+            active_profile = active_config.get("transport", "lan") if self._physical_hardware else "simulation"
+            restart_required = bool(self._physical_hardware and (
+                active.id != selected["system"]
+                or active_config.get("host") != next_host
+                or active_config.get("port") != next_port
                 or active_profile != next_profile
+                or active_config.get("serial_port", "") != selected["serial_port"]
+                or active_config.get("baudrate", selected["baudrate"]) != selected["baudrate"]
+                or active_config.get("decoder_protocol", selected["decoder_protocol"]) != selected["decoder_protocol"]
             ))
-            transport_status = deepcopy(self.z21_transport_status) if self.z21_host else {
+            transport_status = deepcopy(self.z21_transport_status) if self._physical_hardware else {
                 "profile": "simulation",
                 "state": "inactive",
                 "ready": True,
                 "host": None,
                 "detail": "Simulation does not open a physical network transport.",
             }
-            if self.z21_host and transport_status is None:
+            if self._physical_hardware and transport_status is None:
                 transport_status = {
                     "profile": active_profile,
                     "state": "unknown",
                     "ready": False,
-                    "host": self.z21_host,
+                    "host": active_config.get("host"),
                     "detail": "No startup transport preflight status is available.",
                 }
             routing_activity = self._routing_activity(track_snapshot)
@@ -469,7 +599,14 @@ class ControllerApplication:
             remaining = max(0, interval - int((time.monotonic() - self._routing_last_monotonic) * 1000)) if self._routing_last_monotonic is not None else 0
             result = {
                 "runtime": {
-                    "connection_mode": "z21" if self.z21_host else "simulation",
+                    "connection_mode": active.id,
+                    "hardware_system": active.id,
+                    "hardware_label": active.label,
+                    "hardware_capabilities": active.capabilities,
+                    "hardware_max_functions": active.max_functions,
+                    "hardware_decoder_protocols": list(active.decoder_protocols),
+                    "hardware_connection": deepcopy(active_config),
+                    "selected_hardware_system": selected["system"],
                     "active_z21_host": self.z21_host,
                     "active_z21_port": self.z21_port if self.z21_host else None,
                     "next_z21_host": next_host,
@@ -479,8 +616,8 @@ class ControllerApplication:
                     "transport_status": transport_status,
                     "z21_environment_override": bool(os.environ.get("H0_Z21_HOST") or os.environ.get("H0_Z21_PORT")),
                     "restart_required": restart_required,
-                    "hardware_activation_required": not bool(self.z21_host),
-                    "connection_message": "Saved for the next explicit physical startup; simulation stays active." if not self.z21_host else "Restart physical control to apply the saved endpoint or transport profile." if restart_required else f"Physical {active_profile.upper()} profile is active. Environment endpoint overrides take precedence when set.",
+                    "hardware_activation_required": not self._physical_hardware,
+                    "connection_message": "Choose a hardware system and use Connect to apply it." if not self._physical_hardware else "Use Connect to apply the saved system or connection settings." if restart_required else f"{active.label} is active using {active_profile.upper()}.",
                     "routing": {
                         "running": bool(self._routing_thread and self._routing_thread.is_alive()),
                         "activity": routing_activity,
@@ -494,6 +631,7 @@ class ControllerApplication:
                     },
                 },
             }
+            result["hardware_profiles"] = hardware_profiles()
             if include_settings:
                 result["settings"] = deepcopy(self._settings)
             result["simulation"] = {
@@ -578,6 +716,7 @@ class ControllerApplication:
                         # World time follows elapsed time in both modes, even
                         # when controller work or a lost WLAN packet delays a tick.
                         self.tick(1, elapsed_seconds=elapsed, clock_sampled_at=now)
+                interval = self.runtime.track.tick_seconds if self.simulation_mode else 1.0
                 next_tick += interval
                 if next_tick < time.monotonic() - interval:
                     # Never burst hardware commands after a suspended computer.
@@ -724,13 +863,14 @@ class ControllerApplication:
         for train in self.trains:
             train_id = str(train["id"])
             block_id = str(train.get("block_id", "B01"))
+            train["decoder_protocol"] = normalize_decoder_protocol(str(train.get("decoder_protocol") or "DCC"))
             if not train.get("graph_enabled", True):
                 if train_id in self.runtime.dispatcher.trains:
                     if hasattr(self.runtime.track, "remove_train"):
                         self.runtime.track.remove_train(train_id)
                     self.runtime.dispatcher.unregister_train(train_id)
                 continue
-            if self.z21_host and train.get("address") in (None, ""):
+            if self._physical_hardware and train.get("address") in (None, ""):
                 # A catalogue record may be known before a decoder address is
                 # assigned. Keep it in the database/UI, but never register an
                 # unaddressed model with the physical command station.
@@ -739,14 +879,25 @@ class ControllerApplication:
                         self.runtime.track.remove_train(train_id)
                     self.runtime.dispatcher.unregister_train(train_id)
                 continue
-            if self.z21_host and hasattr(self.runtime.track, "register_train"):
+            if self._physical_hardware and str(train.get("decoder_protocol") or "dcc").lower() not in self._active_hardware_profile().decoder_protocols:
+                if train_id in self.runtime.dispatcher.trains:
+                    remove = getattr(self.runtime.track, "remove_train", None) or getattr(self.runtime.track, "unregister_train", None)
+                    if remove:
+                        remove(train_id)
+                    self.runtime.dispatcher.unregister_train(train_id)
+                continue
+            if self._physical_hardware and hasattr(self.runtime.track, "register_train"):
                 # A physical train may have been created before its decoder
                 # address was entered. Re-bind on every sync so a later edit
                 # reaches the live Z21 adapter, including address changes.
+                register_options = {}
+                if self._active_hardware_profile().id not in Z21_COMPATIBLE_SYSTEMS:
+                    register_options["decoder_protocol"] = str(train.get("decoder_protocol") or self._settings["hardware"]["decoder_protocol"]).lower()
                 self.runtime.track.register_train(
                     train_id,
                     int(train["address"]),
                     forward=str(train.get("direction", "forward")).lower() != "reverse",
+                    **register_options,
                 )
             current_motion = next((motion for motion in self.runtime.track.get_snapshot().trains if motion.train_id == train_id), None)
             if current_motion is not None and current_motion.block_id != block_id and hasattr(self.runtime.track, "remove_train"):
@@ -758,7 +909,8 @@ class ControllerApplication:
                     goal_id = next((block.id for block in reversed(snapshot.blocks) if graph.node(block.id) is not None), block_id)
                     planned = find_route(graph, block_id.upper(), goal_id, algorithm=RouteAlgorithm.A_STAR) if graph.node(block_id.upper()) is not None else None
                     route = planned.node_ids if planned is not None else (block_id,)
-                self.runtime.add_train(train_id, block_id, route=route, address=train.get("address"))
+                self.runtime.add_train(train_id, block_id, route=route, address=train.get("address"),
+                    decoder_protocol=str(train.get("decoder_protocol") or self._settings["hardware"]["decoder_protocol"]).lower())
             mode_value = str(train.get("mode", "manual")).lower()
             mode = ControlMode.AUTOMATIC if mode_value == "automatic" else ControlMode.STOPPED if mode_value in {"stopped", "safe", "stop"} else ControlMode.MANUAL
             if not connected_blocks:
@@ -772,7 +924,7 @@ class ControllerApplication:
                 train["route"] = [block_id.upper()]
                 if not apply_motion:
                     continue
-                if self.z21_host:
+                if self._physical_hardware:
                     self.runtime.dispatcher.register_train(train_id, mode=mode)
                     continue
                 self.runtime.dispatcher.set_mode(train_id, mode)
@@ -816,7 +968,7 @@ class ControllerApplication:
                     train.setdefault("destination_block_id", desired_route[-1])
             if not apply_motion:
                 continue
-            if self.z21_host:
+            if self._physical_hardware:
                 # A physical layout is observed/commanded only after the user
                 # sends an explicit UI command; startup should not move trains.
                 self.runtime.dispatcher.register_train(train_id, mode=mode)
@@ -1384,6 +1536,8 @@ class ControllerApplication:
             if not hasattr(self.runtime.track, "set_train_function"):
                 raise ValueError("the active track adapter does not support decoder functions")
             result = self.runtime.track.set_train_function(train_id, int(action.function_number), enabled=bool(action.enabled))
+            if self._track_trigger_controller:
+                self._track_trigger_controller.cancel_train_function(train_id, int(action.function_number))
             if hasattr(result, "accepted") and not result.accepted:
                 raise ValueError(result.detail or "scheduled routine function was rejected")
             train.setdefault("decoder_function_states", {})[str(action.function_number)] = bool(action.enabled)
@@ -1549,6 +1703,8 @@ class ControllerApplication:
                                 if not hasattr(runtime.track, "set_train_function"):
                                     raise ValueError("the active track adapter does not support decoder functions")
                                 result = runtime.track.set_train_function(train_id, int(action.function_number), enabled=bool(action.enabled))
+                                if self._track_trigger_controller:
+                                    self._track_trigger_controller.cancel_train_function(train_id, int(action.function_number))
                             if hasattr(result, "accepted") and not result.accepted:
                                 raise ValueError(result.detail or "routine action was rejected")
                             if action.operation == "speed":
@@ -1644,10 +1800,13 @@ class ControllerApplication:
 
     def request_decoder_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate a programming request without issuing an unsupported CV write."""
+        self._require_capability("programming")
         train_id = self._canonical_train_id(str(payload.get("train_id", "")))
         train = next((item for item in self.trains if item.get("id") == train_id), None)
         if train is None:
             raise ValueError(f"Unknown train: {train_id}")
+        if str(train.get("decoder_protocol") or "dcc").lower() != "dcc":
+            raise ValueError("CV programming requires a DCC train")
         target = str(payload.get("target", "main")).strip().lower()
         if target not in {"main", "programming_track"}:
             raise ValueError("target must be main or programming_track")
@@ -1706,10 +1865,14 @@ class ControllerApplication:
     def request_dcc_address_programming(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate a requested decoder-address change without touching hardware."""
 
+        self._require_capability("programming")
+
         train_id = self._canonical_train_id(str(payload.get("train_id", "")))
         train = next((item for item in self.trains if item.get("id") == train_id), None)
         if train is None:
             raise ValueError(f"Unknown train: {train_id}")
+        if str(train.get("decoder_protocol") or "dcc").lower() != "dcc":
+            raise ValueError("address programming requires a DCC train")
         target = str(payload.get("target", "main")).strip().lower()
         if target not in {"main", "programming_track"}:
             raise ValueError("target must be main or programming_track")
@@ -1792,6 +1955,8 @@ class ControllerApplication:
     def scan_train_presence(self) -> dict[str, Any]:
         """Synchronously scan saved addresses for direct callers and tests."""
 
+        self._require_capability("address_scan")
+
         if self.runtime is None:
             raise ValueError("runtime is not available")
         with self._lock:
@@ -1841,6 +2006,8 @@ class ControllerApplication:
 
     def _start_presence_scan(self) -> dict[str, Any]:
         """Start a non-blocking presence scan from a lock-protected snapshot."""
+
+        self._require_capability("address_scan")
 
         if self.runtime is None:
             raise ValueError("runtime is not available")
@@ -2307,7 +2474,7 @@ class ControllerApplication:
         self._last_train_blocks = current_blocks
 
     def _snapshot(self) -> dict[str, Any]:
-        connection = self.runtime.track.connection_status() if self.runtime is not None and self.z21_host else self.runtime.connection.status if self.runtime is not None else None
+        connection = self.runtime.track.connection_status() if self.runtime is not None and self._physical_hardware else self.runtime.connection.status if self.runtime is not None else None
         connected = bool(connection.connected) if connection is not None else self.connected
         feedback_healthy = getattr(self.runtime.track, "feedback_healthy", True) if self.runtime is not None else True
         feedback_error = getattr(self.runtime.track, "feedback_error", "") if self.runtime is not None else ""
@@ -2315,7 +2482,7 @@ class ControllerApplication:
             "simulation_mode": self.simulation_mode,
             "connected": connected,
             "connection": {
-                "mode": "simulation" if self.simulation_mode else "z21",
+                "mode": self._active_hardware_profile().id,
                 "connected": connected,
                 "endpoint": connection.endpoint if connection is not None and connection.endpoint else "127.0.0.1:21105",
                 "detail": connection.detail if connection is not None else "",
@@ -2408,6 +2575,7 @@ class ControllerApplication:
                 "recording": self.recording_state(),
                 "automationPrograms": self.automation_programs_state(),
                 "automationPlayback": self.playback_state(),
+                "trackTriggers": self._track_trigger_controller.payload(),
                 "coordinate_execution": self.runtime.coordinate_movement.status.as_dict()
                     if self.runtime is not None and self.runtime.coordinate_movement.status is not None else None,
                 "routes": deepcopy(self.routes),
@@ -2424,7 +2592,7 @@ class ControllerApplication:
         with self._lock:
             connection = (
                 self.runtime.track.connection_status()
-                if self.runtime is not None and self.z21_host
+                if self.runtime is not None and self._physical_hardware
                 else self.runtime.connection.status if self.runtime is not None
                 else None
             )
@@ -2433,9 +2601,9 @@ class ControllerApplication:
             return {
                 "connected": connected,
                 "simulated": simulated,
-                "mode": "simulation" if simulated else "z21",
+                "mode": self._active_hardware_profile().id,
                 "endpoint": connection.endpoint if connection is not None and connection.endpoint else "127.0.0.1:21105",
-                "label": "Simulation fallback" if simulated else "Z21 connected" if connected else "Z21 disconnected",
+                "label": "Simulation fallback" if simulated else f"{self._active_hardware_profile().label} {'connected' if connected else 'disconnected'}",
                 "detail": "Local sample state" if simulated else connection.detail if connection is not None else "",
             }
 
@@ -2525,9 +2693,11 @@ class ControllerApplication:
                   and len(route := routes.get(str(train["id"]), ())) > 1
                   and str(train.get("block_id", "")).upper() != route[-1]]
         telemetry = dict(getattr(self, "_power_telemetry", {"available": False, "reason":
-            "Not measured in simulation" if self.simulation_mode else "Waiting for Z21 readings"}))
+            "Not measured in simulation" if self.simulation_mode else f"Waiting for {self._active_hardware_profile().label} readings"}))
         if not self.simulation_mode and time.monotonic() - getattr(self, "_power_read_at", 0) > 15:
-            telemetry = {"available": False, "reason": "No fresh Z21 power readings"}
+            telemetry = {"available": False, "reason": f"No fresh {self._active_hardware_profile().label} power readings"}
+        if not self.simulation_mode and not self._active_hardware_profile().capabilities["telemetry"]:
+            telemetry = {"available": False, "reason": "Electrical readings are not supported by this adapter"}
         return {"block_count": len(block_ids),
                 "occupied_blocks": sum(block["status"] == "occupied" for block in (ui_blocks if ui_blocks is not None else self._ui_blocks(track_snapshot))),
                 "train_count": len(trains),
@@ -2544,12 +2714,14 @@ class ControllerApplication:
             if self.runtime is None:
                 return
             connection = self.runtime.connection.check()
-            if self.z21_host and connection.status.connected:
+            if self._physical_hardware and connection.status.connected and self._active_hardware_profile().capabilities["telemetry"]:
                 if time.monotonic() - getattr(self, "_power_read_at", 0) >= 5:
                     self._power_telemetry = self.runtime.track.read_power_telemetry()
                     self._power_read_at = time.monotonic()
-            if self.z21_host and not self.runtime.track.connection_status().connected:
-                self._power_telemetry = {"available": False, "reason": "Z21 disconnected"}
+            if self._physical_hardware and not self.runtime.track.connection_status().connected:
+                if self._track_trigger_controller:
+                    self._track_trigger_controller.cancel_all()
+                self._power_telemetry = {"available": False, "reason": f"{self._active_hardware_profile().label} disconnected"}
                 self.runtime.dispatcher.emergency_stop()
                 self.track_power = False
                 for train in self.trains:
@@ -2584,7 +2756,7 @@ class ControllerApplication:
                 "simulated": snapshot["simulation_mode"],
                 "mode": snapshot["connection"]["mode"],
                 "endpoint": snapshot["connection"]["endpoint"],
-                "label": "Simulation fallback" if snapshot["simulation_mode"] else "Z21 connected" if snapshot["connected"] else "Z21 disconnected",
+                "label": "Simulation fallback" if snapshot["simulation_mode"] else f"{'Z21' if self._active_hardware_profile().id == 'z21' else self._active_hardware_profile().label} {'connected' if snapshot['connected'] else 'disconnected'}",
                 "detail": "Local sample state" if snapshot["simulation_mode"] else snapshot["connection"]["detail"],
             },
             "simulation": {
@@ -2610,6 +2782,7 @@ class ControllerApplication:
             "recording": self.recording_state(),
             "automationPrograms": self.automation_programs_state(),
             "automationPlayback": self.playback_state(),
+            "trackTriggers": self._track_trigger_controller.payload() if self._track_trigger_controller else {"definitions": [], "results": [], "feedback_map": []},
             "coordinate_execution": self.runtime.coordinate_movement.status.as_dict() if self.runtime is not None and self.runtime.coordinate_movement.status is not None else None,
             "feedback": feedback,
             "layout": self._layout_payload(ui_blocks, ui_edges, ui_connection_limits, ui_turnouts),
@@ -2961,7 +3134,7 @@ class ControllerApplication:
                 "destination": train.get("destination", "Layout"),
                 "next_destination": next_destinations.get(str(train["id"])),
                 "direction": "Forward" if (self.runtime.track.get_train_direction(str(train["id"])) if self.runtime else train.get("direction", "forward") == "forward") else "Reverse",
-                "decoder": f"Z21-{train.get('address', '')}",
+                "decoder": f"{str(train.get('decoder_protocol') or 'DCC').upper()}-{train.get('address', '')}",
                 "manufacturer": train.get("manufacturer", ""),
                 "model_number": train.get("model_number", train.get("model", "")),
                 "era": train.get("era", ""),
@@ -3061,9 +3234,13 @@ class ControllerApplication:
                     )
                 routine_elapsed = (safe_steps * self.runtime.track.tick_seconds) if elapsed_seconds is None else max(0.0, elapsed_seconds)
                 self._advance_scheduled_routines(routine_elapsed)
-                cycle = self.runtime.tick(safe_steps)
-                for stopped_id in cycle.stopped_trains:
-                    self._cancel_playbacks(stopped_id, reason="Dispatcher stopped the train for route or occupancy safety")
+                for _ in range(safe_steps):
+                    before = self._track_trigger_controller.before_tick() if self._track_trigger_controller else None
+                    cycle = self.runtime.tick(1)
+                    for stopped_id in cycle.stopped_trains:
+                        self._cancel_playbacks(stopped_id, reason="Dispatcher stopped the train for route or occupancy safety")
+                    if self._track_trigger_controller:
+                        self._track_trigger_controller.observe(before, cycle.stopped_trains)
                 if elapsed_seconds is None:
                     self._world_clock_seconds += safe_steps * 60
                     if self.runtime.scheduler.running:
@@ -3129,6 +3306,8 @@ class ControllerApplication:
         if snapshot is None:
             return None
         self._cancel_playbacks(reason="Saved layout loaded")
+        if self._track_trigger_controller:
+            self._track_trigger_controller.cancel_all()
         projected = snapshot_to_ui(snapshot)
         self.blocks = projected["blocks"]
         self.trains = projected["trains"]
@@ -3143,7 +3322,7 @@ class ControllerApplication:
         self.scans = projected.get("scans", self.scans)
         self.connection_limits = projected.get("connection_limits", [])
         self.track_sections = projected.get("track_sections", [])
-        if self.z21_host:
+        if self._physical_hardware:
             self.runtime.dispatcher.emergency_stop()
             for train in self.trains:
                 train.update(mode="stopped", speed=0, requested_speed_kmh=0)
@@ -3151,6 +3330,8 @@ class ControllerApplication:
         self.layout_name = next((record.name for record in self.runtime.layout_repository.list() if record.layout_id == selected_id), f"Saved layout {selected_id}")
         self._sync_runtime_from_ui()
         self.events.append({"type": "layout_loaded", "layout_id": selected_id, "revision": snapshot.revision})
+        if self._track_trigger_controller:
+            self._track_trigger_controller.rebase()
         return self.state()
 
     @staticmethod
@@ -3561,8 +3742,12 @@ class ControllerApplication:
         with self._lock:
             kind = str(payload.get("type", "")).lower()
             if kind in {"track_power", "power"} and not bool(payload.get("enabled", payload.get("value", True))):
+                if self._track_trigger_controller:
+                    self._track_trigger_controller.cancel_all()
                 self._cancel_playbacks(reason="Track power switched off")
             elif kind in {"set_mode", "pause_simulation", "mode", "simulation_mode", "emergency_stop", "stop_all"}:
+                if self._track_trigger_controller:
+                    self._track_trigger_controller.cancel_all()
                 self._cancel_playbacks(reason="Controller mode changed or stopped")
             elif kind in {"stop_train", "stop", "stop_automation_playback", "cancel_automation_playback",
                           "set_train_mode", "switch_train_mode", "set_direction", "speed", "set_speed", "drive",
@@ -3572,7 +3757,17 @@ class ControllerApplication:
                 selected_id = self._canonical_train_id(str(payload.get("train_id", payload.get("id", ""))))
                 for member in self._coupled_trains(selected_id):
                     self._cancel_playbacks(str(member["id"]), reason="Stopped by operator or another movement command")
-            if kind in {"set_track_section", "add_spline_point"}:
+            if kind in {"remove_train", "delete_train", "update_train", "update_consist", "upsert_rolling_stock_inventory", "set_rolling_stock_inventory", "set_train_graph_membership", "set_train_graph", "toggle_train_graph", "program_dcc_address", "program_decoder_address"}:
+                if self._track_trigger_controller:
+                    self._track_trigger_controller.cancel_all()
+            if kind in {"save_track_trigger", "upsert_track_trigger"}:
+                definition = self._track_trigger_controller.upsert(payload.get("trigger"))
+                self.events.append({"type": "track_trigger_saved", "trigger_id": definition["id"]})
+            elif kind == "delete_track_trigger":
+                self._track_trigger_controller.remove(str(payload.get("trigger_id", "")))
+            elif kind in {"connect_hardware", "disconnect_hardware"}:
+                self.connect_hardware(disconnect=kind == "disconnect_hardware")
+            elif kind in {"set_track_section", "add_spline_point"}:
                 self._command_track_section(kind, payload)
             elif kind in {"stop_automation_playback", "cancel_automation_playback"}:
                 if not any(str(train.get("id")) == selected_id for train in self.trains):
@@ -3639,6 +3834,8 @@ class ControllerApplication:
                 train["route"] = list(route)
                 self.runtime.route_updater.set_route(train_id, route)
                 self._sync_ui_from_runtime()
+                if self._track_trigger_controller:
+                    self._track_trigger_controller.position_confirmed(train_id, block)
             elif kind in {"start_calibration", "calibrate_train"}:
                 train_id = self._canonical_train_id(str(payload.get("train_id", "")))
                 train = next((item for item in self.trains if item["id"] == train_id), None)
@@ -3688,6 +3885,8 @@ class ControllerApplication:
                 self.save_automation_program(payload)
             elif kind in {"delete_automation_program", "remove_automation_program"}:
                 program_id = str(payload.get("program_id", payload.get("id", ""))).strip()
+                if any(a.get("program_id") == program_id for item in self._track_trigger_controller.definitions for a in item["actions"]):
+                    raise ValueError("remove this routine from its track triggers before deleting it")
                 before = len(self._automation_programs)
                 programs = [item for item in self._automation_programs if item.get("id") != program_id]
                 if len(programs) == before:
@@ -3809,12 +4008,15 @@ class ControllerApplication:
                     command = getattr(self.runtime.track, "set_function_by_address", None)
                     if command is None:
                         raise ValueError("the active track adapter does not support rolling-stock decoder functions")
-                    result = command(item.decoder_address, function_number, enabled=enabled)
+                    options = {"decoder_protocol": "dcc"} if self._active_hardware_profile().id in {"ecos", "marklin_cs2", "marklin_cs3", "xpressnet"} else {}
+                    result = command(item.decoder_address, function_number, enabled=enabled, **options)
                     if not result.accepted:
                         raise ValueError(result.detail or "rolling-stock function command rejected")
+                if self._track_trigger_controller:
+                    self._track_trigger_controller.cancel_pulse((item.decoder_address, "dcc", function_number))
                 self._rolling_stock_function_states.setdefault(item.decoder_address, {})[str(function_number)] = enabled
                 for member in self.trains:
-                    if member.get("address") not in (None, "") and str(member["address"]) == str(item.decoder_address):
+                    if member.get("address") not in (None, "") and str(member["address"]) == str(item.decoder_address) and str(member.get("decoder_protocol") or "dcc").lower() == "dcc":
                         member.setdefault("decoder_function_states", {})[str(function_number)] = enabled
                 self.events.append({"type": "rolling_stock_function_changed", "train_id": train_id,
                                     "item_id": item_id, "decoder_address": item.decoder_address,
@@ -4069,12 +4271,14 @@ class ControllerApplication:
                     if hasattr(result, "accepted") and not result.accepted:
                         raise ValueError(result.detail or "decoder function command rejected")
                 states = train.setdefault("decoder_function_states", {})
+                if self._track_trigger_controller:
+                    self._track_trigger_controller.cancel_train_function(train_id, function_number)
                 states[str(function_number)] = enabled
-                if str(train.get("address", "")).isdigit():
+                if str(train.get("address", "")).isdigit() and str(train.get("decoder_protocol") or "dcc").lower() == "dcc":
                     address = int(train["address"])
                     self._rolling_stock_function_states.setdefault(address, {})[str(function_number)] = enabled
                     for member in self.trains:
-                        if member is not train and str(member.get("address", "")) == str(address):
+                        if member is not train and str(member.get("address", "")) == str(address) and str(member.get("decoder_protocol") or "dcc").lower() == "dcc":
                             member.setdefault("decoder_function_states", {})[str(function_number)] = enabled
                 self._record_action_if_active({"operation": "function", "train_id": train_id, "function_number": function_number, "enabled": enabled})
                 self.events.append({"type": "train_function_changed", "train_id": train_id, "function_number": function_number, "enabled": enabled})
@@ -4226,6 +4430,7 @@ class ControllerApplication:
                     raise ValueError("train ID is required and must be unique")
                 train.setdefault("name", "New service")
                 train.setdefault("address", None)
+                train.setdefault("decoder_protocol", self._settings["hardware"]["decoder_protocol"].upper())
                 train.setdefault("mode", "manual")
                 train.setdefault("speed", 0)
                 train.setdefault("graph_enabled", True)
@@ -4499,6 +4704,7 @@ class ControllerApplication:
                 if train_refs:
                     raise ValueError(f"cannot remove block {block_id}: train {train_refs[0]} references it")
                 for label, collection, fields in (
+                    ("track trigger", self._track_trigger_controller.definitions, ("block_id",)),
                     ("turnout", self.turnouts, ("from", "to", "alternate", "entry_block_id", "straight_block_id", "diverging_block_id")),
                     ("station", self.stations, ("blockIds", "block_ids")),
                     ("signal", self.signals, ("block_id", "protects_block_id")),
@@ -4556,6 +4762,8 @@ class ControllerApplication:
                     self.feedback_map = {key: new_id if str(value).upper() == block_id else value for key, value in self.feedback_map.items()}
                     self.feedback_occupancy = {new_id if key.upper() == block_id else key: value for key, value in self.feedback_occupancy.items()}
                     self._last_train_blocks = {key: new_id if value.upper() == block_id else value for key, value in self._last_train_blocks.items()}
+                    if self._track_trigger_controller:
+                        self._track_trigger_controller.rename_block(block_id, new_id)
                     for train_id, route in self.runtime.route_updater.desired_routes.items():
                         self.runtime.route_updater.set_route(train_id, tuple(new_id if item.upper() == block_id else item for item in route))
                     block_id = new_id
@@ -5147,15 +5355,84 @@ def startup_z21_transport(
     }
 
 
+def startup_hardware(
+    settings: dict[str, Any],
+    environment: dict[str, str] | None = None,
+    *,
+    wlan_route_api: WindowsRouteAPI | None = None,
+    platform_name: str | None = None,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """Resolve all station profiles without opening transports or powering track.
+
+    Saving hardware preferences does not opt a process into physical operation.
+    Use H0_TRACK_SYSTEM=hardware to activate the saved selection, or specify a
+    registry profile ID. Legacy Z21 environment variables remain supported.
+    """
+    import sys
+
+    environment = os.environ if environment is None else environment
+    saved = validate_settings(settings)["hardware"]
+    requested = environment.get("H0_TRACK_SYSTEM", "").strip().lower()
+    explicit_system = environment.get("H0_HARDWARE_SYSTEM", "").strip().lower()
+    if requested in ("hardware", "physical", "saved"):
+        system = explicit_system or saved["system"]
+    elif requested:
+        system = requested
+    else:
+        system = explicit_system or ("z21" if environment.get("H0_Z21_HOST") else "simulation")
+    hardware_profile(system)
+    patch: dict[str, Any] = {"system": system}
+    for field_name, env_name in (("host", "H0_HARDWARE_HOST"), ("serial_port", "H0_HARDWARE_SERIAL_PORT"),
+                                 ("decoder_protocol", "H0_HARDWARE_DECODER_PROTOCOL"), ("transport", "H0_HARDWARE_TRANSPORT")):
+        if environment.get(env_name):
+            patch[field_name] = environment[env_name].strip()
+    for field_name, env_name in (("port", "H0_HARDWARE_PORT"), ("baudrate", "H0_HARDWARE_BAUDRATE")):
+        if environment.get(env_name):
+            try:
+                patch[field_name] = int(environment[env_name])
+            except ValueError:
+                raise ValueError(f"{env_name} must be an integer") from None
+    if system in Z21_COMPATIBLE_SYSTEMS:
+        for field_name, env_name in (("host", "H0_Z21_HOST"), ("port", "H0_Z21_PORT")):
+            if field_name not in patch and environment.get(env_name):
+                patch[field_name] = int(environment[env_name]) if field_name == "port" else environment[env_name].strip()
+    config = validate_hardware(patch, saved)
+    profile = hardware_profile(system)
+    transport = config["transport"]
+    if system == "simulation":
+        return config, "simulation", {"profile": "simulation", "state": "inactive", "ready": True,
+            "host": None, "detail": "Simulation does not open a physical transport."}
+    if transport == "serial":
+        if not config["serial_port"]:
+            raise ValueError("Choose a serial port in Settings before activating XpressNet")
+        return config, transport, {"profile": transport, "state": "configured", "ready": True,
+            "serial_port": config["serial_port"], "detail": "The selected serial interface will be opened explicitly at startup."}
+    platform_name = sys.platform if platform_name is None else platform_name
+    if transport == "wlan" and platform_name == "win32":
+        try:
+            status = preflight_z21_wlan(config["host"], route_api=wlan_route_api, platform_name=platform_name)
+        except RuntimeError as error:
+            if system in ("z21", "z21_white", "z21_start"):
+                raise
+            message = str(error).replace("Roco/Z21 Wi-Fi network", "Wi-Fi network that reaches the command station").replace("Z21", profile.label)
+            raise type(error)(message) from error
+        status["detail"] = str(status.get("detail", "")).replace("Z21", profile.label)
+        return config, transport, status
+    return config, transport, {"profile": transport, "state": "configured" if transport == "wlan" else "not_required",
+        "ready": True, "host": config["host"], "detail": (
+            "Join a Wi-Fi network that reaches the station before connecting. This operating system does not perform Windows WLAN route inspection."
+            if transport == "wlan" else "LAN connection selected; WLAN route inspection is not required.")}
+
+
 def run(host: str = "127.0.0.1", port: int = 8080) -> None:
     database_path = os.environ.get("H0_CONTROLLER_DB", "data/controller.sqlite3")
     repository = SQLiteSettingsRepository(database_path)
     try:
-        z21_host, z21_port, transport_profile, transport_status = startup_z21_transport(repository.load())
+        hardware, transport_profile, transport_status = startup_hardware(repository.load())
     finally:
         repository.close()
     feedback_map: dict[tuple[int, int], str] = {}
-    for token in os.environ.get("H0_Z21_FEEDBACK_MAP", "").split(","):
+    for token in os.environ.get("H0_HARDWARE_FEEDBACK_MAP", os.environ.get("H0_Z21_FEEDBACK_MAP", "")).split(","):
         if not token.strip() or "=" not in token:
             continue
         sensor, block_id = (part.strip() for part in token.split("=", 1))
@@ -5166,15 +5443,19 @@ def run(host: str = "127.0.0.1", port: int = 8080) -> None:
         feedback_map[(module, input_number)] = block_id
     app = ControllerApplication.sample(
         database_path=database_path,
-        z21_host=z21_host,
-        z21_port=z21_port,
+        hardware_system=hardware["system"],
+        hardware_connection=hardware,
+        z21_host=hardware["host"] if hardware["system"] in Z21_COMPATIBLE_SYSTEMS else None,
+        z21_port=hardware["port"],
         z21_transport_profile=transport_profile,
         z21_transport_status=transport_status,
         feedback_map=feedback_map,
     )
     server = make_server(host, port, app)
-    mode = f"Z21 {transport_profile.upper()} mode via {z21_host}:{z21_port}" if z21_host else "simulation mode"
-    print(f"H0 Z21 controller running at http://{host}:{port} ({mode})")
+    label = hardware_profile(hardware["system"]).label
+    endpoint = hardware["serial_port"] if transport_profile == "serial" else f"{hardware['host']}:{hardware['port']}"
+    mode = "simulation mode" if hardware["system"] == "simulation" else f"{label} {transport_profile.upper()} via {endpoint}"
+    print(f"JochJell controller running at http://{host}:{port} ({mode})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

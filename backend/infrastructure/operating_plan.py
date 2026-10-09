@@ -29,22 +29,25 @@ class OperatingPlanRepository:
             return None
         schedules = payload.get("schedules", [])
         routines = payload.get("routines", [])
-        if not isinstance(schedules, list) or not isinstance(routines, list):
+        triggers = payload.get("track_triggers", [])
+        if not isinstance(schedules, list) or not isinstance(routines, list) or not isinstance(triggers, list):
             return None
         return {
             "schedules": [deepcopy(item) for item in schedules if isinstance(item, dict)],
             "routines": [deepcopy(item) for item in routines if isinstance(item, dict)],
+            "track_triggers": [deepcopy(item) for item in triggers if isinstance(item, dict)],
         }
 
-    def save(self, schedules: list[Mapping[str, Any]], routines: list[Mapping[str, Any]]) -> None:
+    def save(self, schedules: list[Mapping[str, Any]], routines: list[Mapping[str, Any]], track_triggers=()) -> None:
         """Atomically save the current timetable and routine definitions."""
 
         if self.path is None:
             return
         payload = {
-            "version": 1,
+            "version": 2,
             "schedules": deepcopy([dict(item) for item in schedules]),
             "routines": deepcopy([dict(item) for item in routines]),
+            "track_triggers": deepcopy([dict(item) for item in track_triggers]),
         }
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Mapping, Protocol
+from typing import Iterable, Mapping, Protocol
 
 
 class ConnectionState(str, Enum):
@@ -96,6 +96,25 @@ class ConnectionStatusProvider(Protocol):
 
     def connection_status(self) -> ConnectionStatus:
         """Return the cached result of the last check."""
+
+
+class HardwareTrackSystem(TrackSystem, ConnectionStatusProvider, Protocol):
+    """Physical adapter lifecycle and feedback contract shared by station drivers."""
+
+    def register_train(self, train_id: str, address: int, *, forward: bool = True, decoder_protocol: str = "dcc") -> None:
+        """Bind a train to its station decoder identifier without moving it."""
+
+    def feedback_groups(self) -> tuple[int, ...]:
+        """Return configured occupancy groups to poll."""
+
+    def poll_feedback(self, groups: Iterable[int]) -> tuple[CommandResult, ...]:
+        """Poll occupancy without inferring identified train positions."""
+
+    def set_power(self, enabled: bool) -> CommandResult:
+        """Request station track power."""
+
+    def close(self) -> None:
+        """Release the transport after the caller has requested a safe stop."""
 
 
 class TrainControlPort(Protocol):

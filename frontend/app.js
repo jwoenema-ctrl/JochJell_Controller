@@ -187,6 +187,7 @@
   const speedChoices = new Map();
   const motionSamples = new Map();
   let workspaceLayout = null;
+  let trackTriggersView = null;
 
   function cancelSpeedDraft() {
     clearTimeout(speedTimer);
@@ -228,7 +229,7 @@
     });
   }
 
-  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true, world_day_minutes: 24 }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
+  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true, world_day_minutes: 24 }, hardware: { system: 'z21', host: '192.168.0.111', port: 21105, serial_port: '', baudrate: 115200, decoder_protocol: 'dcc' }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
   app.settings = clone(DEFAULT_SETTINGS);
   app.settingsDirty = false;
   app.settingsLoaded = false;
@@ -446,11 +447,15 @@
     if (value.simulation) app.state.simulation = { ...app.state.simulation, ...value.simulation };
     if (value.connection) app.state.connection = { ...app.state.connection, ...value.connection };
     if (value.mode) app.state.mode = value.mode;
+    if (typeof value.simulation_mode === 'boolean') app.state.simulation_mode = value.simulation_mode;
     if (value.calibration) app.state.calibration = value.calibration;
     if (value.presence) app.state.presence = value.presence;
     if (value.rollingStockInventory) app.state.rollingStockInventory = value.rollingStockInventory;
     if (value.programming) app.state.programming = value.programming;
+    if (Array.isArray(value.hardware_profiles)) app.hardwareProfiles = value.hardware_profiles;
+    if (value.runtime) app.settingsRuntime = { ...(app.settingsRuntime || {}), ...value.runtime };
     if (value.recording) app.state.recording = value.recording;
+    if (value.trackTriggers) app.state.trackTriggers = value.trackTriggers;
     if (Array.isArray(value.automationPrograms)) app.automationPrograms = value.automationPrograms;
     if (Array.isArray(value.automationPlayback)) app.state.automationPlayback = value.automationPlayback;
     if (value.coordinate_execution !== undefined) app.state.coordinate_execution = value.coordinate_execution;
@@ -593,7 +598,7 @@
       const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
       app.state.connection = simulated
         ? { ...app.state.connection, connected: false, simulated: true, label: 'Simulation online', detail: 'No physical trains connected' }
-        : { ...app.state.connection, connected: Boolean(app.state.connection.connected), simulated: false, label: app.state.connection.connected ? 'Z21 connected' : 'Z21 disconnected', detail: app.state.connection.detail || 'Controller state loaded' };
+        : { ...app.state.connection, connected: Boolean(app.state.connection.connected), simulated: false, label: app.state.connection.connected ? `${activeHardwareLabel()} connected` : `${activeHardwareLabel()} disconnected`, detail: app.state.connection.detail || 'Controller state loaded' };
     } else {
       freezeWorldClock();
       app.state.connection = { connected: false, simulated: true, label: 'Simulation fallback', detail: 'Local sample state' };
@@ -645,7 +650,7 @@
       app.state.connection = { connected: false, simulated: false, label: 'Controller unavailable', detail: 'Check the local server' };
     }
     if (stateResult.status === 'fulfilled') showSettingsRuntime(unwrap(stateResult.value)?.runtime);
-    renderConnection(); renderSidebar(); renderGraph(); renderSystematicView(); renderStats(); renderAutomationPlayback();
+    renderConnection(); renderSidebar(); renderGraph(); renderSystematicView(); renderStats(); renderAutomationPlayback(); renderTrackTriggers();
   }
 
   function applyTheme(theme) {
@@ -682,9 +687,16 @@
     $('#setting-world-day-minutes').value = String(settings.operations.world_day_minutes);
     app.simRate = Number(settings.operations.default_simulation_rate) || 1;
     applyInterfaceSettings(settings);
-    $('#setting-z21-host').value = settings.z21_host;
-    $('#setting-z21-port').value = settings.z21_port;
-    $('#setting-z21-wlan').checked = Boolean(settings.z21_wlan_enabled);
+    const hardware = settings.hardware || { ...DEFAULT_SETTINGS.hardware, host: settings.z21_host, port: settings.z21_port };
+    const profiles = app.hardwareProfiles || [];
+    $('#setting-hardware-system').innerHTML = profiles.length ? profiles.map((profile) => `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`).join('') : '<option value="simulation">Simulation</option><option value="z21">Roco Z21</option>';
+    $('#setting-hardware-system').value = hardware.system || 'z21';
+    $('#setting-z21-host').value = hardware.host || '';
+    $('#setting-z21-port').value = hardware.port || 21105;
+    $('#setting-hardware-serial').value = hardware.serial_port || '';
+    $('#setting-hardware-baudrate').value = hardware.baudrate || 115200;
+    renderHardwareFields(false, hardware.decoder_protocol);
+    $('#setting-z21-wlan').checked = hardware.transport === 'wlan' || (hardware.transport == null && Boolean(settings.z21_wlan_enabled));
     $('#setting-routing-adaptive').checked = settings.routing.adaptive;
     $('#setting-routing-busy').value = settings.routing.busy_interval_ms / 1000;
     $('#setting-routing-idle').value = settings.routing.idle_interval_ms / 1000;
@@ -697,6 +709,63 @@
   function selectedWlanProfile() {
     const checkbox = $('#setting-z21-wlan');
     return checkbox ? checkbox.checked : Boolean(app.settings.z21_wlan_enabled);
+  }
+
+  function selectedHardwareProfile() {
+    const id = $('#setting-hardware-system')?.value || app.settings.hardware?.system || 'z21';
+    return (app.hardwareProfiles || []).find((profile) => profile.id === id) || { id, label: id === 'simulation' ? 'Simulation' : 'Roco Z21', transport: id === 'simulation' ? 'simulation' : 'udp', decoder_protocols: ['dcc'], capabilities: {} };
+  }
+
+  function activeHardwareLabel() {
+    return app.settingsRuntime?.hardware_label || (app.hardwareProfiles || []).find((profile) => profile.id === app.settingsRuntime?.hardware_system)?.label || (app.state.connection?.simulated ? 'Simulation' : 'Command station');
+  }
+
+  function activeHardwareCapabilities() {
+    return app.settingsRuntime?.hardware_capabilities || app.state.connection?.capabilities || {};
+  }
+
+  function trainHardwareCompatible(train) {
+    if (app.state.connection?.simulated) return true;
+    const protocols = app.settingsRuntime?.hardware_decoder_protocols;
+    return !Array.isArray(protocols) || protocols.includes(String(train?.decoder_protocol || 'dcc').toLowerCase());
+  }
+
+  function activeFunctionCount() {
+    const profile = (app.hardwareProfiles || []).find((item) => item.id === app.settingsRuntime?.hardware_system);
+    return Number(profile?.max_functions) || 32;
+  }
+
+  function renderHardwareFields(applyDefaults = false, protocol) {
+    const profile = selectedHardwareProfile();
+    const serial = profile.transport === 'serial';
+    const network = !serial && profile.id !== 'simulation';
+    if (applyDefaults) {
+      $('#setting-z21-host').value = profile.default_host || '';
+      $('#setting-z21-port').value = profile.default_port || 21105;
+      $('#setting-hardware-baudrate').value = profile.default_baudrate || 115200;
+    }
+    [['#setting-hardware-host-row', network], ['#setting-hardware-port-row', network], ['#setting-hardware-serial-row', serial], ['#setting-hardware-baudrate-row', serial]].forEach(([id, visible]) => $(id).classList.toggle('is-hidden', !visible));
+    $('#setting-z21-host').required = network;
+    $('#setting-z21-host').disabled = !network;
+    $('#setting-z21-port').required = network;
+    $('#setting-z21-port').disabled = !network;
+    $('#setting-hardware-serial').required = serial;
+    $('#setting-hardware-serial').disabled = !serial;
+    $('#setting-hardware-baudrate').disabled = !serial;
+    const protocols = profile.decoder_protocols || ['dcc'];
+    const selectedProtocol = protocol || $('#setting-hardware-protocol').value;
+    $('#setting-hardware-protocol').innerHTML = protocols.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value.toUpperCase())}</option>`).join('');
+    $('#setting-hardware-protocol').value = protocols.includes(selectedProtocol) ? selectedProtocol : protocols[0];
+    $('#setting-hardware-protocol-row').classList.toggle('is-hidden', protocols.length < 2);
+    $('.settings-wlan-row').classList.toggle('is-hidden', !(profile.supports_wlan ?? network));
+    $('#setting-hardware-wlan-label').textContent = ['z21', 'z21_white', 'z21_start'].includes(profile.id) ? 'Use Wi-Fi / Roco 10814 WLAN' : 'Connect over Wi-Fi';
+    $('#setting-z21-wlan-help').textContent = profile.id === 'dr5000' ? 'Connect the controller computer to the DR5000 Wi-Fi or to a network that reaches it. Train commands use the same network protocol. The app does not join Wi-Fi or store its password.' : ['z21', 'z21_white', 'z21_start'].includes(profile.id) ? 'The Roco 10814 provides a Wi-Fi router and z21 unlock. Join the station Wi-Fi on the controller computer first. Commands use the same UDP connection; a custom IP address is retained. The app does not store Wi-Fi passwords.' : 'Use a Wi-Fi router or access point that reaches the command station. This does not require the station to have a built-in Wi-Fi radio. Join that network on the controller computer first; the app does not store Wi-Fi passwords.';
+    $('#setting-hardware-help').textContent = profile.detail || 'Choose a digital system and save its connection settings.';
+    $('#setting-hardware-port-label').textContent = `${String(profile.transport || 'network').toUpperCase()} port`;
+    $('#setting-hardware-port-help').textContent = profile.default_port ? `Default for ${profile.label}: ${profile.default_port}.` : 'Use the port configured on your command station.';
+    const labels = { speed: 'Train control', functions: 'Decoder functions', turnouts: 'Turnouts', feedback: 'Occupancy feedback', telemetry: 'Electrical readings', programming: 'Programming track', pom: 'Main-track programming', railcom: 'RailCom', address_scan: 'Address scan' };
+    $('#settings-hardware-capabilities').innerHTML = Object.entries(labels).filter(([key]) => profile.capabilities?.[key]).map(([, label]) => `<span class="hardware-capability">${label}</span>`).join('');
+    renderWlanPresentation(app.settingsRuntime);
   }
 
   function runtimeTransportProfile(runtime) {
@@ -736,7 +805,8 @@
   }
 
   function renderWlanPresentation(runtime) {
-    const enabled = selectedWlanProfile();
+    const hardware = selectedHardwareProfile();
+    const enabled = hardware.id !== 'simulation' && hardware.transport !== 'serial' && selectedWlanProfile();
     const host = ($('#setting-z21-host') && $('#setting-z21-host').value.trim()) || app.settings.z21_host || DEFAULT_SETTINGS.z21_host;
     const port = Number(($('#setting-z21-port') && $('#setting-z21-port').value) || app.settings.z21_port || DEFAULT_SETTINGS.z21_port);
     const profile = runtimeTransportProfile(runtime);
@@ -744,9 +814,10 @@
     const check = connectionCheckSummary(runtimeConnectionCheck(runtime));
     const status = $('#settings-transport-status');
     if (!status) return;
-    const selected = enabled ? 'Roco 10814 WLAN' : 'direct LAN';
-    const parts = [`Selected profile: ${selected} · UDP ${host}:${port}.`];
-    if (profile != null) parts.push(`Controller profile: ${transportProfileLabel(profile)}.`);
+    const endpoint = hardware.id === 'simulation' ? 'local simulation' : hardware.transport === 'serial' ? `${$('#setting-hardware-serial').value || 'select a serial port'} · ${$('#setting-hardware-baudrate').value} baud` : `${String(hardware.transport).toUpperCase()} ${host}:${port}`;
+    const parts = [`Selected: ${hardware.label} · ${endpoint}${enabled ? ' · Wi-Fi' : ''}.`];
+    if (runtime?.hardware_label) parts.push(`Active: ${runtime.hardware_label}.`);
+    else if (profile != null) parts.push(`Controller profile: ${transportProfileLabel(profile)}.`);
     if (runtime && runtime.restart_required && !/simulation/i.test(String(profile)) && activeWlan !== enabled) parts.push('Save and reconnect to apply this profile.');
     if (check) parts.push(`Connection check: ${check.text}.`);
     status.textContent = parts.join(' ');
@@ -754,8 +825,8 @@
     status.dataset.check = check && check.tone || '';
     const connectButton = $('#settings-connect-z21');
     if (connectButton) {
-      connectButton.textContent = enabled ? 'Connect via WLAN' : 'Connect to real Z21';
-      connectButton.setAttribute('aria-label', enabled ? 'Connect to real Z21 via Roco 10814 WLAN' : 'Connect to real Z21');
+      connectButton.textContent = hardware.id === 'simulation' ? 'Start simulation' : enabled ? 'Connect via WLAN' : `Connect to ${hardware.label}`;
+      connectButton.setAttribute('aria-label', connectButton.textContent);
     }
   }
 
@@ -767,7 +838,7 @@
   function showSettingsRuntime(runtime) {
     if (!runtime) return;
     app.settingsRuntime = runtime;
-    $('#settings-connection-note').textContent = (runtime.connection_message || 'Saving never activates hardware. Connection changes take effect at the next explicit Z21 startup.') + (runtime.z21_environment_override ? ' An environment setting currently overrides the saved address or port.' : '');
+    $('#settings-connection-note').textContent = (runtime.connection_message || 'Save your settings, then connect explicitly. Connecting leaves track power off.') + (runtime.z21_environment_override ? ' An environment setting currently overrides the saved address or port.' : '');
     renderWlanPresentation(runtime);
     const routing = runtime.routing;
     if (routing) $('#settings-routing-status').textContent = routing.error
@@ -778,7 +849,7 @@
   async function loadAppSettings() {
     try {
       const response = await fetchJson('/api/settings');
-      app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, interface: { ...DEFAULT_SETTINGS.interface, ...(response.settings || {}).interface }, operations: { ...DEFAULT_SETTINGS.operations, ...(response.settings || {}).operations }, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
+      app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, hardware: { ...DEFAULT_SETTINGS.hardware, host: response.settings?.z21_host || DEFAULT_SETTINGS.z21_host, port: response.settings?.z21_port || DEFAULT_SETTINGS.z21_port, ...response.settings?.hardware }, interface: { ...DEFAULT_SETTINGS.interface, ...(response.settings || {}).interface }, operations: { ...DEFAULT_SETTINGS.operations, ...(response.settings || {}).operations }, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
       mergePayload(response);
       app.settingsLoaded = true;
       workspaceLayout?.receiveSettings(response.settings);
@@ -798,9 +869,10 @@
     const button = $('#settings-save');
     const settings = {
       theme: $('#setting-theme').value,
+      hardware: { system: $('#setting-hardware-system').value, host: $('#setting-z21-host').value.trim(), port: Number($('#setting-z21-port').value), serial_port: $('#setting-hardware-serial').value.trim(), baudrate: Number($('#setting-hardware-baudrate').value), decoder_protocol: $('#setting-hardware-protocol').value, transport: selectedHardwareProfile().id === 'simulation' ? 'simulation' : selectedHardwareProfile().transport === 'serial' ? 'serial' : selectedWlanProfile() ? 'wlan' : 'lan' },
       z21_host: $('#setting-z21-host').value.trim(),
       z21_port: Number($('#setting-z21-port').value),
-      z21_wlan_enabled: $('#setting-z21-wlan').checked,
+      z21_wlan_enabled: ['z21', 'z21_white', 'z21_start'].includes($('#setting-hardware-system').value) && $('#setting-z21-wlan').checked,
       ui_refresh_ms: Number($('#setting-ui-refresh').value) * 1000,
       interface: { density: $('#setting-interface-density').value, show_connection_detail: $('#setting-show-connection-detail').checked, reduce_motion: $('#setting-reduce-motion').checked },
       operations: { confirm_power_actions: $('#setting-confirm-power-actions').checked, default_simulation_rate: Number($('#setting-default-simulation-rate').value), connected_blocks: $('#setting-connected-blocks').checked, world_day_minutes: Number($('#setting-world-day-minutes').value) },
@@ -810,7 +882,7 @@
     $('#settings-save-status').textContent = 'Saving preferences…';
     try {
       const response = await fetchJson('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
-      app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, interface: { ...DEFAULT_SETTINGS.interface, ...(response.settings || {}).interface }, operations: { ...DEFAULT_SETTINGS.operations, ...(response.settings || {}).operations }, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
+      app.settings = { ...clone(DEFAULT_SETTINGS), ...response.settings, hardware: { ...DEFAULT_SETTINGS.hardware, ...response.settings?.hardware }, interface: { ...DEFAULT_SETTINGS.interface, ...(response.settings || {}).interface }, operations: { ...DEFAULT_SETTINGS.operations, ...(response.settings || {}).operations }, routing: { ...DEFAULT_SETTINGS.routing, ...(response.settings || {}).routing } };
       app.stateMutationRevision += 1;
       mergePayload(response);
       workspaceLayout?.receiveSettings(response.settings);
@@ -1061,7 +1133,12 @@
     showToast(`${record.name || record.id || definition.label} removed`, 'success');
   }
 
+  function renderTrackTriggers() {
+    trackTriggersView?.render({ trains: app.state.trains || [], blocks: app.state.layout.blocks || [], programs: app.automationPrograms || [], inventory: rollingStockCatalogue(), triggers: app.state.trackTriggers || {}, physical: app.state.simulation_mode === false });
+  }
+
   function renderAll() {
+    renderTrackTriggers();
     renderConnection();
     renderSidebar();
     renderGraph();
@@ -1420,6 +1497,18 @@
     if (train && $('#programming-address')) $('#programming-address').value = train.address || train.number || '';
     if (train && $('#programming-new-address')) $('#programming-new-address').value = train.address || train.number || '';
     const state = app.state.programming || {};
+    const capabilities = activeHardwareCapabilities();
+    const decoderProtocol = String(train?.decoder_protocol || 'dcc').toLowerCase();
+    const knownCapabilities = Object.keys(capabilities).length > 0;
+    const target = $('#programming-target');
+    const mainOption = target.querySelector('option[value="main"]');
+    const serviceOption = target.querySelector('option[value="programming_track"]');
+    mainOption.disabled = knownCapabilities && !capabilities.pom;
+    serviceOption.disabled = knownCapabilities && !capabilities.programming;
+    if (target.selectedOptions[0]?.disabled) target.value = !mainOption.disabled ? 'main' : 'programming_track';
+    const unsupported = decoderProtocol !== 'dcc' || knownCapabilities && !capabilities.programming && !capabilities.pom;
+    ['#validate-programming', '#write-programming', '#read-programming', '#program-dcc-address'].forEach((id) => { $(id).disabled = unsupported; $(id).title = unsupported ? `Decoder programming is unavailable with ${activeHardwareLabel()}.` : ''; });
+    $('#programming-hardware-help').textContent = decoderProtocol !== 'dcc' ? `This panel programs DCC decoders. Use the command station to program the selected ${decoderProtocol.toUpperCase()} decoder.` : unsupported ? `${activeHardwareLabel()} does not provide decoder programming through this connection. Train movement and function controls remain available.` : `${activeHardwareLabel()}: ${capabilities.pom ? 'main-track programming' : ''}${capabilities.pom && capabilities.programming ? ' and ' : ''}${capabilities.programming ? 'programming-track operations' : ''}${knownCapabilities ? ' available.' : 'validate the target before programming.'} Confirm every CV read or write explicitly.`;
     const last = state.last_request;
     const lastAddress = state.last_address_request;
     $('#programming-state').textContent = state.supported ? 'Ready' : state.detail || 'Transport unavailable';
@@ -1509,9 +1598,10 @@
     const dot = $('#connection-dot');
     dot.className = `status-dot ${connection.connected ? '' : connection.simulated ? 'is-simulated' : 'is-offline'}`;
     const runtimeProfile = runtimeTransportProfile(app.settingsRuntime);
-    const connectedViaWlan = connection.connected && (runtimeProfile == null ? Boolean(app.settings.z21_wlan_enabled) : profileUsesWlan(runtimeProfile));
+    const connectedViaWlan = connection.connected && (app.settingsRuntime?.hardware_connection?.transport === 'wlan' || (runtimeProfile == null ? app.settings.hardware?.transport === 'wlan' : profileUsesWlan(runtimeProfile)));
     const genericLabel = !connection.label || /^(Z21 connected|Controller online)$/i.test(connection.label);
-    $('#connection-label').textContent = connectedViaWlan && genericLabel ? 'Z21 via WLAN' : connection.label || (connection.connected ? 'Controller online' : 'Simulation fallback');
+    $('#connection-label').textContent = genericLabel && connection.connected ? `${activeHardwareLabel()}${connectedViaWlan ? ' via Wi-Fi' : ' connected'}` : connection.label || (connection.connected ? 'Controller online' : 'Simulation fallback');
+    $('#hardware-brand').textContent = connection.simulated ? 'MODEL RAILWAY CONTROL' : `${activeHardwareLabel()} CONTROL`;
     $('#connection-detail').textContent = connection.detail || '';
     $('#connection-detail').hidden = app.settings.interface.show_connection_detail === false;
     const feedback = app.state.feedback || {};
@@ -1519,7 +1609,7 @@
     $('#health-score').textContent = feedbackFailed ? 'Check' : connection.simulated ? 'Simulation' : connection.connected ? 'Online' : 'Offline';
     $('#feedback-health').textContent = feedbackFailed ? 'Unavailable' : connection.connected ? 'Live feedback' : connection.simulated ? 'Simulated' : 'Unknown';
     $('#checker-health').textContent = feedbackFailed ? 'Safe stop required' : connection.connected ? 'Verified' : 'Standby';
-    $('#health-source').textContent = feedbackFailed ? 'Feedback unavailable · safe stop' : connection.connected ? 'Z21 API connected' : connection.simulated ? 'Simulation API' : 'Embedded sample state';
+    $('#health-source').textContent = feedbackFailed ? 'Feedback unavailable · safe stop' : connection.connected ? `${activeHardwareLabel()} connected` : connection.simulated ? 'Simulation API' : 'Embedded sample state';
     $('.health-connection-dot').style.background = feedbackFailed ? 'var(--red)' : connection.connected ? 'var(--green)' : 'var(--yellow)';
   }
 
@@ -1527,6 +1617,9 @@
     renderWorldClock();
     const train = selectedTrain();
     const addressInput = $('#selected-train-badge');
+    addressInput.setAttribute('aria-label', 'Select train by decoder address or station ID');
+    addressInput.title = 'Type a saved decoder address or station ID to select a train. Enter confirms; Escape cancels.';
+    addressInput.maxLength = 5;
     addressInput.disabled = !train;
     // Preserve a focused address draft during polling, but update it when
     // selection changes through another control or the roster is replaced.
@@ -1540,13 +1633,14 @@
     const selectedMode = trainControlMode(train);
     app.controlMode = selectedMode === 'stopped' ? 'safe' : selectedMode;
     const direction = String(train.direction || '').toLowerCase();
-    const directionLocked = app.directionPending || app.speedSending || (speedDraft && speedDraft.speed > 0) || Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 || Number(train.motion && train.motion.requested_speed) > 0 || trainControlMode(train) === 'automatic' || app.source !== 'api';
+    const incompatible = !trainHardwareCompatible(train);
+    const directionLocked = incompatible || app.directionPending || app.speedSending || (speedDraft && speedDraft.speed > 0) || Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 || Number(train.motion && train.motion.requested_speed) > 0 || trainControlMode(train) === 'automatic' || app.source !== 'api';
     ['forward', 'reverse'].forEach((value) => {
       const button = $(`#direction-${value}`);
       button.setAttribute('aria-pressed', String(direction === value));
       button.disabled = Boolean(directionLocked);
     });
-    $('#direction-status').textContent = app.directionPending ? 'Sending direction…' : app.speedSending ? 'Waiting for speed confirmation…' : trainControlMode(train) === 'automatic' ? 'Switch this train to manual to change direction.' : Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 ? 'Stop and wait for the train to halt before reversing.' : 'Choose decoder direction. Speed stays at zero.';
+    $('#direction-status').textContent = incompatible ? `This train uses ${train.decoder_protocol || 'DCC'}, which ${activeHardwareLabel()} does not support. Update its profile or select another system.` : app.directionPending ? 'Sending direction…' : app.speedSending ? 'Waiting for speed confirmation…' : trainControlMode(train) === 'automatic' ? 'Switch this train to manual to change direction.' : Number(train.speed) > 0 || Number(train.actual_speed_kmh) > 0 ? 'Stop and wait for the train to halt before reversing.' : 'Choose decoder direction. Speed stays at zero.';
     $('#selected-train-name').textContent = train.name || `Train ${train.number || ''}`;
     $('#selected-train-origin').textContent = train.origin || 'Origin';
     $('#selected-train-destination').textContent = train.destination || 'Destination';
@@ -1554,7 +1648,7 @@
     $('#speed-readout').textContent = Math.round(dialSpeed);
     $('#speed-slider').max = Number(train.maxSpeed || 140);
     $('#speed-slider').value = Math.round(dialSpeed);
-    $('#speed-slider').disabled = app.source !== 'api' || app.state.track_power === false || app.nativeModePending || app.powerPending || app.controlPending;
+    $('#speed-slider').disabled = incompatible || app.source !== 'api' || app.state.track_power === false || app.nativeModePending || app.powerPending || app.controlPending;
     $('#speed-command-status').textContent = `${train.actual_speed_kmh == null ? 'Commanded' : 'Actual'} ${Math.round(Number(train.actual_speed_kmh ?? train.speed) || 0)} km/h${train.speed_limit_kmh == null ? '' : ` · limit ${train.speed_limit_kmh} km/h`} · auto-applies`;
     renderSelectedTrainFunctions(train);
     $('#simulation-clock').textContent = app.state.simulation.clock || '00:00:00';
@@ -1602,7 +1696,7 @@
       const enabled = Boolean(states[String(number)]);
       const label = item.name || item.function_name || item.description || `Function F${number}`;
       const momentary = item.momentary ? ' - momentary' : '';
-      const disabled = app.source !== 'api' || app.state.track_power === false;
+      const disabled = number >= activeFunctionCount() || !trainHardwareCompatible(train) || app.source !== 'api' || app.state.track_power === false || activeHardwareCapabilities().functions === false;
       return `<button type="button" class="button button-soft train-function-button${enabled ? ' is-on' : ''}" data-train-function="${number}" aria-pressed="${enabled}" title="F${number}: ${escapeHtml(label)}${momentary}"${disabled ? ' disabled' : ''}><span class="train-function-main"><strong>F${number}</strong><small>${escapeHtml(label)}</small></span><em>${enabled ? 'ON' : 'OFF'}</em></button>`;
     }).join('');
     stockGroups.innerHTML = [...stock.values()].map(({ item, quantity }) => {
@@ -1612,7 +1706,7 @@
           const number = Number(entry.function_number);
           const enabled = Boolean(item.function_states[String(number)]);
           const label = entry.name || `Function F${number}`;
-          const disabled = app.source !== 'api' || app.state.track_power === false;
+          const disabled = number >= activeFunctionCount() || app.source !== 'api' || app.state.track_power === false || activeHardwareCapabilities().functions === false;
           return `<button type="button" class="button button-soft train-function-button${enabled ? ' is-on' : ''}" data-stock-function-item="${escapeHtml(item.id)}" data-stock-function-number="${number}" aria-pressed="${enabled}" title="DCC #${escapeHtml(item.decoder_address)} · F${number}: ${escapeHtml(label)}"${disabled ? ' disabled' : ''}><span class="train-function-main"><strong>F${number}</strong><small>${escapeHtml(label)}</small></span><em>${enabled ? 'ON' : 'OFF'}</em></button>`;
         }).join('');
       return `<div class="function-control-group"><div class="function-control-heading"><h3>${escapeHtml(item.name)}${quantity > 1 ? ` ×${quantity}` : ''}</h3><span>DCC #${escapeHtml(item.decoder_address)}</span></div><div class="train-function-grid">${buttons}</div></div>`;
@@ -2746,6 +2840,9 @@
     const presence = app.state.presence || {};
     const summary = presence.summary || {};
     const stationKnown = (presence.results || []).filter((item) => item.response && item.response.known_to_station).length;
+    const scanUnsupported = activeHardwareCapabilities().address_scan === false;
+    $('#scan-train-presence').disabled = scanUnsupported || Boolean(presence.running);
+    $('#scan-train-presence').title = scanUnsupported ? `Address scanning is unavailable with ${activeHardwareLabel()}.` : '';
     const total = Number(summary.total) || 0;
     const errors = Number(summary.errors) || 0;
     const completed = Boolean(presence.completed_at || total || errors || presence.error);
@@ -2754,9 +2851,9 @@
     const message = presence.running ? 'Checking saved DCC addresses. Results will appear here.'
       : presence.error ? 'The scan could not finish. Try scanning again.'
       : completed ? (total ? `Checked ${total} saved DCC ${total === 1 ? 'address' : 'addresses'}.` : 'No saved train addresses were available to scan.')
-      : 'Use “Ping saved DCC IDs” to check your saved train addresses.';
+      : scanUnsupported ? `${activeHardwareLabel()} does not support address scanning through this interface.` : 'Use “Ping saved DCC IDs” to check your saved train addresses.';
     const note = presence.running || !completed ? '' : presence.error ? String(presence.error)
-      : stationKnown ? `${stationKnown} known to Z21 only. RailCom is required to confirm physical presence.`
+      : stationKnown ? `${stationKnown} known to ${activeHardwareLabel()} only. Track feedback is required to confirm physical presence.`
       : total ? 'Detection uses available track feedback. Unknown means presence could not be confirmed.' : '';
     $('#train-presence-status').dataset.state = state;
     [
@@ -3018,17 +3115,17 @@
     const mappings = Array.isArray(train.decoder_functions) ? train.decoder_functions : [];
     const byNumber = new Map(mappings.map((item) => [Number(item.function_number), item]));
     const states = train.decoder_function_states && typeof train.decoder_function_states === 'object' ? train.decoder_function_states : {};
-    return Array.from({ length: 32 }, (_, number) => {
+    return Array.from({ length: activeFunctionCount() }, (_, number) => {
       const mapping = byNumber.get(number) || {};
       const active = Boolean(states[String(number)]);
-      const available = mapping.enabled !== false;
+      const available = mapping.enabled !== false && trainHardwareCompatible(train) && activeHardwareCapabilities().functions !== false;
       const label = mapping.name || DEFAULT_FUNCTION_NAMES[number] || 'Function ' + number;
       return '<button type="button" class="function-toggle' + (active ? ' is-on' : '') + '" data-function-number="' + number + '" aria-pressed="' + active + '"' + (available ? '' : ' disabled') + '><strong>F' + number + '</strong><span>' + escapeHtml(label) + '</span><small>' + (active ? 'ON' : 'OFF') + '</small></button>';
     }).join('');
   }
 
   function renderFunctionControls(train, compact) {
-    return '<section class="function-control-panel' + (compact ? ' is-compact' : '') + '"><div class="record-section-heading"><div><p class="eyebrow">DECODER CONTROL</p><h3>Functions <span>F0–F31</span></h3></div><span class="settings-help">Changes are sent to the selected decoder</span></div><div class="function-toggle-grid">' + decoderFunctionRows(train) + '</div></section>';
+    return '<section class="function-control-panel' + (compact ? ' is-compact' : '') + '"><div class="record-section-heading"><div><p class="eyebrow">DECODER CONTROL</p><h3>Functions <span>F0–F' + (activeFunctionCount() - 1) + '</span></h3></div><span class="settings-help">Changes are sent to the selected decoder</span></div><div class="function-toggle-grid">' + decoderFunctionRows(train) + '</div></section>';
   }
 
   function bindFunctionControls(root) {
@@ -3072,8 +3169,23 @@
       const lengthMm = train.length_mm == null ? (Number(train.length) || 0) : train.length_mm;
       const controlMode = trainControlMode(train);
       const controlModeOptions = TRAIN_CONTROL_MODES.map((option) => `<option value="${option.value}"${option.value === controlMode ? ' selected' : ''}>${option.label}</option>`).join('');
-      content.innerHTML = `<div class="field-grid"><div class="field"><label for="editor-name">Service name</label><input id="editor-name" value="${escapeHtml(train.name || '')}"></div><div class="field"><label for="editor-number">DCC address / service no.</label><input id="editor-number" inputmode="numeric" value="${escapeHtml(train.number || '')}"></div><div class="field"><label for="editor-origin">Origin</label><input id="editor-origin" value="${escapeHtml(train.origin || '')}"></div><div class="field"><label for="editor-destination">Destination</label><input id="editor-destination" value="${escapeHtml(train.destination || '')}"></div><div class="field"><label for="editor-destination-block">Destination block</label><select id="editor-destination-block">${destinationOptions || '<option value="">No blocks configured</option>'}</select></div><div class="field train-control-mode-field"><label for="editor-control-mode">Control mode</label><select id="editor-control-mode">${controlModeOptions}</select></div><div class="field"><label for="editor-manufacturer">Manufacturer</label><input id="editor-manufacturer" value="${escapeHtml(train.manufacturer || '')}"></div><div class="field"><label for="editor-model">Model / catalogue no.</label><input id="editor-model" value="${escapeHtml(train.model_number || '')}"></div><div class="field"><label for="editor-era">Railway era</label><input id="editor-era" value="${escapeHtml(train.era || '')}"></div><div class="field"><label for="editor-protocol">Decoder protocol</label><select id="editor-protocol"><option value="DCC"${String(train.decoder_protocol || 'DCC').toUpperCase() === 'DCC' ? ' selected' : ''}>DCC</option><option value="MM"${String(train.decoder_protocol || '').toUpperCase() === 'MM' ? ' selected' : ''}>Motorola</option><option value="SX"${String(train.decoder_protocol || '').toUpperCase() === 'SX' ? ' selected' : ''}>Selectrix</option></select></div><div class="field"><label for="editor-mass">Mass (g)</label><input id="editor-mass" type="number" min="0" step="1" value="${escapeHtml(mass)}"></div><div class="field"><label for="editor-length">Length (mm)</label><input id="editor-length" type="number" min="0" step="any" value="${escapeHtml(lengthMm)}"></div><div class="field"><label for="editor-max-speed">Maximum speed (km/h)</label><input id="editor-max-speed" type="number" min="0" step="1" value="${escapeHtml(train.maxSpeed || 140)}"></div></div><p class="editor-note">Changes are held in the dashboard until saved to the controller. The same profile can drive manual, automatic, and schedule simulation modes.</p><div class="button-row" style="padding: 12px 0 0"><button class="button button-primary" id="save-train-settings">Save profile</button><button class="button button-soft" id="route-selected">Plan route</button></div>`;
+      content.innerHTML = `<div class="field-grid"><div class="field"><label for="editor-name">Service name</label><input id="editor-name" value="${escapeHtml(train.name || '')}"></div><div class="field"><label for="editor-number">Decoder address / station ID</label><input id="editor-number" inputmode="numeric" value="${escapeHtml(train.number || '')}"></div><div class="field"><label for="editor-origin">Origin</label><input id="editor-origin" value="${escapeHtml(train.origin || '')}"></div><div class="field"><label for="editor-destination">Destination</label><input id="editor-destination" value="${escapeHtml(train.destination || '')}"></div><div class="field"><label for="editor-destination-block">Destination block</label><select id="editor-destination-block">${destinationOptions || '<option value="">No blocks configured</option>'}</select></div><div class="field train-control-mode-field"><label for="editor-control-mode">Control mode</label><select id="editor-control-mode">${controlModeOptions}</select></div><div class="field"><label for="editor-manufacturer">Manufacturer</label><input id="editor-manufacturer" value="${escapeHtml(train.manufacturer || '')}"></div><div class="field"><label for="editor-model">Model / catalogue no.</label><input id="editor-model" value="${escapeHtml(train.model_number || '')}"></div><div class="field"><label for="editor-era">Railway era</label><input id="editor-era" value="${escapeHtml(train.era || '')}"></div><div class="field"><label for="editor-protocol">Decoder protocol</label><select id="editor-protocol"><option value="DCC"${String(train.decoder_protocol || 'DCC').toUpperCase() === 'DCC' ? ' selected' : ''}>DCC</option><option value="MM"${String(train.decoder_protocol || '').toUpperCase() === 'MM' ? ' selected' : ''}>Motorola</option><option value="MFX"${String(train.decoder_protocol || '').toUpperCase() === 'MFX' ? ' selected' : ''}>mfx</option><option value="SX"${String(train.decoder_protocol || '').toUpperCase() === 'SX' ? ' selected' : ''}>Selectrix (catalogue only)</option></select></div><div class="field"><label for="editor-mass">Mass (g)</label><input id="editor-mass" type="number" min="0" step="1" value="${escapeHtml(mass)}"></div><div class="field"><label for="editor-length">Length (mm)</label><input id="editor-length" type="number" min="0" step="any" value="${escapeHtml(lengthMm)}"></div><div class="field"><label for="editor-max-speed">Maximum speed (km/h)</label><input id="editor-max-speed" type="number" min="0" step="1" value="${escapeHtml(train.maxSpeed || 140)}"></div></div><p class="editor-note">Changes are held in the dashboard until saved to the controller. The same profile can drive manual, automatic, and schedule simulation modes.</p><div class="button-row" style="padding: 12px 0 0"><button class="button button-primary" id="save-train-settings">Save profile</button><button class="button button-soft" id="route-selected">Plan route</button></div>`;
       content.insertAdjacentHTML('beforeend', renderFunctionControls(train, false));
+      const availableProtocols = app.settingsRuntime?.hardware_decoder_protocols || ['dcc'];
+      const currentProtocol = String(train.decoder_protocol || 'dcc').toLowerCase();
+      const protocolLabels = { dcc: 'DCC', mm: 'Motorola', mfx: 'mfx', sx: 'Selectrix' };
+      $('#editor-protocol').innerHTML = [...new Set([...availableProtocols, currentProtocol])].map((value) => `<option value="${escapeHtml(value.toUpperCase())}"${value === currentProtocol ? ' selected' : ''}>${escapeHtml(protocolLabels[value] || value.toUpperCase())}${availableProtocols.includes(value) ? '' : ' (unsupported by active station)'}</option>`).join('');
+      const protocolHelp = document.createElement('small');
+      protocolHelp.className = 'settings-help';
+      $('#editor-number').parentElement.append(protocolHelp);
+      const showProtocolHelp = () => {
+        const protocol = $('#editor-protocol').value.toLowerCase();
+        const station = app.settingsRuntime?.hardware_system;
+        const supported = app.settingsRuntime?.hardware_decoder_protocols || ['dcc'];
+        protocolHelp.textContent = protocol === 'mfx' ? station === 'ecos' ? 'For ECoS, enter the locomotive object ID assigned by the station.' : 'For Märklin, enter the mfx SID assigned by the station.' : supported.includes(protocol) ? 'Use the address configured on the decoder.' : `${protocol.toUpperCase()} is stored in the catalogue; ${activeHardwareLabel()} does not support it through this connection.`;
+      };
+      showProtocolHelp();
+      $('#editor-protocol').addEventListener('change', showProtocolHelp);
       bindFunctionControls(content);
       $('#save-train-settings').addEventListener('click', saveTrainSettings);
       $('#editor-control-mode').addEventListener('change', (event) => setTrainMode(event.target.value));
@@ -3675,7 +3787,7 @@
     const powered = Boolean(power.available ? power.track_power : app.state.track_power);
     $('#layout-track-power').textContent = info ? `Track power ${powered ? 'on' : 'off'}` : 'Track power unknown';
     $('#layout-power-status').dataset.state = !info ? 'unknown' : power.short_circuit ? 'fault' : powered ? 'on' : 'off';
-    $('#layout-power-source').textContent = !info ? 'Waiting for controller' : power.available ? 'Z21 reported' : app.state.connection.simulated ? 'Simulation' : 'Commanded state';
+    $('#layout-power-source').textContent = !info ? 'Waiting for controller' : power.available ? `${activeHardwareLabel()} reported` : app.state.connection.simulated ? 'Simulation' : 'Commanded state';
     const metrics = [
       ['Trains', info ? info.train_count : '—'],
       ['Occupied blocks', info ? info.occupied_blocks + ' / ' + info.block_count : '—'],
@@ -3769,6 +3881,7 @@
     $('#systematic-panel').classList.toggle('is-hidden', !trackPage || app.layoutView !== 'systematic');
     $('#layout-panel').classList.toggle('is-hidden', !trackPage);
     $('#automation-studio-panel').classList.toggle('is-hidden', page !== 'layout');
+    $('#track-trigger-panel').classList.toggle('is-hidden', page !== 'layout');
     $('#layout-info-panel').classList.toggle('is-hidden', !trackPage);
     $('#layout-panel').classList.toggle('systematic-only', app.layoutView === 'systematic');
     $('#map-stage').classList.toggle('is-hidden', app.layoutView === 'systematic');
@@ -3838,7 +3951,7 @@
     clearTimeout(trainAddressTimer);
     const input = $('#selected-train-badge');
     const value = input.value.trim();
-    const valid = /^[0-9]{1,4}$/.test(value) && Number(value) > 0;
+    const valid = /^[0-9]{1,5}$/.test(value) && Number(value) > 0 && Number(value) <= 65535;
     const matches = valid ? app.state.trains.filter((train) => train.number != null && train.number !== '' && Number(train.number) === Number(value)) : [];
     if (matches.length === 1) {
       input.removeAttribute('aria-invalid');
@@ -3850,9 +3963,9 @@
       return;
     }
     if (!reportMissing) return;
-    const message = !valid ? 'Enter a saved DCC address from 1 to 9999.'
-      : matches.length > 1 ? `Several trains use DCC address ${Number(value)}. Select one from the train list.`
-      : `No saved train has DCC address ${Number(value)}.`;
+    const message = !valid ? 'Enter a saved decoder address or station ID from 1 to 65535.'
+      : matches.length > 1 ? `Several trains use address or station ID ${Number(value)}. Select one from the train list.`
+      : `No saved train has address or station ID ${Number(value)}.`;
     showToast(message, 'warning');
     if (restoreInvalid) {
       input.value = String(selectedTrain()?.number || '');
@@ -4147,7 +4260,7 @@
       mergePayload(response);
       app.source = 'api';
       const simulated = Boolean(app.state.connection && (app.state.connection.simulated || app.state.connection.mode === 'simulation'));
-      app.state.connection = { ...app.state.connection, connected: !simulated, simulated, label: simulated ? 'Simulation API online' : 'Z21 controller online', detail: 'Command acknowledged' };
+      app.state.connection = { ...app.state.connection, connected: !simulated, simulated, label: simulated ? 'Simulation API online' : `${activeHardwareLabel()} online`, detail: 'Command acknowledged' };
       updateSync('Command acknowledged by controller', 'success');
       renderAll();
       showToast('Controller command accepted', 'success');
@@ -4375,39 +4488,43 @@
     });
     document.addEventListener('keyup', (event) => { if (event.code === 'Space') app.panKeyDown = false; });
     updateNativeControls = (preserveStatus = false) => {
-      const available = Boolean(window.pywebview && window.pywebview.api && typeof window.pywebview.api.switch_mode === 'function');
+      const available = Boolean(app.settingsLoaded);
       const wlan = selectedWlanProfile();
       renderWlanPresentation(app.settingsRuntime);
       $('#settings-connect-z21').disabled = !available || Boolean(app.nativeModePending) || Boolean(app.settingsDirty);
       $('#settings-use-simulation').disabled = !available || Boolean(app.nativeModePending);
       if (preserveStatus || app.nativeModePending) return;
-      if (app.settingsDirty) $('#settings-native-status').textContent = `Save or discard your settings changes before ${wlan ? 'connecting via WLAN' : 'connecting to Z21'}.`;
+      if (app.settingsDirty) $('#settings-native-status').textContent = 'Save or discard your settings changes before connecting.';
       else if (available) $('#settings-native-status').textContent = wlan
-        ? 'Desktop controls ready. Connect Windows to the Z21 Wi-Fi before choosing Connect via WLAN.'
-        : 'Desktop connection controls ready.';
-      else $('#settings-native-status').textContent = wlan
-        ? 'Connect via WLAN is available in the standalone Windows app. This browser cannot switch controller mode.'
-        : 'Available in the standalone Windows app. Browser users must restart the controller to change connection mode.';
+        && selectedHardwareProfile().transport !== 'serial' && selectedHardwareProfile().id !== 'simulation' ? 'Join a Wi-Fi network that reaches the command station on the controller computer before connecting. Connecting leaves track power off.'
+        : 'Connection controls ready. Connecting leaves track power off.';
+      else $('#settings-native-status').textContent = 'Waiting for the controller. Refresh to load connection settings.';
     };
     const switchNativeMode = async (mode) => {
-      if (app.nativeModePending || !window.pywebview || !window.pywebview.api) return;
-      if (app.settingsDirty) { $('#settings-native-status').textContent = 'Save or discard your settings changes before switching mode.'; return; }
-      const wlan = mode === 'z21' && selectedWlanProfile();
+      if (app.nativeModePending || !app.settingsLoaded) return;
+      if (app.settingsDirty && mode !== 'simulation') { $('#settings-native-status').textContent = 'Save or discard your settings changes before connecting.'; return; }
       cancelSpeedDraft();
       speedChoices.clear();
       app.nativeModePending = true;
       updateNativeControls(); renderSidebar();
-      $('#settings-native-status').textContent = wlan ? 'Waiting for confirmation to connect via WLAN…' : 'Waiting for desktop confirmation…';
+      $('#settings-native-status').textContent = mode === 'simulation' ? 'Stopping hardware and starting simulation…' : `Connecting to ${selectedHardwareProfile().label}…`;
       try {
         await speedInFlight;
-        const result = await window.pywebview.api.switch_mode(mode);
+        const result = await fetchJson('/api/commands', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: mode === 'simulation' ? 'disconnect_hardware' : 'connect_hardware' }) });
         if (result && (result.error || result.ok === false || result.accepted === false)) throw new Error(result.error || result.message || (result.cancelled ? 'Connection change cancelled.' : 'Connection mode was not changed.'));
-        if (result && (result.transport_profile != null || result.transport_status != null)) {
-          app.settingsRuntime = { ...(app.settingsRuntime || {}), ...(result.transport_profile == null ? {} : { transport_profile: result.transport_profile }), ...(result.transport_status == null ? {} : { transport_status: result.transport_status }) };
-          renderWlanPresentation(app.settingsRuntime);
-        }
-        $('#settings-native-status').textContent = result && (result.message || result.status) || (wlan ? 'WLAN connection requested. Windows must already be connected to the Z21 Wi-Fi.' : 'Connection mode change requested.');
-      } catch (error) { $('#settings-native-status').textContent = error.message || 'Connection change failed.'; }
+        app.stateMutationRevision += 1;
+        mergePayload(result);
+        if (result.state) mergePayload(result.state);
+        renderAll();
+        if (result.runtime) showSettingsRuntime(result.runtime);
+        else await loadAppSettings();
+        $('#settings-native-status').textContent = result.message || (mode === 'simulation' ? 'Simulation active.' : `${activeHardwareLabel()} connected. Track power is off.`);
+      } catch (error) {
+        // Failed station activation may have returned the controller to
+        // simulation. Read that state before reporting the connection error.
+        await Promise.allSettled([refreshController(), loadAppSettings()]);
+        $('#settings-native-status').textContent = error.message || 'Connection change failed.';
+      }
       finally {
         app.nativeModePending = false;
         updateNativeControls(true);
@@ -4416,7 +4533,7 @@
     };
     updateNativeControls();
     window.addEventListener('pywebviewready', updateNativeControls);
-    $('#settings-connect-z21').addEventListener('click', () => switchNativeMode('z21'));
+    $('#settings-connect-z21').addEventListener('click', () => switchNativeMode('hardware'));
     $('#settings-use-simulation').addEventListener('click', () => switchNativeMode('simulation'));
     $('#layout-svg').addEventListener('dblclick', (event) => {
       const node = event.target.closest('.block-node');
@@ -4452,6 +4569,7 @@
       });
     }));
     $('#app-settings-form').addEventListener('submit', saveAppSettings);
+    $('#setting-hardware-system').addEventListener('change', () => { renderHardwareFields(true); app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; updateNativeControls(); });
     $('#app-settings-form').addEventListener('input', (event) => { if (event.target.id === 'setting-world-clock-time') return; app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; renderWlanPresentation(app.settingsRuntime); updateNativeControls(); });
     $('#settings-world-clock-set').addEventListener('click', () => setWorldClock());
     $('#settings-world-clock-reset').addEventListener('click', () => setWorldClock(true));
@@ -4781,6 +4899,7 @@
     }
     applyDynamicStyles();
     setupEvents();
+    if (window.TrackTriggers) trackTriggersView = window.TrackTriggers.create({ root: $('#track-trigger-panel'), request: fetchJson, onChange: payload => { mergePayload(payload); renderAll(); } });
     if (window.WorkspaceLayout) workspaceLayout = window.WorkspaceLayout.create({ root: document, request: fetchJson });
     document.addEventListener('workspace-layout-saved', (event) => { app.settings = event.detail; });
     window.requestAnimationFrame(animateTrainMarkers);

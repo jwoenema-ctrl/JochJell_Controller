@@ -16,7 +16,7 @@
       <div class="brand-lockup">
         <div class="brand-mark brand-logo"><img src="/assets/logo.png" alt="JochJell Controller logo" width="40" height="40"></div>
         <div>
-          <p class="eyebrow">Z21 / ROCO CONTROL</p>
+          <p class="eyebrow" id="hardware-brand">MODEL RAILWAY CONTROL</p>
         <h1>JochJell Controller</h1>
         </div>
       </div>
@@ -76,7 +76,7 @@
               <p class="eyebrow">SELECTED TRAIN</p>
               <h2 id="selected-train-name">IC 184 Aurora</h2>
             </div>
-            <input class="train-badge" id="selected-train-badge" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" value="184" placeholder="DCC" autocomplete="off" spellcheck="false" aria-label="Select train by DCC address" title="Type a saved DCC address to select a train. Enter confirms; Escape cancels.">
+            <input class="train-badge" id="selected-train-badge" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="5" value="184" placeholder="ID" autocomplete="off" spellcheck="false" aria-label="Select train by decoder address or station ID" title="Type a saved decoder address or station ID to select a train. Enter confirms; Escape cancels.">
           </div>
           <div class="selected-train-route">
             <span id="selected-train-origin">Amsterdam Centraal</span><span class="route-line"></span><span id="selected-train-destination">Utrecht</span>
@@ -251,6 +251,7 @@
           </div>
         </section>
 
+        <section class="panel is-hidden" id="track-trigger-panel" aria-labelledby="track-trigger-heading"></section>
         <section class="panel automation-studio" id="automation-studio-panel">
           <div class="panel-heading automation-studio-heading">
             <div>
@@ -437,7 +438,7 @@
               <label>Value<input id="programming-value" type="number" min="0" max="255" step="1" value="0"></label>
             </div>
             <div class="button-row programming-actions"><button type="button" class="button button-soft" id="validate-programming">Validate request</button><button type="button" class="button button-primary" id="write-programming">Program decoder</button><button type="button" class="button button-soft" id="read-programming">Read CV</button><button type="button" class="button button-soft" id="program-dcc-address">Program DCC address</button></div>
-              <p class="settings-help">Validate the target first, then explicitly confirm a CV read or write. Main-track programming uses RailCom/POM; service-mode writes require the programming-track transport.</p>
+              <p class="settings-help" id="programming-hardware-help">Validate the target first, then explicitly confirm a CV read or write. Available operations depend on the connected command station.</p>
             <p class="settings-status" id="programming-status" role="status">No programming request validated.</p>
           </section>
           <section class="panel calibration-panel" id="calibration-panel">
@@ -507,14 +508,19 @@
             <div class="settings-row"><div><label for="setting-reduce-motion">Reduce motion</label><p class="settings-help">Tone down animated layout markers and transitions.</p></div><div class="settings-control"><input id="setting-reduce-motion" type="checkbox" role="switch"></div></div>
           </section>
           <section class="settings-section settings-card" id="settings-connection" aria-labelledby="connection-heading">
-            <div class="settings-section-heading"><div><p class="eyebrow">COMMAND STATION</p><h3 id="connection-heading">Z21 connection</h3><p>Configure the command station on your local network.</p></div><span class="settings-section-index">02</span></div>
-            <div class="settings-row"><div><label for="setting-z21-host">IP address</label><p class="settings-help">Saving an address does not connect or enable track power.</p></div><div class="settings-control"><input id="setting-z21-host" type="text" placeholder="192.168.0.111" spellcheck="false" autocomplete="off" required></div></div>
-            <div class="settings-row"><div><label for="setting-z21-port">UDP port</label><p class="settings-help">The standard Z21 port is 21105.</p></div><div class="settings-control"><input id="setting-z21-port" type="number" min="1" max="65535" step="1" required></div></div>
-            <div class="settings-row settings-wlan-row"><div><label for="setting-z21-wlan">Use Roco 10814 WLAN</label><p class="settings-help" id="setting-z21-wlan-help">The 10814 provides the Wi-Fi router and Z21 unlock; train commands still use the same UDP connection. Connect Windows to the Z21 Wi-Fi first. This app does not join Wi-Fi and never stores its password. The usual Z21 address is 192.168.0.111, while a custom IP address above is retained.</p></div><div class="settings-control"><input id="setting-z21-wlan" name="z21_wlan_enabled" type="checkbox" role="switch" aria-describedby="setting-z21-wlan-help settings-transport-status"></div></div>
-            <p class="settings-status settings-transport-status" id="settings-transport-status" role="status" aria-live="polite">Selected profile: direct LAN over UDP.</p>
-            <p class="settings-help" id="settings-connection-note">The controller starts in simulation unless real Z21 operation is explicitly enabled.</p>
-            <div class="settings-native-actions"><button type="button" class="button button-primary" id="settings-connect-z21" disabled>Connect to real Z21</button><button type="button" class="button button-soft" id="settings-use-simulation" disabled>Use simulation</button></div>
-            <p class="settings-status" id="settings-native-status" role="status">Available in the desktop app. Browser users must restart the controller to change connection mode.</p>
+            <div class="settings-section-heading"><div><p class="eyebrow">COMMAND STATION</p><h3 id="connection-heading">Hardware connection</h3><p>Choose a digital system and configure its connection.</p></div><span class="settings-section-index">02</span></div>
+            <div class="settings-row"><div><label for="setting-hardware-system">Digital system</label><p class="settings-help" id="setting-hardware-help">Choose simulation or a compatible command station.</p></div><div class="settings-control"><select id="setting-hardware-system"><option value="simulation">Simulation</option></select></div></div>
+            <div class="settings-row" id="setting-hardware-host-row"><div><label for="setting-z21-host">IPv4 address</label><p class="settings-help">Saving an address does not connect or enable track power.</p></div><div class="settings-control"><input id="setting-z21-host" type="text" placeholder="192.168.0.111" spellcheck="false" autocomplete="off" required></div></div>
+            <div class="settings-row" id="setting-hardware-port-row"><div><label for="setting-z21-port" id="setting-hardware-port-label">Network port</label><p class="settings-help" id="setting-hardware-port-help">Use the port configured on your command station.</p></div><div class="settings-control"><input id="setting-z21-port" type="number" min="1" max="65535" step="1" required></div></div>
+            <div class="settings-row is-hidden" id="setting-hardware-serial-row"><div><label for="setting-hardware-serial">Serial port</label><p class="settings-help">Use the controller computer's port, such as COM3 or /dev/ttyUSB0.</p></div><div class="settings-control"><input id="setting-hardware-serial" type="text" spellcheck="false" autocomplete="off" placeholder="COM3"></div></div>
+            <div class="settings-row is-hidden" id="setting-hardware-baudrate-row"><div><label for="setting-hardware-baudrate">Baud rate</label><p class="settings-help">Match the speed selected on the computer interface.</p></div><div class="settings-control"><input id="setting-hardware-baudrate" type="number" min="1200" max="1000000" step="1" value="115200"></div></div>
+            <div class="settings-row is-hidden" id="setting-hardware-protocol-row"><div><label for="setting-hardware-protocol">Decoder protocol</label><p class="settings-help">Select the track protocol used by the configured decoder addresses.</p></div><div class="settings-control"><select id="setting-hardware-protocol"><option value="dcc">DCC</option></select></div></div>
+            <div class="hardware-capabilities" id="settings-hardware-capabilities" aria-label="Hardware capabilities"></div>
+            <div class="settings-row settings-wlan-row"><div><label for="setting-z21-wlan" id="setting-hardware-wlan-label">Connect over Wi-Fi</label><p class="settings-help" id="setting-z21-wlan-help">Join a Wi-Fi network that can reach the command station from the controller computer before connecting. The app does not store Wi-Fi passwords.</p></div><div class="settings-control"><input id="setting-z21-wlan" name="z21_wlan_enabled" type="checkbox" role="switch" aria-describedby="setting-z21-wlan-help settings-transport-status"></div></div>
+            <p class="settings-status settings-transport-status" id="settings-transport-status" role="status" aria-live="polite">Selected profile: simulation.</p>
+            <p class="settings-help" id="settings-connection-note">Save your settings, then connect explicitly. Connecting leaves track power off.</p>
+            <div class="settings-native-actions"><button type="button" class="button button-primary" id="settings-connect-z21" disabled>Connect</button><button type="button" class="button button-soft" id="settings-use-simulation" disabled>Disconnect / use simulation</button></div>
+            <p class="settings-status" id="settings-native-status" role="status">Loading controller connection settings…</p>
           </section>
           <section class="settings-section settings-card" id="settings-routing" aria-labelledby="routing-heading">
             <div class="settings-section-heading"><div><p class="eyebrow">PLANNING ENGINE</p><h3 id="routing-heading">Routing</h3><p>Keep route plans in step with your layout without over-polling a quiet railway.</p></div><span class="settings-section-index">03</span></div>
@@ -666,6 +672,7 @@
   </dialog>
   <script src="scan_viewer.js"></script>
   <script src="workspace-layout.js"></script>
+  <script src="track-triggers.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

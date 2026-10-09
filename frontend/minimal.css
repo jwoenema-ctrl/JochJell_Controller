@@ -507,6 +507,8 @@ body .empty-state { font-size: 13px; }
 }
 /* Direct train controls and desktop-only connection actions. */
 .settings-native-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.hardware-capabilities { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; }
+.hardware-capability { border: 1px solid var(--line); border-radius: 999px; padding: 4px 9px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 #speed-command-status { flex: 1; font-size: 11px; line-height: 1.5; }
 .editor-tabs { flex-wrap: wrap; }
 .graph-train-marker { pointer-events: none; }
@@ -654,3 +656,33 @@ html[data-reduce-motion="true"] *, html[data-reduce-motion="true"] *::before, ht
 .route-flow-empty { display: grid; min-height: 150px; place-items: center; padding: 18px; text-align: center; color: var(--muted); font-size: 11px; }
 .route-legacy-fields { display: none !important; }
 @media (max-width: 780px) { .route-flow-builder { grid-template-columns: 1fr; } }
+/* Track triggers share the controller's compact, labelled form controls. */
+.track-trigger-content { padding: 18px 20px; }
+.track-trigger-content > .muted { margin: 0 0 16px; }
+.track-trigger-content details { border-top: 1px solid var(--line); padding: 14px 0; }
+.track-trigger-content summary { cursor: pointer; font-weight: 600; }
+.track-trigger-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 14px; margin: 14px 0; }
+.track-trigger-fields label, .track-trigger-action label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; min-width: 0; }
+.track-trigger-content input:not([type=checkbox]), .track-trigger-content select { width: 100%; box-sizing: border-box; min-height: 36px; padding: 7px 10px; border: 1px solid var(--line-bright); border-radius: 8px; background: var(--panel-raised); color: inherit; font: inherit; }
+.track-trigger-content input:focus, .track-trigger-content select:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
+.track-trigger-content .track-trigger-check { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.track-trigger-check input { width: 16px; height: 16px; }
+.track-trigger-trains { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+.track-trigger-content fieldset { border: 1px solid var(--line-bright); border-radius: 8px; padding: 12px; margin: 10px 0; }
+.track-trigger-content fieldset[hidden] { display: none; }
+.track-trigger-actions { display: grid; gap: 10px; margin: 12px 0; }
+.track-trigger-action { display: flex; gap: 12px; align-items: end; border: 1px solid var(--line-bright); padding: 12px; border-radius: 10px; }
+.track-trigger-action label { flex: 1; }
+.track-trigger-action-number { color: var(--muted, #aaa); align-self: center; font-size: 12px; }
+.track-trigger-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.track-trigger-row { display: flex; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.track-trigger-row p { font-size: 12px; margin: 6px 0 0; overflow-wrap: anywhere; }
+.track-trigger-state { font-size: 11px; color: var(--muted, #bbb); margin-left: 12px; }
+.track-trigger-row .track-trigger-buttons { flex-shrink: 0; align-self: start; }
+.track-trigger-route { grid-column: 1 / -1; }
+.track-trigger-route small { color: var(--muted, #bbb); }
+.track-trigger-content [data-trigger-status]:empty { display: none; }
+@media (max-width: 720px) { .track-trigger-action { flex-wrap: wrap; } .track-trigger-action label { flex: 1 1 120px; } .track-trigger-row { flex-direction: column; } }
+
+.track-trigger-content .muted, .track-trigger-content .empty-state { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.track-trigger-content h3 { font-size: 14px; margin: 14px 0 6px; }

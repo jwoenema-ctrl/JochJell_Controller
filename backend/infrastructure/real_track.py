@@ -96,7 +96,7 @@ class Z21TrackSystem:
             replace(m, speed=speed, target_speed=speed) if m.train_id == train_id else m
             for m in self._snapshot.trains))
 
-    def register_train(self, train_id: str, address: int, *, forward: bool = True) -> None:
+    def register_train(self, train_id: str, address: int, *, forward: bool = True, decoder_protocol: str = "dcc") -> None:
         """Bind an application train ID to a validated DCC address."""
 
         if not train_id:
@@ -105,6 +105,10 @@ class Z21TrackSystem:
             raise ValueError("address must be between 1 and 16383")
         self._train_addresses[train_id] = int(address)
         self._train_directions[train_id] = bool(forward)
+
+    def close(self) -> None:
+        self.transport.close()
+        self._snapshot = replace(self._snapshot, powered=False)
 
     bind_train = register_train
 
@@ -371,6 +375,20 @@ class Z21TrackSystem:
         """Return the configured contact-to-block mapping."""
 
         return dict(self._feedback_map)
+
+    def replace_feedback_map(self, mapping: Mapping[tuple[int, int], str]) -> None:
+        """Validate detector configuration using the concrete adapter's contact limits."""
+        previous, healthy = self._feedback_map, self._feedback_healthy
+        self._feedback_map = {}
+        try:
+            for (module, contact), block in mapping.items():
+                self.bind_feedback(module, contact, block)
+        except Exception:
+            self._feedback_map, self._feedback_healthy = previous, healthy
+            raise
+        self._feedback_healthy = not bool(mapping)
+        blocks = set(mapping.values())
+        self._snapshot = replace(self._snapshot, occupied_blocks={key: values for key, values in self._snapshot.occupied_blocks.items() if key in blocks})
 
     def feedback_groups(self) -> tuple[int, ...]:
         """Return R-BUS group indexes needed by the configured contacts."""

@@ -60,10 +60,14 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   await pause(400);
   assert.equal(commands.some(command => command.speed_kmh === 58), false, 'Mode change cancels pending input');
   await page.locator('[data-workspace="settings"]').click();
-  assert.equal(await page.locator('#settings-connect-z21').isDisabled(), true, 'Browser has no native bridge');
-  await page.evaluate(() => { window.pywebview = { api: { switch_mode: async mode => ({ accepted: false, error: `Test cancellation: ${mode}` }) } }; window.dispatchEvent(new Event('pywebviewready')); });
+  assert.equal(await page.locator('#settings-connect-z21').isEnabled(), true, 'Browser can explicitly connect through the controller API');
+  await page.route('**/api/commands', async route => {
+    if (route.request().postDataJSON()?.type === 'connect_hardware') {
+      await route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'Test cancellation: hardware' }) });
+    } else await route.continue();
+  });
   await page.locator('#settings-connect-z21').click();
-  await page.waitForFunction(() => document.querySelector('#settings-native-status').textContent === 'Test cancellation: z21');
+  await page.waitForFunction(() => document.querySelector('#settings-native-status').textContent === 'Test cancellation: hardware');
   assert.deepEqual(errors, []);
   await page.locator('[data-workspace="layout"]').click();
   await page.locator('button[data-layout-view="editor"]').click();
@@ -126,7 +130,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   assert.equal(await marker.getAttribute('transform'), reported, 'No fabricated hardware motion');
   assert.equal(await marker.getAttribute('data-estimated'), null);
   await motionPage.close();
-  console.log('PASS: block double-click/rename, profile tabs, safe debounced speed, native bridge status, directed limits/inheritance, bounded motion and no fabricated hardware positions.');
+  console.log('PASS: block double-click/rename, profile tabs, safe debounced speed, browser connection errors, directed limits/inheritance, bounded motion and no fabricated hardware positions.');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
   if (browser) await browser.close();
   if (server && server.exitCode === null) { const exited = new Promise(resolve => server.once('exit', resolve)); server.kill(); await exited; }

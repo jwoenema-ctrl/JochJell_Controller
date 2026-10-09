@@ -495,10 +495,8 @@ def _optional_int(value: Any, field: str) -> int | None:
         parsed = int(value.strip())
     else:
         raise CatalogueValidationError(f"{field} must be an integer")
-    if not DCC_ADDRESS_MIN <= parsed <= DCC_ADDRESS_MAX:
-        raise CatalogueValidationError(
-            f"{field} must be between {DCC_ADDRESS_MIN} and {DCC_ADDRESS_MAX}"
-        )
+    # The record validator checks the address after its decoder protocol is
+    # available: station mfx object IDs have a different range from DCC.
     return parsed
 
 

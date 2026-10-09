@@ -9,6 +9,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Iterator, Mapping
 
+from backend.core.decoder import normalize_decoder_protocol, validate_decoder_address
+
 
 @dataclass(frozen=True)
 class TrainModel:
@@ -26,6 +28,9 @@ class TrainModel:
     mass_g: float | None = None
     max_speed_kmh: float | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "decoder_protocol", normalize_decoder_protocol(self.decoder_protocol))
 
 
 @dataclass(frozen=True)
@@ -852,8 +857,7 @@ class SQLiteTrainDatabase:
             raise ValueError("train_id is required")
         if not train.name.strip():
             raise ValueError("name is required")
-        if train.decoder_address is not None and not 0 <= train.decoder_address <= 0x3FFF:
-            raise ValueError("decoder_address must fit the DCC address range")
+        validate_decoder_address(train.decoder_address, train.decoder_protocol, legacy_dcc_zero=True)
         for name in ("length_mm", "mass_g", "max_speed_kmh"):
             value = getattr(train, name)
             if value is not None and value < 0:

@@ -12,7 +12,8 @@ from tkinter import messagebox, ttk
 import urllib.request
 import webbrowser
 
-from backend.api.server import ControllerApplication, make_server, startup_z21_transport
+from backend.api.server import ControllerApplication, make_server, startup_hardware
+from backend.infrastructure.hardware import hardware_profile, Z21_COMPATIBLE_SYSTEMS
 from backend.infrastructure.settings import SQLiteSettingsRepository
 from backend.infrastructure.wlan import WindowsRouteAPI
 from app_metadata import PRODUCT_NAME, PUBLISHER, VERSION
@@ -76,9 +77,9 @@ class DesktopController:
         database = directory / "controller.sqlite3"
         settings = SQLiteSettingsRepository(database)
         try:
-            host, z21_port, transport_profile, transport_status = startup_z21_transport(
+            hardware, transport_profile, transport_status = startup_hardware(
                 settings.load(),
-                {"H0_TRACK_SYSTEM": "z21" if physical else "simulation"},
+                {"H0_TRACK_SYSTEM": "hardware" if physical else "simulation"},
                 wlan_route_api=wlan_route_api,
                 platform_name=platform_name,
             )
@@ -86,16 +87,21 @@ class DesktopController:
             settings.close()
         feedback_map = {}
         if physical:
-            for entry in os.environ.get('H0_Z21_FEEDBACK_MAP', '').split(','):
-                if not entry.strip():
+            for entry in os.environ.get('H0_HARDWARE_FEEDBACK_MAP', os.environ.get('H0_Z21_FEEDBACK_MAP', '')).split(','):
+                if not entry.strip() or '=' not in entry:
                     continue
-                contact, block = entry.strip().split('=')
-                module, input_number = map(int, contact.split(':'))
+                contact, block = entry.strip().split('=', 1)
+                try:
+                    module, input_number = map(int, contact.split(':'))
+                except ValueError:
+                    continue
                 feedback_map[(module, input_number)] = block.strip()
         self.app = ControllerApplication.sample(
             database_path=str(database),
-            z21_host=host,
-            z21_port=z21_port,
+            hardware_system=hardware["system"],
+            hardware_connection=hardware,
+            z21_host=hardware["host"] if hardware["system"] in Z21_COMPATIBLE_SYSTEMS else None,
+            z21_port=hardware["port"],
             z21_transport_profile=transport_profile,
             z21_transport_status=transport_status,
             feedback_map=feedback_map,
@@ -168,7 +174,7 @@ def main():
     ttk.Label(pane, text=PRODUCT_NAME, font=('Segoe UI', 22)).pack(anchor='w')
     ttk.Label(pane, text=f'{PUBLISHER} · version {VERSION} · Windows edition').pack(anchor='w', pady=(5, 22))
     mode = tk.StringVar(value='Simulation')
-    selector = ttk.Combobox(pane, textvariable=mode, values=('Simulation', 'Z21 · saved IP address'), state='readonly')
+    selector = ttk.Combobox(pane, textvariable=mode, values=('Simulation', 'Hardware · saved digital system'), state='readonly')
     selector.pack(fill='x')
     status = tk.StringVar(value='Ready. Simulation never connects to physical trains.')
     ttk.Label(pane, textvariable=status, wraplength=420).pack(anchor='w', pady=16)
@@ -180,12 +186,13 @@ def main():
             webbrowser.open(controller.url)
             return
         physical = mode.get() != 'Simulation'
-        if physical and not messagebox.askyesno('Connect to Z21?', 'Connect to the saved Z21 IP address? Verify the layout, decoder addresses and feedback configuration before operating trains.', parent=root):
+        if physical and not messagebox.askyesno('Connect to hardware?', 'Connect to the digital system saved in Settings? The controller starts with track power off.', parent=root):
             return
         try:
             controller = DesktopController(data_directory(), physical=physical)
             selector.configure(state='disabled')
-            status.set(f"{'Z21' if physical else 'Simulation'} running. Keep this window open.\n{controller.url}")
+            label = hardware_profile(controller.app.hardware_system).label
+            status.set(f"{label} running. Keep this window open.\n{controller.url}")
             start_button.configure(text='Open control desk')
             webbrowser.open(controller.url)
         except Exception as error:

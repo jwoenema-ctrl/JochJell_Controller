@@ -1,8 +1,8 @@
 # JochJell Controller
 
-JochJell Controller is a local control desk for an H0 model railway. It combines a browser dashboard with a Python controller for train driving, route planning, automation routines, timetables, layout management and Roco/Z21 LAN control.
+JochJell Controller is a local control desk for an H0 model railway. It combines a browser dashboard with a Python controller for train driving, route planning, automation routines, timetables, layout management and selectable digital command stations.
 
-The application starts in simulation mode. You can build and test a railway plan without connecting hardware, then explicitly switch to a real Z21 connection when the layout and safety checks are ready.
+The application starts in simulation mode. Choose a digital system in Settings and press Connect to activate its saved connection. Z21-family, DR5000, Märklin CS2/CS3, ESU ECoS and XpressNet LI-USB profiles are available. Network profiles support LAN and Wi-Fi; see [hardware compatibility](docs/HARDWARE_COMPATIBILITY.md) for setup, adapter capabilities and physical verification limits.
 
 ## Download the standalone Windows release
 
@@ -99,6 +99,10 @@ The Travel distance block uses the selected train's motion calibration. For exam
 
 You can record live speed, direction and function commands, then import the last recording into a reusable routine. Playing a routine requires confirmation and ends with a stop command.
 
+#### Track triggers
+
+Use **Automation → Track triggers** to run locomotive/car functions or saved routines when a train enters a block. Choose any train or selected trains, function on/off or a timed pulse, and a detector mapping for real hardware. See [Track triggers](docs/TRACK_TRIGGERS.md) for setup and train identification.
+
 #### Route flows
 
 A route is a reusable sequence that can contain:
@@ -163,14 +167,14 @@ Settings includes:
 - compact or comfortable interface density;
 - browser refresh interval;
 - simulation rate and motion preferences;
-- Z21 IPv4 address and UDP port;
-- Roco 10814 WLAN preference;
+- digital system selection, IPv4 address and network port, or XpressNet serial port and baud rate;
+- LAN/Wi-Fi preference for network stations;
 - adaptive route-planning intervals;
 - connected-block or one-block dispatch;
 - photo-scan upload and management;
 - per-page panel ordering and sidebar placement.
 
-Saving a Z21 address does not connect to hardware. Physical operation requires an explicit connection action and confirmation.
+Saving hardware preferences does not connect to a station. The explicit Connect action stops routines and trains, confirms track power off, then activates the selected connection. Disconnect returns to a stopped simulation while preserving your layout, catalogue, timetable and world clock.
 
 ## A practical first-time tutorial
 
@@ -243,7 +247,7 @@ Simulation is the default and is recommended for initial setup. For a physical r
 3. For the Roco 10814 WLAN package, complete the one-time z21start unlock first.
 4. Open **Settings → Connection** and enter the Z21 IPv4 address and UDP port.
 5. Enable **Use Roco 10814 WLAN** only when that network path is correct.
-6. Choose **Connect to real Z21** and confirm the action.
+6. Choose **Connect to Roco Z21** (or **Connect via WLAN**). Track power remains off until you explicitly enable it.
 7. Verify track power, train address and direction with one stationary train.
 
 The application does not join Wi-Fi; it never asks for or stores the WLAN password. The usual 10814 address is `192.168.0.111`, unless your network uses another address. See [WLAN_10814.md](docs/WLAN_10814.md) and [Z21_INTEGRATION.md](docs/Z21_INTEGRATION.md) for hardware details and safety assumptions.
@@ -278,7 +282,7 @@ Only one desktop controller may use the AppData directory and local controller p
 
 ## Run from source
 
-The project has no third-party runtime dependency in its first milestone. From the repository root:
+The network station adapters use Python's standard library. XpressNet additionally needs `pip install -r requirements-hardware.txt`. From the repository root:
 
 ```powershell
 python "Train Controller/Train_Controller.py"
@@ -293,7 +297,7 @@ $env:H0_TRACK_SYSTEM = "z21"
 python "Train Controller/Train_Controller.py"
 ```
 
-`H0_Z21_HOST` and `H0_Z21_PORT` override the saved address and port. R-BUS feedback mapping can be supplied with, for example, `H0_Z21_FEEDBACK_MAP=1:1=B01,1:2=B02`.
+Use `H0_TRACK_SYSTEM=hardware` to activate the saved digital system instead. `H0_Z21_HOST` and `H0_Z21_PORT` retain their Z21 overrides; generic overrides and detector mapping are documented in [hardware compatibility](docs/HARDWARE_COMPATIBILITY.md). R-BUS feedback mapping can be supplied with, for example, `H0_Z21_FEEDBACK_MAP=1:1=B01,1:2=B02`.
 
 ## Build and test
 
@@ -333,6 +337,7 @@ The browser suite uses disposable data and never enables physical Z21 control. G
 - [Architecture](ARCHITECTURE.md) — module boundaries and extension points.
 - [Layout persistence](docs/LAYOUT_PERSISTENCE.md) — saved layout model.
 - [Connection speed limits](docs/CONNECTION_SPEED_LIMITS.md) — default and train-specific limits.
+- [Hardware compatibility](docs/HARDWARE_COMPATIBILITY.md) — selectable stations, LAN/Wi-Fi/serial setup, decoder identities and adapter capabilities.
 - [Z21 integration](docs/Z21_INTEGRATION.md) — transport and safety boundary.
 - [Roco 10814 WLAN setup](docs/WLAN_10814.md) — network preparation.
 - [Native Windows edition](docs/WINDOWS_NATIVE.txt) — embedded app notes.

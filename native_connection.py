@@ -23,9 +23,9 @@ class NativeConnectionAPI:
             return {"accepted": False, "error": "A connection change is already in progress"}
         try:
             message = ("Stop all trains, switch track power off and save the current layout before changing mode? "
-                       "Connecting to Z21 uses the address last saved in Settings. "
+                       "Connecting to hardware uses the digital system and connection last saved in Settings. "
                        "Verify decoder addresses and feedback wiring before operating physical trains.")
-            if not window.create_confirmation_dialog("Connect to Z21?" if mode == "z21" else "Use simulation?", message):
+            if not window.create_confirmation_dialog("Connect to hardware?" if mode == "z21" else "Use simulation?", message):
                 return {"accepted": False, "cancelled": True}
             switch_result = self._switch(mode == "z21")
             response = {"accepted": True, "mode": mode}

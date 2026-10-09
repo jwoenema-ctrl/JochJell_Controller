@@ -10,10 +10,12 @@ import sqlite3
 from threading import RLock
 from typing import Any, Mapping
 
+from .hardware import DEFAULT_HARDWARE, Z21_COMPATIBLE_SYSTEMS, validate_hardware
+
 
 WORKSPACE_PANELS = {
     "dispatch": ["layout-info", "node-graph", "systematic", "trains", "timetable"],
-    "layout": ["layout-info", "node-graph", "automation", "systematic", "routes", "scans", "timetable"],
+    "layout": ["layout-info", "node-graph", "automation", "systematic", "routes", "track-triggers", "scans", "timetable"],
     "trains": ["trains", "train-profile", "rolling-stock", "programming", "calibration", "assembler"],
     "timetable": ["timetable"],
     "scans": ["scans"],
@@ -43,10 +45,13 @@ def validate_workspace_layout(value: Any, current: Mapping[str, Any] | None = No
         if page == "layout" and key == "order" and isinstance(order, list):
             legacy = ["layout-info", "node-graph", "systematic"]
             if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
-                return list(order) + ["automation", "routes", "scans", "timetable"]
+                return list(order) + ["automation", "routes", "track-triggers", "scans", "timetable"]
             legacy = ["layout-info", "node-graph", "systematic", "routes", "scans"]
             if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
-                return list(order) + ["automation", "timetable"]
+                return list(order) + ["automation", "track-triggers", "timetable"]
+            legacy = ["layout-info", "node-graph", "automation", "systematic", "routes", "scans", "timetable"]
+            if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
+                return list(order) + ["track-triggers"]
         if page == "dispatch" and key == "order" and isinstance(order, list):
             legacy = ["layout-info", "node-graph", "systematic", "trains"]
             if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
@@ -105,6 +110,7 @@ DEFAULT_SETTINGS = {
     "z21_host": "192.168.0.111",
     "z21_port": 21105,
     "z21_wlan_enabled": False,
+    "hardware": DEFAULT_HARDWARE,
     "ui_refresh_ms": 5000,
     "routing": {"adaptive": True, "busy_interval_ms": 1000, "idle_interval_ms": 5000},
     "workspace_layout": DEFAULT_WORKSPACE_LAYOUT,
@@ -128,7 +134,38 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
     if set(routing) - set(DEFAULT_SETTINGS["routing"]):
         raise ValueError("unknown routing setting")
     result["workspace_layout"] = validate_workspace_layout(value.get("workspace_layout", {}), result["workspace_layout"])
-    result.update({key: item for key, item in value.items() if key not in ("routing", "workspace_layout", "interface", "operations")})
+    result.update({key: item for key, item in value.items() if key not in ("routing", "workspace_layout", "interface", "operations", "hardware")})
+    previous_hardware = (current or {}).get("hardware")
+    if previous_hardware is None:
+        previous_hardware = {**DEFAULT_HARDWARE, "host": result["z21_host"], "port": result["z21_port"],
+                             "transport": "wlan" if result["z21_wlan_enabled"] else "lan"}
+    hardware_patch = value.get("hardware", {})
+    if not isinstance(hardware_patch, dict):
+        raise ValueError("hardware must be an object")
+    hardware_patch = dict(hardware_patch)
+    # Older clients submit a full default settings object and modify only the
+    # legacy endpoint keys. Their untouched hardware defaults are not an
+    # intentional request to reset those endpoint preferences.
+    if (current is None and hardware_patch == DEFAULT_HARDWARE
+            and any(value.get(key, DEFAULT_SETTINGS[key]) != DEFAULT_SETTINGS[key]
+                    for key in ("z21_host", "z21_port", "z21_wlan_enabled"))):
+        hardware_patch = {}
+    # Legacy callers keep controlling the Z21 endpoint, while newer callers
+    # explicitly address the selected station's connection preferences.
+    if previous_hardware.get("system", "z21") in Z21_COMPATIBLE_SYSTEMS:
+        if "z21_host" in value and "host" not in hardware_patch:
+            hardware_patch["host"] = value["z21_host"]
+        if "z21_port" in value and "port" not in hardware_patch:
+            hardware_patch["port"] = value["z21_port"]
+        if "z21_wlan_enabled" in value and "transport" not in hardware_patch:
+            if type(value["z21_wlan_enabled"]) is not bool:
+                raise ValueError("z21_wlan_enabled must be a boolean")
+            hardware_patch["transport"] = "wlan" if value["z21_wlan_enabled"] else "lan"
+    result["hardware"] = validate_hardware(hardware_patch, previous_hardware)
+    if result["hardware"]["system"] in Z21_COMPATIBLE_SYSTEMS:
+        result["z21_host"] = result["hardware"]["host"]
+        result["z21_port"] = result["hardware"]["port"]
+        result["z21_wlan_enabled"] = result["hardware"]["transport"] == "wlan"
     result["routing"].update(routing)
     interface = value.get("interface", {})
     if not isinstance(interface, dict) or set(interface) - set(DEFAULT_SETTINGS["interface"]):

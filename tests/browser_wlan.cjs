@@ -1,5 +1,5 @@
 /* Frontend-only WLAN settings integration. The controller stays simulated and
- * the desktop bridge is mocked, so this test can never touch physical hardware. */
+ * hardware connect commands are intercepted, so this test cannot touch hardware. */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -34,11 +34,16 @@ let server, browser;
   });
   browser = await chromium.launch({ headless: true, channel: process.env.BROWSER_CHANNEL || 'chrome' });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-  const errors = [], bridgeCalls = [];
+  const errors = [], commandCalls = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/settings', async route => {
     if (route.request().method() === 'POST') saved = { ...saved, ...route.request().postDataJSON() };
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ settings: saved, runtime: runtime() }) });
+  });
+  await page.route('**/api/commands', async route => {
+    const command = route.request().postDataJSON();
+    commandCalls.push(command.type);
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ accepted: true, message: 'Mock controller accepted WLAN profile.', runtime: runtime() }) });
   });
   await page.goto(`${url}/#settings`);
   await page.waitForFunction(() => document.querySelector('#settings-save-status').textContent.includes('up to date'));
@@ -47,23 +52,18 @@ let server, browser;
   assert.equal(await wlan.getAttribute('role'), 'switch');
   assert.match(await wlan.getAttribute('aria-describedby'), /setting-z21-wlan-help/);
   assert.equal(await wlan.isChecked(), false);
-  assert.equal(await page.locator('#settings-connect-z21').textContent(), 'Connect to real Z21');
-  assert.match(await page.locator('#setting-z21-wlan-help').textContent(), /does not join Wi-Fi/i);
-  assert.match(await page.locator('#setting-z21-wlan-help').textContent(), /never stores its password/i);
+  assert.equal(await page.locator('#settings-connect-z21').textContent(), 'Connect to Roco Z21');
+  assert.match(await page.locator('#setting-z21-wlan-help').textContent(), /Join the station Wi-Fi/i);
+  assert.match(await page.locator('#setting-z21-wlan-help').textContent(), /does not store Wi-Fi passwords/i);
   assert.equal(await page.locator('input[type="password"]').count(), 0, 'No Wi-Fi password control may be present');
 
-  await page.evaluate(() => {
-    window.__bridgeCalls = [];
-    window.pywebview = { api: { switch_mode: async mode => { window.__bridgeCalls.push(mode); return { accepted: true, message: 'Mock desktop accepted WLAN profile.', transport_profile: 'wlan', transport_status: { profile: 'wlan', state: 'ready', ready: true, detail: 'UDP transport profile ready' } }; } } };
-    window.dispatchEvent(new Event('pywebviewready'));
-  });
   await page.locator('#setting-z21-host').fill('10.42.0.7');
   await wlan.check();
   assert.equal(await page.locator('#setting-z21-host').inputValue(), '10.42.0.7', 'Selecting WLAN retains a custom host');
   assert.equal(await page.locator('#settings-connect-z21').textContent(), 'Connect via WLAN');
   assert.equal(await page.locator('#settings-connect-z21').isDisabled(), true, 'Dirty settings cannot be used to connect');
-  assert.match(await page.locator('#settings-native-status').textContent(), /Save or discard.*connecting via WLAN/i);
-  assert.match(await page.locator('#settings-transport-status').textContent(), /Roco 10814 WLAN.*10\.42\.0\.7:21105/i);
+  assert.match(await page.locator('#settings-native-status').textContent(), /Save or discard.*connecting/i);
+  assert.match(await page.locator('#settings-transport-status').textContent(), /Roco Z21.*10\.42\.0\.7:21105.*Wi-Fi/i);
 
   await page.locator('#settings-save').click();
   await page.waitForFunction(() => document.querySelector('#settings-save-status').textContent === 'Saved on this controller.');
@@ -75,12 +75,11 @@ let server, browser;
   assert.match(await page.locator('#settings-transport-status').textContent(), /Controller profile: Roco 10814 WLAN.*Connection check: UDP transport profile ready/i);
 
   await page.locator('#settings-connect-z21').click();
-  await page.waitForFunction(() => document.querySelector('#settings-native-status').textContent === 'Mock desktop accepted WLAN profile.');
-  bridgeCalls.push(...await page.evaluate(() => window.__bridgeCalls));
-  assert.deepEqual(bridgeCalls, ['z21'], 'WLAN uses the existing confirmed Z21 desktop mode switch');
+  await page.waitForFunction(() => document.querySelector('#settings-native-status').textContent === 'Mock controller accepted WLAN profile.');
+  assert.deepEqual(commandCalls, ['connect_hardware'], 'WLAN uses the generic explicit connection command');
 
   await wlan.uncheck();
-  assert.equal(await page.locator('#settings-connect-z21').textContent(), 'Connect to real Z21');
+  assert.equal(await page.locator('#settings-connect-z21').textContent(), 'Connect to Roco Z21');
   await page.locator('#settings-discard').click();
   assert.equal(await wlan.isChecked(), true, 'Discard restores the saved WLAN preference');
   assert.equal(await page.locator('#settings-connect-z21').textContent(), 'Connect via WLAN');
@@ -93,7 +92,7 @@ let server, browser;
   await page.setViewportSize({ width: 390, height: 844 });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth) <= 2, 'WLAN settings do not overflow mobile');
   assert.deepEqual(errors, []);
-  console.log('PASS: accessible WLAN setting, honest guidance, persistence, dirty/discard flow, runtime status, native bridge mock, custom host, and mobile layout.');
+  console.log('PASS: accessible WLAN setting, guidance, persistence, dirty/discard flow, runtime status, intercepted generic connect, custom host, and mobile layout.');
 })().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
   if (browser) await browser.close();
   if (server && server.exitCode === null) { const exited = new Promise(resolve => server.once('exit', resolve)); server.kill(); await exited; }

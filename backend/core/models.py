@@ -13,6 +13,8 @@ from enum import Enum
 import math
 from typing import Any, Iterable, Mapping, TypeVar
 
+from .decoder import normalize_decoder_protocol, validate_decoder_address
+
 
 class BlockState(str, Enum):
     """Operational state of a track block."""
@@ -317,6 +319,8 @@ class TrainModelInfo:
     def __post_init__(self) -> None:
         for field_name in ("manufacturer", "catalogue_number", "prototype", "era", "decoder_type", "notes"):
             object.__setattr__(self, field_name, getattr(self, field_name).strip())
+        if self.decoder_type:
+            object.__setattr__(self, "decoder_type", normalize_decoder_protocol(self.decoder_type))
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,8 +345,7 @@ class Train:
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _require_text(self.id, "id"))
         object.__setattr__(self, "name", _require_text(self.name, "name"))
-        if self.decoder_address is not None and not 1 <= self.decoder_address <= 9999:
-            raise ValueError("decoder_address must be between 1 and 9999")
+        validate_decoder_address(self.decoder_address, self.model.decoder_type)
         object.__setattr__(self, "length_mm", _require_non_negative(self.length_mm, "length_mm"))
         object.__setattr__(self, "max_speed_kmh", _require_non_negative(self.max_speed_kmh, "max_speed_kmh"))
         object.__setattr__(self, "speed_kmh", _require_non_negative(self.speed_kmh, "speed_kmh"))

@@ -10,6 +10,7 @@
     automation: ['Train automation', '#automation-studio-panel'],
     systematic: ['Schematic track view', '#systematic-panel'],
     routes: ['Route plans', '#route-panel'],
+    'track-triggers': ['Track triggers', '#track-trigger-panel'],
     trains: ['Train overview', '#train-panel'],
     'train-profile': ['Train profile', '#train-editor-panel'],
     assembler: ['Train assembler', '#assembler-panel'],
@@ -27,7 +28,7 @@
   const PAGE_LABELS = { dispatch: 'Home', layout: 'Automation', trains: 'Trains', timetable: 'Timetable', scans: '3D workspace' };
   const MAIN = {
     dispatch: ['layout-info', 'node-graph', 'systematic', 'trains', 'timetable'],
-    layout: ['layout-info', 'node-graph', 'automation', 'systematic', 'routes', 'scans', 'timetable'],
+    layout: ['layout-info', 'node-graph', 'automation', 'systematic', 'routes', 'track-triggers', 'scans', 'timetable'],
     trains: ['trains', 'train-profile', 'rolling-stock', 'programming', 'calibration', 'assembler'], timetable: ['timetable'], scans: ['scans']
   };
   const SIDEBAR = ['control-center', 'selected-train', 'train-functions', 'simulation', 'connection-health'];
@@ -43,7 +44,8 @@
       const candidate = value?.pages?.[page];
       if (!candidate) continue;
       for (const key of ['order', 'sidebar_order']) {
-        const order = candidate[key];
+        let order = candidate[key];
+        if (page === 'layout' && key === 'order' && Array.isArray(order) && !order.includes('track-triggers')) order = [...order, 'track-triggers'];
         if (Array.isArray(order) && order.length === preference[key].length && new Set(order).size === order.length
             && order.every(id => preference[key].includes(id))) preference[key] = [...order];
       }

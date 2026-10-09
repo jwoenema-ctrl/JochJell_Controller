@@ -54,7 +54,7 @@ def main():
                 controller = DesktopController(directory, physical=physical, port=0)
                 if saved_layout:
                     controller.app.load_layout(saved_layout)
-                window.set_title(f'{PRODUCT_NAME} — ' + ('Z21' if physical else 'Simulation'))
+                window.set_title(f'{PRODUCT_NAME} — ' + controller.app._active_hardware_profile().label)
                 window.load_url(controller.url + ('/#settings' if switching else ''))
             except Exception as error:
                 if controller is not None:

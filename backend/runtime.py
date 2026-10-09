@@ -15,6 +15,7 @@ from .infrastructure.simulation import SimulatedTrackSystem
 from .infrastructure.train_database import SQLiteTrainDatabase
 from .infrastructure.real_track import Z21TrackSystem
 from .infrastructure.z21 import Z21LanTransport
+from .infrastructure.hardware import create_track_system, hardware_profile, validate_hardware
 from .services.avoidance import AvoidanceDetector
 from .services.connection import ConnectionChecker
 from .services.calibration import TrainCalibrationService
@@ -58,6 +59,12 @@ class ControllerRuntime:
     coordinate_movement: CoordinateMovementExecutor
     recording: AutomationRecordingService
     _connection_check_at: float = field(default=float("-inf"), init=False, repr=False)
+    hardware_system: str = "simulation"
+    decoder_protocol: str = "dcc"
+
+    @property
+    def hardware_capabilities(self) -> dict[str, bool]:
+        return hardware_profile(self.hardware_system).capabilities
 
     CONNECTION_CHECK_INTERVAL_SECONDS = 5.0
 
@@ -77,10 +84,69 @@ class ControllerRuntime:
     ) -> "ControllerRuntime":
         """Create a real-track runtime; no train command is sent before a check succeeds."""
 
-        transport = Z21LanTransport(host, port=port)
-        transport.open()
-        track = Z21TrackSystem(transport, feedback_map=feedback_map)
-        return cls._compose(track, database_path=database_path, connection=ConnectionChecker(track))
+        return cls.create_hardware("z21", host=host, port=port, database_path=database_path, feedback_map=feedback_map)
+
+    @classmethod
+    def create_hardware(
+        cls, system: str, *, host: str = "192.168.0.111", port: int | None = None,
+        serial_port: str = "", baudrate: int | None = None, decoder_protocol: str = "dcc", transport: str | None = None,
+        database_path: str = ":memory:", feedback_map: Mapping[tuple[int, int], str] | None = None,
+    ) -> "ControllerRuntime":
+        """Construct a selected adapter without issuing a train or power command."""
+        profile = hardware_profile(system)
+        requested = dict(system=system, host=host, port=port if port is not None else profile.default_port,
+                         serial_port=serial_port, baudrate=baudrate if baudrate is not None else profile.default_baudrate,
+                         decoder_protocol=decoder_protocol)
+        if transport is not None:
+            requested["transport"] = transport
+        config = validate_hardware(requested)
+        if system == "simulation":
+            return cls.create(database_path=database_path)
+        track = cls.create_track(config, feedback_map=feedback_map)
+        try:
+            runtime = cls._compose(track, database_path=database_path, connection=ConnectionChecker(track))
+        except BaseException:
+            cls.close_track(track)
+            raise
+        runtime.hardware_system = system
+        runtime.decoder_protocol = decoder_protocol
+        return runtime
+
+    @staticmethod
+    def create_track(config: Mapping[str, object], *, feedback_map: Mapping[tuple[int, int], str] | None = None) -> TrackSystem:
+        """Open one adapter for explicit activation or runtime replacement."""
+        value = validate_hardware(dict(config))
+        return create_track_system(**value, feedback_map=feedback_map)
+
+    @staticmethod
+    def close_track(track: TrackSystem) -> None:
+        close = getattr(track, "close", None)
+        if close is not None:
+            close()
+        elif not isinstance(track, SimulatedTrackSystem):
+            track.transport.close()
+
+    def replace_track(self, track: TrackSystem, *, hardware_system: str = "simulation",
+                      decoder_protocol: str = "dcc") -> TrackSystem:
+        """Rebind track-dependent services while retaining layout and timetable.
+
+        The caller owns powering down and closing the returned previous adapter,
+        registration of train addresses, and synchronization of UI train modes.
+        """
+        hardware_profile(hardware_system)
+        self.coordinate_movement.close()
+        self.calibration.close()
+        old_track = self.track
+        self.track = track
+        self.dispatcher.track_system = track
+        self.calibration = TrainCalibrationService(self.dispatcher, track, self.train_database)
+        self.coordinate_movement = CoordinateMovementExecutor(self.dispatcher, track)
+        provider = SimulationConnectionProvider() if isinstance(track, SimulatedTrackSystem) else track
+        self.connection = ConnectionChecker(provider)
+        self._connection_check_at = float("-inf")
+        self.hardware_system = hardware_system
+        self.decoder_protocol = decoder_protocol
+        return old_track
 
     @classmethod
     def _compose(
@@ -124,17 +190,20 @@ class ControllerRuntime:
         *,
         route: tuple[str, ...] = (),
         address: int | None = None,
+        decoder_protocol: str | None = None,
     ) -> None:
         """Register one train in the simulator and dispatcher."""
 
         if isinstance(self.track, SimulatedTrackSystem):
             self.track.add_train(train_id, block_id, route=route)
-        elif isinstance(self.track, Z21TrackSystem):
-            if address is None:
-                raise ValueError("address is required when registering a real Z21 train")
-            self.track.register_train(train_id, address)
         else:
-            raise TypeError("unsupported track system")
+            if address is None:
+                raise ValueError("address is required when registering a physical train")
+            protocol = decoder_protocol or self.decoder_protocol
+            if self.hardware_system in ("marklin_cs2", "marklin_cs3", "ecos") or decoder_protocol is not None:
+                self.track.register_train(train_id, address, decoder_protocol=protocol)
+            else:
+                self.track.register_train(train_id, address)
         self.dispatcher.register_train(train_id)
         self.route_updater.register_train(train_id, route or (block_id,))
 
@@ -143,7 +212,7 @@ class ControllerRuntime:
 
         cycle: DispatchCycle | None = None
         for _ in range(max(0, count)):
-            if isinstance(self.track, Z21TrackSystem):
+            if not isinstance(self.track, SimulatedTrackSystem):
                 now = time.monotonic()
                 if now - self._connection_check_at >= self.CONNECTION_CHECK_INTERVAL_SECONDS:
                     connection = self.connection.check()
@@ -154,7 +223,7 @@ class ControllerRuntime:
                 if not connected:
                     self.dispatcher.emergency_stop()
             snapshot = self.track.tick()
-            if isinstance(self.track, Z21TrackSystem) and self.track.feedback_groups():
+            if not isinstance(self.track, SimulatedTrackSystem) and self.track.feedback_groups():
                 results = self.track.poll_feedback(self.track.feedback_groups())
                 if any(not result.accepted for result in results):
                     self.dispatcher.emergency_stop()
@@ -203,5 +272,4 @@ class ControllerRuntime:
         self.calibration.close()
         self.train_database.close()
         self.layout_repository.close()
-        if isinstance(self.track, Z21TrackSystem):
-            self.track.transport.close()
+        self.close_track(self.track)
