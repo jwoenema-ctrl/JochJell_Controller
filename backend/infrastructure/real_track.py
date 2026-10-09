@@ -260,6 +260,14 @@ class Z21TrackSystem:
             self._train_functions.setdefault(train_id, {})[function_number] = bool(enabled)
         return result
 
+    def set_function_by_address(self, address: int, function_number: int, *, enabled: bool) -> CommandResult:
+        """Command a function decoder carried by rolling stock, without registering it as a train."""
+        if not isinstance(address, int) or not 1 <= address <= 0x3FFF:
+            return CommandResult(False, "set_loco_function", "rolling-stock DCC address must be between 1 and 16383")
+        if not isinstance(function_number, int) or not 0 <= function_number <= 31:
+            return CommandResult(False, "set_loco_function", "function number must be between 0 and 31")
+        return self.transport.set_loco_function(address, function_number, enabled=bool(enabled))
+
     def get_train_functions(self, train_id: str) -> Mapping[int, bool]:
         """Return the last function states acknowledged by the adapter."""
 

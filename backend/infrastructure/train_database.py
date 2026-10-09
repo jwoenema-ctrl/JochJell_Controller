@@ -94,6 +94,8 @@ class RollingStockInventoryRecord:
     length_mm: float | None = None
     mass_g: float | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    decoder_address: int | None = None
+    decoder_functions: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def rolling_stock_id(self) -> str:
@@ -274,6 +276,8 @@ class SQLiteTrainDatabase:
                     length_mm REAL,
                     mass_g REAL,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
+                    decoder_address INTEGER,
+                    decoder_functions_json TEXT NOT NULL DEFAULT '[]',
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -283,6 +287,7 @@ class SQLiteTrainDatabase:
                 {"vehicle_type": "TEXT NOT NULL DEFAULT 'vehicle'", "quantity": "INTEGER NOT NULL DEFAULT 0",
                  "manufacturer": "TEXT NOT NULL DEFAULT ''", "model": "TEXT NOT NULL DEFAULT ''",
                  "length_mm": "REAL", "mass_g": "REAL", "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+                 "decoder_address": "INTEGER", "decoder_functions_json": "TEXT NOT NULL DEFAULT '[]'",
                  "updated_at": "TEXT"},
             )
             self._connection.execute(
@@ -530,18 +535,20 @@ class SQLiteTrainDatabase:
                 """
                 INSERT INTO rolling_stock_inventory
                     (item_id, name, vehicle_type, quantity, manufacturer, model,
-                     length_mm, mass_g, metadata_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                     length_mm, mass_g, metadata_json, decoder_address, decoder_functions_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(item_id) DO UPDATE SET
                     name = excluded.name, vehicle_type = excluded.vehicle_type,
                     quantity = excluded.quantity, manufacturer = excluded.manufacturer,
                     model = excluded.model, length_mm = excluded.length_mm,
                     mass_g = excluded.mass_g, metadata_json = excluded.metadata_json,
+                    decoder_address = excluded.decoder_address,
+                    decoder_functions_json = excluded.decoder_functions_json,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (record.item_id, record.name, record.vehicle_type, record.quantity,
                  record.manufacturer, record.model, record.length_mm, record.mass_g,
-                 _dump_json(record.metadata)),
+                 _dump_json(record.metadata), record.decoder_address, json.dumps(list(record.decoder_functions))),
             )
         return record
 
@@ -602,12 +609,14 @@ class SQLiteTrainDatabase:
                     manufacturer=str(fields.get("manufacturer", "")), model=str(fields.get("model", "")),
                     length_mm=fields.get("length_mm"), mass_g=fields.get("mass_g"),
                     metadata=dict(fields.get("metadata", {})),
+                    decoder_address=fields.get("decoder_address"),
+                    decoder_functions=tuple(fields.get("decoder_functions", ())),
                 )
             quantity = current.quantity + delta
             if quantity < 0:
                 raise ValueError("quantity cannot be negative")
             updates = {key: fields[key] for key in
-                       ("name", "vehicle_type", "manufacturer", "model", "length_mm", "mass_g", "metadata")
+                       ("name", "vehicle_type", "manufacturer", "model", "length_mm", "mass_g", "metadata", "decoder_address", "decoder_functions")
                        if key in fields}
             return self.upsert_inventory(replace(current, quantity=quantity, **updates))
 
@@ -814,6 +823,8 @@ class SQLiteTrainDatabase:
             item_id=row["item_id"], name=row["name"], vehicle_type=row["vehicle_type"], quantity=int(row["quantity"]),
             manufacturer=row["manufacturer"], model=row["model"], length_mm=row["length_mm"], mass_g=row["mass_g"],
             metadata=cls._json_object(row["metadata_json"]),
+            decoder_address=row["decoder_address"],
+            decoder_functions=tuple(json.loads(row["decoder_functions_json"] or "[]")),
         )
 
 
@@ -906,6 +917,24 @@ class SQLiteTrainDatabase:
                 raise ValueError(f"{name} cannot be negative")
         if not isinstance(record.metadata, Mapping):
             raise ValueError("metadata must be a mapping")
+        if record.decoder_address is not None and (isinstance(record.decoder_address, bool) or not isinstance(record.decoder_address, int) or not 1 <= record.decoder_address <= 0x3FFF):
+            raise ValueError("rolling-stock DCC address must be between 1 and 16383")
+        if not isinstance(record.decoder_functions, (list, tuple)):
+            raise ValueError("decoder functions must be a list")
+        seen: set[int] = set()
+        for item in record.decoder_functions:
+            if not isinstance(item, Mapping):
+                raise ValueError("each decoder function must be an object")
+            number = item.get("function_number")
+            if isinstance(number, bool) or not isinstance(number, int) or not 0 <= number <= 31 or number in seen:
+                raise ValueError("rolling-stock function numbers must be unique integers from 0 to 31")
+            if not isinstance(item.get("name"), str) or not item["name"].strip() or len(item["name"]) > 64:
+                raise ValueError("rolling-stock function name is required")
+            if "momentary" in item and not isinstance(item["momentary"], bool):
+                raise ValueError("rolling-stock function momentary flag must be true or false")
+            seen.add(number)
+        if record.decoder_functions and record.decoder_address is None:
+            raise ValueError("a rolling-stock DCC address is required for decoder functions")
 
 
 def _dump_json(value: Mapping[str, Any]) -> str:

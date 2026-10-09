@@ -176,6 +176,7 @@ class ControllerApplication:
     _playback_runs: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _playback_results: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
     _coordinate_execution_state: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _rolling_stock_function_states: dict[int, dict[str, bool]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Compose the domain runtime once and mirror the initial UI fixture into it."""
@@ -1127,6 +1128,9 @@ class ControllerApplication:
                     "id": item.item_id, "name": item.name, "vehicle_type": item.vehicle_type,
                     "manufacturer": item.manufacturer, "model": item.model, "count": item.quantity,
                     "train_ids": [], "length_mm": item.length_mm, "mass_g": item.mass_g,
+                    "decoder_address": item.decoder_address,
+                    "decoder_functions": [dict(function) for function in item.decoder_functions],
+                    "function_states": dict(self._rolling_stock_function_states.get(item.decoder_address, {})) if item.decoder_address is not None else {},
                 }
                 for item in stored
             ]
@@ -3752,17 +3756,69 @@ class ControllerApplication:
             elif kind in {"upsert_rolling_stock_inventory", "set_rolling_stock_inventory"}:
                 if self.runtime is None:
                     raise ValueError("runtime is not available")
+                item_id = str(payload.get("item_id", payload.get("id", ""))).strip()
+                existing = self.runtime.train_database.get_inventory(item_id) if item_id else None
+                raw_address = payload.get("decoder_address", existing.decoder_address if existing else None)
+                if raw_address in (None, ""):
+                    address = None
+                elif isinstance(raw_address, bool) or not str(raw_address).isdigit():
+                    raise ValueError("rolling-stock DCC address must be a whole number")
+                else:
+                    address = int(raw_address)
+                raw_functions = payload.get("decoder_functions", existing.decoder_functions if existing else ())
+                if not isinstance(raw_functions, (list, tuple)):
+                    raise ValueError("decoder functions must be a list")
                 item = RollingStockInventoryRecord(
-                    item_id=str(payload.get("item_id", payload.get("id", ""))).strip(),
-                    name=str(payload.get("name", "")).strip(),
-                    vehicle_type=str(payload.get("vehicle_type", payload.get("type", "vehicle"))).strip() or "vehicle",
-                    quantity=int(payload.get("quantity", payload.get("count", 0))),
-                    manufacturer=str(payload.get("manufacturer", "")), model=str(payload.get("model", "")),
-                    length_mm=payload.get("length_mm"), mass_g=payload.get("mass_g"),
-                    metadata=dict(payload.get("metadata", {})),
+                    item_id=item_id,
+                    name=str(payload.get("name", existing.name if existing else "")).strip(),
+                    vehicle_type=str(payload.get("vehicle_type", payload.get("type", existing.vehicle_type if existing else "vehicle"))).strip() or "vehicle",
+                    quantity=int(payload.get("quantity", payload.get("count", existing.quantity if existing else 0))),
+                    manufacturer=str(payload.get("manufacturer", existing.manufacturer if existing else "")),
+                    model=str(payload.get("model", existing.model if existing else "")),
+                    length_mm=payload.get("length_mm", existing.length_mm if existing else None),
+                    mass_g=payload.get("mass_g", existing.mass_g if existing else None),
+                    metadata=dict(payload.get("metadata", existing.metadata if existing else {})),
+                    decoder_address=address,
+                    decoder_functions=tuple(dict(function) if isinstance(function, dict) else function for function in raw_functions),
                 )
                 self.runtime.train_database.upsert_inventory(item)
                 self.events.append({"type": "rolling_stock_inventory_updated", "item_id": item.item_id, "quantity": item.quantity})
+            elif kind == "set_rolling_stock_function":
+                if self.runtime is None or not self.track_power:
+                    raise ValueError("track power must be on to control rolling-stock functions")
+                train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+                train = next((entry for entry in self.trains if str(entry.get("id")) == train_id), None)
+                if train is None:
+                    raise ValueError("selected train was not found")
+                item_id = str(payload.get("item_id", "")).strip()
+                if not any(str(entry.get("catalogue_id") or entry.get("rolling_stock_id") or entry.get("id")) == item_id for entry in train.get("consist", ()) if isinstance(entry, dict)):
+                    raise ValueError("rolling stock is not in the selected train's consist")
+                item = self.runtime.train_database.get_inventory(item_id)
+                if item is None or item.decoder_address is None:
+                    raise ValueError("rolling stock has no configured function decoder")
+                raw_number = payload.get("function_number")
+                if isinstance(raw_number, bool) or not isinstance(raw_number, int):
+                    raise ValueError("function number must be an integer")
+                function_number = raw_number
+                if not any(function.get("function_number") == function_number for function in item.decoder_functions):
+                    raise ValueError("function is not assigned to this rolling stock")
+                enabled = payload.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("function state must be true or false")
+                if not self.simulation_mode:
+                    command = getattr(self.runtime.track, "set_function_by_address", None)
+                    if command is None:
+                        raise ValueError("the active track adapter does not support rolling-stock decoder functions")
+                    result = command(item.decoder_address, function_number, enabled=enabled)
+                    if not result.accepted:
+                        raise ValueError(result.detail or "rolling-stock function command rejected")
+                self._rolling_stock_function_states.setdefault(item.decoder_address, {})[str(function_number)] = enabled
+                for member in self.trains:
+                    if member.get("address") not in (None, "") and str(member["address"]) == str(item.decoder_address):
+                        member.setdefault("decoder_function_states", {})[str(function_number)] = enabled
+                self.events.append({"type": "rolling_stock_function_changed", "train_id": train_id,
+                                    "item_id": item_id, "decoder_address": item.decoder_address,
+                                    "function_number": function_number, "enabled": enabled})
             elif kind in {"adjust_rolling_stock_inventory", "change_rolling_stock_quantity"}:
                 if self.runtime is None:
                     raise ValueError("runtime is not available")
@@ -4014,6 +4070,12 @@ class ControllerApplication:
                         raise ValueError(result.detail or "decoder function command rejected")
                 states = train.setdefault("decoder_function_states", {})
                 states[str(function_number)] = enabled
+                if str(train.get("address", "")).isdigit():
+                    address = int(train["address"])
+                    self._rolling_stock_function_states.setdefault(address, {})[str(function_number)] = enabled
+                    for member in self.trains:
+                        if member is not train and str(member.get("address", "")) == str(address):
+                            member.setdefault("decoder_function_states", {})[str(function_number)] = enabled
                 self._record_action_if_active({"operation": "function", "train_id": train_id, "function_number": function_number, "enabled": enabled})
                 self.events.append({"type": "train_function_changed", "train_id": train_id, "function_number": function_number, "enabled": enabled})
             elif kind in {"track_power", "power"}:

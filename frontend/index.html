@@ -106,8 +106,9 @@
             </div>
             <span class="panel-action" id="selected-train-function-count">0 assigned</span>
           </div>
-          <div class="train-function-grid" id="selected-train-functions" role="group" aria-label="Assigned train functions"></div>
-          <p class="settings-help train-function-empty" id="selected-train-function-status">No decoder functions assigned to this train.</p>
+          <div class="function-control-group"><h3 id="locomotive-function-heading">Locomotive</h3><div class="train-function-grid" id="selected-train-functions" role="group" aria-labelledby="locomotive-function-heading"></div></div>
+          <div id="rolling-stock-function-groups"></div>
+          <p class="settings-help train-function-empty" id="selected-train-function-status">No decoder functions assigned to this train or its rolling stock.</p>
         </section>
 
         <section class="panel simulation-panel">
@@ -416,7 +417,9 @@
               <label for="inventory-type">Type<select id="inventory-type"><option value="coach">Coach</option><option value="wagon">Wagon</option><option value="locomotive">Locomotive</option><option value="vehicle">Vehicle</option></select></label>
               <label for="inventory-length">Length (mm)<input id="inventory-length" type="number" min="0" step="0.1" placeholder="e.g. 264"></label>
               <label for="inventory-quantity">Quantity<input id="inventory-quantity" type="number" min="0" step="1" value="0"></label>
-              <button type="button" class="button button-soft" id="save-inventory">Save quantity</button>
+              <label for="inventory-decoder-address">Function DCC address<input id="inventory-decoder-address" type="number" min="1" max="16383" step="1" placeholder="Optional"></label>
+              <div class="inventory-function-editor"><div class="inventory-function-heading"><strong>Decoder functions</strong><button type="button" class="button button-soft" id="add-inventory-function">＋ Add function</button></div><div id="inventory-function-list"></div><small>Cars sharing a DCC address respond together. Use separate catalogue entries when identical cars need different addresses.</small></div>
+              <div class="inventory-editor-actions"><button type="button" class="button button-primary" id="save-inventory">Save rolling stock</button><button type="button" class="button button-soft" id="clear-inventory-editor">Clear</button></div>
             </div>
             <div class="inventory-list" id="inventory-list"></div>
           </section>

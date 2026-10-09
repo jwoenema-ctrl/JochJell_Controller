@@ -109,6 +109,11 @@ h2 { font-size: 15px; letter-spacing: -.01em; font-weight: 650; }
 .selected-train-functions-panel { margin-top: -9px; border-top-left-radius: 7px; border-top-right-radius: 7px; }
 .selected-train-functions-panel .panel-heading { padding-top: 12px; padding-bottom: 8px; }
 .selected-train-functions-panel .panel-heading h2 { font-size: 14px; }
+.function-control-group + .function-control-group, #rolling-stock-function-groups .function-control-group:first-child { border-top: 1px solid var(--line); }
+.function-control-group > h3, .function-control-heading { margin: 0; padding: 8px 18px 7px; color: var(--muted); font-size: 10px; font-weight: 650; }
+.function-control-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.function-control-heading h3 { margin: 0; color: var(--text); font-size: 11px; font-weight: 650; overflow-wrap: anywhere; }
+.function-control-heading span { flex: 0 0 auto; color: var(--faint); font-size: 10px; }
 .train-function-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; padding: 0 18px 10px; }
 .train-function-button { display: flex; align-items: center; justify-content: space-between; gap: 7px; min-width: 0; min-height: 36px; padding: 6px 9px; border-radius: 7px; text-align: left; }
 .train-function-main { display: grid; min-width: 0; gap: 2px; }
@@ -173,7 +178,7 @@ body[data-workspace="trains"] .trains-subnav { display: flex; }
 .trains-subnav-link.is-active { color: var(--text); background: rgba(53, 105, 174, .32); }
 .trains-subnav-link.is-active::after { content: ""; position: absolute; right: 12px; bottom: 4px; left: 12px; height: 2px; border-radius: 2px; background: var(--blue); box-shadow: 0 0 8px rgba(92, 157, 255, .55); }
 .inventory-list { display: grid; gap: 6px; padding: 0 18px 16px; }
-.inventory-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 10px; }
+.inventory-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 10px; }
 .inventory-row strong { color: var(--text); font-weight: 650; }
 .inventory-row small, .inventory-row .inventory-type { color: var(--faint); font-size: 9px; }
 .inventory-count { color: var(--cyan); font-weight: 700; }

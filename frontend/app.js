@@ -169,6 +169,9 @@
         length_mm: item.length_mm,
         mass_g: item.mass_g,
         count: hasQuantity ? Number(item.count ?? item.quantity) : 1,
+        decoder_address: item.decoder_address ?? null,
+        decoder_functions: Array.isArray(item.decoder_functions) ? item.decoder_functions : [],
+        function_states: item.function_states || {},
       });
       return items;
     }, []);
@@ -1112,8 +1115,40 @@
     const total = inventory.total != null ? inventory.total : items.reduce((sum, item) => sum + Number(item.count || 0), 0);
     $('#inventory-summary').textContent = `${total} vehicle${total === 1 ? '' : 's'}`;
     const query = String($('#inventory-search')?.value || '').trim().toLowerCase();
-    const filtered = items.filter((item) => !query || [item.id, item.name, item.type, item.manufacturer, item.model, item.length_mm].some((value) => String(value ?? '').toLowerCase().includes(query)));
-    host.innerHTML = filtered.length ? filtered.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}${item.length_mm ? ` · ${escapeHtml(item.length_mm)} mm` : ''}</small></span><span class="inventory-type">${escapeHtml(item.type || 'rolling stock')}</span><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : `<div class="inventory-empty">${query ? 'No catalogue entries match that search.' : 'No rolling stock in your inventory yet.'}</div>`;
+    const filtered = items.filter((item) => !query || [item.id, item.name, item.type, item.manufacturer, item.model, item.length_mm, item.decoder_address].some((value) => String(value ?? '').toLowerCase().includes(query)));
+    host.innerHTML = filtered.length ? filtered.map((item) => `<div class="inventory-row" data-inventory-id="${escapeHtml(item.id)}"><span><strong>${escapeHtml(item.name || item.id || 'Rolling stock')}</strong><small>${escapeHtml(item.manufacturer || '')}${item.model ? ` · ${escapeHtml(item.model)}` : ''}${item.length_mm ? ` · ${escapeHtml(item.length_mm)} mm` : ''}${item.decoder_address ? ` · DCC #${escapeHtml(item.decoder_address)} · ${item.decoder_functions.length} functions` : ''}</small></span><span class="inventory-type">${escapeHtml(item.type || 'rolling stock')}</span><button type="button" class="button button-soft inventory-edit" data-inventory-edit="${escapeHtml(item.id)}">Edit</button><span class="inventory-stepper"><button type="button" class="icon-button small" data-inventory-adjust="-1" aria-label="Decrease quantity">−</button><span class="inventory-count">×${escapeHtml(Number(item.count || 0))}</span><button type="button" class="icon-button small" data-inventory-adjust="1" aria-label="Increase quantity">+</button></span></div>`).join('') : `<div class="inventory-empty">${query ? 'No catalogue entries match that search.' : 'No rolling stock in your inventory yet.'}</div>`;
+  }
+
+  function inventoryFunctionRow(functionNumber = '', name = '') {
+    const row = document.createElement('div');
+    row.className = 'inventory-function-row';
+    row.dataset.stockFunctionRow = '';
+    row.innerHTML = `<label>F number<input data-stock-function-number type="number" min="0" max="31" step="1" placeholder="0"></label><label>Name<input data-stock-function-name type="text" maxlength="64" placeholder="e.g. Interior lights"></label><button type="button" class="icon-button small" data-remove-stock-function aria-label="Remove function">×</button>`;
+    row.querySelector('[data-stock-function-number]').value = functionNumber;
+    row.querySelector('[data-stock-function-name]').value = name;
+    return row;
+  }
+
+  function clearInventoryEditor() {
+    for (const id of ['inventory-id', 'inventory-name', 'inventory-length', 'inventory-decoder-address']) $(`#${id}`).value = '';
+    $('#inventory-id').readOnly = false;
+    $('#inventory-type').value = 'coach';
+    $('#inventory-quantity').value = '0';
+    $('#inventory-function-list').replaceChildren();
+  }
+
+  function editInventory(itemId) {
+    const item = rollingStockCatalogue().find((entry) => entry.id === itemId);
+    if (!item) return;
+    $('#inventory-id').value = item.id;
+    $('#inventory-id').readOnly = true;
+    $('#inventory-name').value = item.name;
+    $('#inventory-type').value = item.type;
+    $('#inventory-length').value = item.length_mm ?? '';
+    $('#inventory-quantity').value = String(item.count || 0);
+    $('#inventory-decoder-address').value = item.decoder_address ?? '';
+    $('#inventory-function-list').replaceChildren(...item.decoder_functions.map((entry) => inventoryFunctionRow(entry.function_number, entry.name)));
+    $('#inventory-name').focus();
   }
 
   async function saveInventory() {
@@ -1121,11 +1156,22 @@
     const name = $('#inventory-name').value.trim();
     const quantity = Number($('#inventory-quantity').value);
     const length = Number($('#inventory-length').value);
+    const rawAddress = $('#inventory-decoder-address').value.trim();
+    const address = rawAddress ? Number(rawAddress) : null;
+    const functions = [...$$('[data-stock-function-row]', $('#inventory-function-list'))].map((row) => ({
+      function_number: row.querySelector('[data-stock-function-number]').value.trim() === '' ? NaN : Number(row.querySelector('[data-stock-function-number]').value),
+      name: row.querySelector('[data-stock-function-name]').value.trim(),
+    }));
     if (!itemId || !name || !Number.isInteger(quantity) || quantity < 0 || !Number.isFinite(length) || length < 0) {
       showToast('Enter a catalogue ID, name, length, and non-negative whole quantity.', 'warning');
       return;
     }
-    await sendCommand({ type: 'upsert_rolling_stock_inventory', item_id: itemId, name, vehicle_type: $('#inventory-type').value, quantity, length_mm: length });
+    if ((address !== null && (!Number.isInteger(address) || address < 1 || address > 16383)) || (functions.length && address === null) || functions.some((item) => !Number.isInteger(item.function_number) || item.function_number < 0 || item.function_number > 31 || !item.name) || new Set(functions.map((item) => item.function_number)).size !== functions.length) {
+      showToast('Set a DCC address from 1 to 16383 and give each function a unique F0–F31 number and name.', 'warning');
+      return;
+    }
+    const saved = await sendCommand({ type: 'upsert_rolling_stock_inventory', item_id: itemId, name, vehicle_type: $('#inventory-type').value, quantity, length_mm: length, decoder_address: address, decoder_functions: functions });
+    if (saved) clearInventoryEditor();
   }
 
   function renderRecording() {
@@ -1528,16 +1574,29 @@
 
   function renderSelectedTrainFunctions(train) {
     const grid = $('#selected-train-functions');
+    const stockGroups = $('#rolling-stock-function-groups');
     const status = $('#selected-train-function-status');
     const count = $('#selected-train-function-count');
-    if (!grid || !status || !count) return;
+    if (!grid || !stockGroups || !status || !count) return;
     const assigned = (Array.isArray(train.decoder_functions) ? train.decoder_functions : [])
       .filter((item) => item && item.enabled !== false && Number.isInteger(Number(item.function_number)))
       .filter((item) => Number(item.function_number) >= 0 && Number(item.function_number) <= 31)
       .sort((left, right) => Number(left.function_number) - Number(right.function_number));
     const states = train.decoder_function_states && typeof train.decoder_function_states === 'object' ? train.decoder_function_states : {};
-    count.textContent = `${assigned.length} assigned`;
-    status.classList.toggle('is-hidden', assigned.length > 0);
+    const catalogue = new Map(rollingStockCatalogue().map((item) => [item.id, item]));
+    const stock = new Map();
+    for (const vehicle of Array.isArray(train.consist) ? train.consist : []) {
+      const catalogueId = String(vehicle.catalogue_id || vehicle.rolling_stock_id || vehicle.id || '');
+      const item = catalogue.get(catalogueId);
+      if (!item || item.decoder_address == null || !item.decoder_functions.length) continue;
+      const group = stock.get(catalogueId) || { item, quantity: 0 };
+      group.quantity += 1;
+      stock.set(catalogueId, group);
+    }
+    const stockFunctionCount = [...stock.values()].reduce((total, group) => total + group.item.decoder_functions.length, 0);
+    count.textContent = `${assigned.length + stockFunctionCount} assigned`;
+    status.classList.toggle('is-hidden', assigned.length + stockFunctionCount > 0);
+    grid.parentElement.classList.toggle('is-hidden', assigned.length === 0);
     grid.innerHTML = assigned.map((item) => {
       const number = Number(item.function_number);
       const enabled = Boolean(states[String(number)]);
@@ -1545,6 +1604,18 @@
       const momentary = item.momentary ? ' - momentary' : '';
       const disabled = app.source !== 'api' || app.state.track_power === false;
       return `<button type="button" class="button button-soft train-function-button${enabled ? ' is-on' : ''}" data-train-function="${number}" aria-pressed="${enabled}" title="F${number}: ${escapeHtml(label)}${momentary}"${disabled ? ' disabled' : ''}><span class="train-function-main"><strong>F${number}</strong><small>${escapeHtml(label)}</small></span><em>${enabled ? 'ON' : 'OFF'}</em></button>`;
+    }).join('');
+    stockGroups.innerHTML = [...stock.values()].map(({ item, quantity }) => {
+      const buttons = item.decoder_functions.filter((entry) => Number.isInteger(Number(entry.function_number)) && Number(entry.function_number) >= 0 && Number(entry.function_number) <= 31)
+        .sort((left, right) => Number(left.function_number) - Number(right.function_number))
+        .map((entry) => {
+          const number = Number(entry.function_number);
+          const enabled = Boolean(item.function_states[String(number)]);
+          const label = entry.name || `Function F${number}`;
+          const disabled = app.source !== 'api' || app.state.track_power === false;
+          return `<button type="button" class="button button-soft train-function-button${enabled ? ' is-on' : ''}" data-stock-function-item="${escapeHtml(item.id)}" data-stock-function-number="${number}" aria-pressed="${enabled}" title="DCC #${escapeHtml(item.decoder_address)} · F${number}: ${escapeHtml(label)}"${disabled ? ' disabled' : ''}><span class="train-function-main"><strong>F${number}</strong><small>${escapeHtml(label)}</small></span><em>${enabled ? 'ON' : 'OFF'}</em></button>`;
+        }).join('');
+      return `<div class="function-control-group"><div class="function-control-heading"><h3>${escapeHtml(item.name)}${quantity > 1 ? ` ×${quantity}` : ''}</h3><span>DCC #${escapeHtml(item.decoder_address)}</span></div><div class="train-function-grid">${buttons}</div></div>`;
     }).join('');
   }
 
@@ -2980,6 +3051,13 @@
       renderEditor();
       renderAssembler();
     } else showToast('F' + functionNumber + (enabled ? ' enabled' : ' disabled'), 'success');
+  }
+
+  async function toggleRollingStockFunction(itemId, functionNumber, enabled) {
+    const train = selectedTrain();
+    if (!train || !itemId || !Number.isInteger(functionNumber)) return;
+    const response = await sendCommand({ type: 'set_rolling_stock_function', train_id: train.id, item_id: itemId, function_number: functionNumber, enabled });
+    if (response) showToast(`DCC #${rollingStockCatalogue().find((item) => item.id === itemId)?.decoder_address || '?'} · F${functionNumber} ${enabled ? 'enabled' : 'disabled'}`, 'success');
   }
 
   function renderEditor() {
@@ -4515,8 +4593,23 @@
     $('#read-programming').addEventListener('click', readProgramming);
     $('#program-dcc-address').addEventListener('click', programDccAddress);
     $('#save-inventory').addEventListener('click', saveInventory);
+    $('#clear-inventory-editor').addEventListener('click', clearInventoryEditor);
+    $('#add-inventory-function').addEventListener('click', () => {
+      const used = new Set($$('[data-stock-function-number]', $('#inventory-function-list')).map((input) => Number(input.value)));
+      const next = Array.from({ length: 32 }, (_, number) => number).find((number) => !used.has(number));
+      if (next === undefined) { showToast('All F0–F31 functions are assigned.', 'warning'); return; }
+      const row = inventoryFunctionRow(next);
+      $('#inventory-function-list').append(row);
+      row.querySelector('[data-stock-function-name]').focus();
+    });
+    $('#inventory-function-list').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-remove-stock-function]');
+      if (button) button.closest('[data-stock-function-row]').remove();
+    });
     $('#inventory-search').addEventListener('input', renderInventory);
     $('#inventory-list').addEventListener('click', (event) => {
+      const edit = event.target.closest('[data-inventory-edit]');
+      if (edit) { editInventory(edit.dataset.inventoryEdit); return; }
       const button = event.target.closest('[data-inventory-adjust]');
       const row = event.target.closest('[data-inventory-id]');
       if (!button || !row) return;
@@ -4565,6 +4658,11 @@
       if (!button || button.disabled) return;
       const functionNumber = Number(button.dataset.trainFunction);
       void toggleTrainFunction(functionNumber, button.getAttribute('aria-pressed') !== 'true');
+    });
+    $('#rolling-stock-function-groups').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-stock-function-item]');
+      if (!button || button.disabled) return;
+      void toggleRollingStockFunction(button.dataset.stockFunctionItem, Number(button.dataset.stockFunctionNumber), button.getAttribute('aria-pressed') !== 'true');
     });
     $('#simulation-toggle').addEventListener('click', () => { void toggleSimulation(); });
     $('#simulation-tick').addEventListener('click', tickSimulation);
