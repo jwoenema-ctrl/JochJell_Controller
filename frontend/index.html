@@ -510,6 +510,22 @@
           <section class="settings-section settings-card" id="settings-appearance" aria-labelledby="appearance-heading">
             <div class="settings-section-heading"><div><p class="eyebrow">LOOK &amp; FEEL</p><h3 id="appearance-heading">Appearance</h3><p>Make long operating sessions easier on your eyes.</p></div><span class="settings-section-index">01</span></div>
             <div class="settings-row"><div><label for="setting-theme">Theme</label><p class="settings-help">System follows your device. Preview changes instantly.</p></div><div class="settings-control"><select id="setting-theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div>
+            <div class="settings-row settings-accent-row">
+              <div><span class="settings-field-label" id="accent-color-label">Accent color</span><p class="settings-help" id="accent-color-help">Personalize tabs and controls. Preview instantly, then save to keep your choice. Railway status colors stay consistent.</p></div>
+              <div class="settings-accent-control">
+                <fieldset class="accent-options" aria-labelledby="accent-color-label" aria-describedby="accent-color-help">
+                  <label class="accent-option"><input type="radio" name="accent-color" value="graphite" checked><span class="accent-swatch" style="--swatch: #737373" aria-hidden="true"></span><span>Graphite</span></label>
+                  <label class="accent-option"><input type="radio" name="accent-color" value="#3975de"><span class="accent-swatch" style="--swatch: #3975de" aria-hidden="true"></span><span>Railway Blue</span></label>
+                  <label class="accent-option"><input type="radio" name="accent-color" value="#168078"><span class="accent-swatch" style="--swatch: #168078" aria-hidden="true"></span><span>Teal</span></label>
+                  <label class="accent-option"><input type="radio" name="accent-color" value="#8056c4"><span class="accent-swatch" style="--swatch: #8056c4" aria-hidden="true"></span><span>Violet</span></label>
+                  <label class="accent-option"><input type="radio" name="accent-color" value="#ac642e"><span class="accent-swatch" style="--swatch: #ac642e" aria-hidden="true"></span><span>Copper</span></label>
+                  <label class="accent-option"><input type="radio" name="accent-color" value="custom"><span class="accent-swatch accent-swatch-custom" aria-hidden="true"></span><span>Custom</span></label>
+                </fieldset>
+                <div class="accent-custom-control"><label for="setting-accent-custom">Custom color</label><input id="setting-accent-custom" type="color" value="#3975de" aria-describedby="accent-shade-help"><output id="setting-accent-hex" for="setting-accent-custom">#3975DE</output></div>
+                <p class="settings-help" id="accent-shade-help">Shades adapt to your theme for readability.</p>
+                <button type="button" class="text-button" id="settings-accent-reset">Reset to Graphite</button>
+              </div>
+            </div>
             <div class="settings-row"><div><label for="setting-interface-density">Interface density</label><p class="settings-help">Compact fits more trains and panels on screen; comfortable adds breathing room.</p></div><div class="settings-control"><select id="setting-interface-density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></div></div>
             <div class="settings-row"><div><label for="setting-ui-refresh">Status refresh</label><p class="settings-help">How often the interface checks the controller.</p></div><div class="settings-control"><input id="setting-ui-refresh" type="number" min="1" max="60" step="1" required><span>seconds</span></div></div>
             <div class="settings-row"><div><label for="setting-show-connection-detail">Show connection detail</label><p class="settings-help">Keep the current transport detail visible in the top bar.</p></div><div class="settings-control"><input id="setting-show-connection-detail" type="checkbox" role="switch"></div></div>

@@ -230,7 +230,7 @@
     });
   }
 
-  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true, world_day_minutes: 24, home_departure_count: 3 }, hardware: { system: 'z21', host: '192.168.0.111', port: 21105, serial_port: '', baudrate: 115200, decoder_protocol: 'dcc' }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
+  const DEFAULT_SETTINGS = { theme: 'system', accent_color: 'graphite', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true, world_day_minutes: 24, home_departure_count: 3 }, hardware: { system: 'z21', host: '192.168.0.111', port: 21105, serial_port: '', baudrate: 115200, decoder_protocol: 'dcc' }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
   app.settings = clone(DEFAULT_SETTINGS);
   app.settingsDirty = false;
   app.settingsLoaded = false;
@@ -659,11 +659,64 @@
     renderConnection(); renderSidebar(); renderGraph(); renderSystematicView(); renderStats(); renderAutomationPlayback(); renderTrackTriggers();
   }
 
+  function selectedAccentColor() {
+    const value = $('input[name="accent-color"]:checked')?.value || 'graphite';
+    return value === 'custom' ? $('#setting-accent-custom').value : value;
+  }
+
+  function renderAccentControls(color) {
+    const options = $$('input[name="accent-color"]');
+    const preset = options.find((option) => option.value === color);
+    options.forEach((option) => { option.checked = option === preset || (!preset && option.value === 'custom'); });
+    if (color !== 'graphite') $('#setting-accent-custom').value = color;
+    $('#setting-accent-hex').textContent = $('#setting-accent-custom').value.toUpperCase();
+    $('.accent-swatch-custom').style.setProperty('--swatch', $('#setting-accent-custom').value);
+  }
+
+  function applyAccentColor(color) {
+    const root = document.documentElement;
+    const properties = ['--accent', '--accent-soft', '--accent-border', '--focus', '--primary-bg', '--primary-text', '--primary-hover'];
+    properties.forEach((property) => root.style.removeProperty(property));
+    root.dataset.accent = color;
+    if (color === 'graphite' || !/^#[0-9a-f]{6}$/i.test(color)) return;
+
+    // Keep color choices separate from railway status tokens. Derive readable
+    // shades even for very pale, very dark, or fully saturated custom colors.
+    const rgb = (hex) => [1, 3, 5].map((offset) => parseInt(hex.slice(offset, offset + 2), 16));
+    const mix = (a, b, amount) => a.map((channel, index) => Math.round(channel * (1 - amount) + b[index] * amount));
+    const hex = (channels) => '#' + channels.map((channel) => channel.toString(16).padStart(2, '0')).join('');
+    const luminance = (channels) => channels.map((channel) => {
+      const value = channel / 255;
+      return value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4;
+    }).reduce((total, value, index) => total + value * [.2126, .7152, .0722][index], 0);
+    const contrast = (a, b) => (Math.max(luminance(a), luminance(b)) + .05) / (Math.min(luminance(a), luminance(b)) + .05);
+    const dark = root.dataset.theme === 'dark';
+    const panel = rgb(getComputedStyle(root).getPropertyValue('--panel').trim());
+    const raised = rgb(getComputedStyle(root).getPropertyValue('--panel-raised').trim());
+    const destination = dark ? [255, 255, 255] : [0, 0, 0];
+    const original = rgb(color);
+    let accent = original;
+    for (let step = 0; step <= 100; step += 1) {
+      accent = mix(original, destination, step / 100);
+      if (contrast(accent, panel) >= 5.5 && contrast(accent, raised) >= 4.5 && contrast(accent, mix(panel, accent, .12)) >= 4.5) break;
+    }
+    const foreground = contrast(accent, [255, 255, 255]) >= contrast(accent, [25, 25, 25]) ? '#ffffff' : '#191919';
+    const values = [hex(accent), hex(mix(panel, accent, .12)), hex(mix(panel, accent, .5)), hex(accent), hex(accent), foreground, hex(mix(accent, destination, .12))];
+    properties.forEach((property, index) => root.style.setProperty(property, values[index]));
+  }
+
+  function previewAccentColor() {
+    $('#setting-accent-hex').textContent = $('#setting-accent-custom').value.toUpperCase();
+    $('.accent-swatch-custom').style.setProperty('--swatch', $('#setting-accent-custom').value);
+    applyAccentColor(selectedAccentColor());
+  }
+
   function applyTheme(theme) {
     const resolved = theme === 'system' ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : theme;
     document.documentElement.dataset.theme = resolved;
     document.documentElement.style.colorScheme = resolved;
     $('meta[name="theme-color"]').content = resolved === 'dark' ? '#212121' : '#ffffff';
+    applyAccentColor(selectedAccentColor());
   }
 
   function applyInterfaceSettings(settings) {
@@ -683,6 +736,7 @@
   function renderSettings() {
     const settings = app.settings;
     $('#setting-theme').value = settings.theme;
+    renderAccentControls(settings.accent_color || 'graphite');
     $('#setting-ui-refresh').value = settings.ui_refresh_ms / 1000;
     $('#setting-interface-density').value = settings.interface.density;
     $('#setting-show-connection-detail').checked = settings.interface.show_connection_detail;
@@ -877,6 +931,7 @@
     const button = $('#settings-save');
     const settings = {
       theme: $('#setting-theme').value,
+      accent_color: selectedAccentColor(),
       hardware: { system: $('#setting-hardware-system').value, host: $('#setting-z21-host').value.trim(), port: Number($('#setting-z21-port').value), serial_port: $('#setting-hardware-serial').value.trim(), baudrate: Number($('#setting-hardware-baudrate').value), decoder_protocol: $('#setting-hardware-protocol').value, transport: selectedHardwareProfile().id === 'simulation' ? 'simulation' : selectedHardwareProfile().transport === 'serial' ? 'serial' : selectedWlanProfile() ? 'wlan' : 'lan' },
       z21_host: $('#setting-z21-host').value.trim(),
       z21_port: Number($('#setting-z21-port').value),
@@ -4670,6 +4725,12 @@
     $('#settings-world-clock-reset').addEventListener('click', () => setWorldClock(true));
     $('#setting-world-clock-time').addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); setWorldClock(); } });
     $('#setting-theme').addEventListener('change', (event) => applyTheme(event.target.value));
+    $$('input[name="accent-color"]').forEach((option) => option.addEventListener('change', previewAccentColor));
+    $('#setting-accent-custom').addEventListener('input', () => { $('input[name="accent-color"][value="custom"]').checked = true; previewAccentColor(); });
+    $('#settings-accent-reset').addEventListener('click', () => {
+      renderAccentControls('graphite'); previewAccentColor();
+      app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; updateNativeControls();
+    });
     const previewInterface = () => applyInterfaceSettings({ interface: { density: $('#setting-interface-density').value, show_connection_detail: $('#setting-show-connection-detail').checked, reduce_motion: $('#setting-reduce-motion').checked } });
     $('#setting-interface-density').addEventListener('change', previewInterface);
     $('#setting-show-connection-detail').addEventListener('change', previewInterface);

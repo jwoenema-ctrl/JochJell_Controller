@@ -41,7 +41,7 @@ class SettingsTests(unittest.TestCase):
             app = ControllerApplication.sample(database_path=database)
             try:
                 self.assertEqual(app.settings_payload()["settings"], DEFAULT_SETTINGS)
-                changed = app.update_settings({"theme": "dark", "z21_host": "192.168.10.111", "z21_port": 21106, "routing": {"busy_interval_ms": 750}})
+                changed = app.update_settings({"theme": "dark", "accent_color": "#168078", "z21_host": "192.168.10.111", "z21_port": 21106, "routing": {"busy_interval_ms": 750}})
                 self.assertEqual(changed["settings"]["routing"]["idle_interval_ms"], 5000)
                 self.assertTrue(app.simulation_mode)
                 self.assertIsNone(app.z21_host)
@@ -60,6 +60,9 @@ class SettingsTests(unittest.TestCase):
         app = ControllerApplication.sample()
         self.addCleanup(app.close)
         invalid = [
+            {"accent_color": "red"}, {"accent_color": "#abc"}, {"accent_color": "#12345678"},
+            {"accent_color": "#zzzzzz"}, {"accent_color": None}, {"accent_color": 123},
+            {"accent_color": "#123456; color:red"},
             {"theme": "neon"}, {"z21_host": "http://192.168.0.111"}, {"z21_host": "not-a-host"},
             {"z21_host": "256.0.0.1"}, {"z21_host": "::1"}, {"z21_port": 0}, {"z21_port": 65536},
             {"z21_port": True}, {"ui_refresh_ms": 999}, {"ui_refresh_ms": 60001}, {"ui_refresh_ms": 2500.5},
@@ -71,6 +74,20 @@ class SettingsTests(unittest.TestCase):
             with self.subTest(item=item), self.assertRaises(ValueError):
                 app.update_settings({"theme": "dark", **item})
             self.assertEqual(app.settings_payload()["settings"], DEFAULT_SETTINGS)
+
+    def test_accent_migration_normalization_and_partial_updates(self) -> None:
+        from backend.infrastructure.settings import SQLiteSettingsRepository, validate_settings
+
+        legacy = {key: value for key, value in DEFAULT_SETTINGS.items() if key != "accent_color"}
+        repository = SQLiteSettingsRepository()
+        self.addCleanup(repository.close)
+        with repository._connection:
+            repository._connection.execute("INSERT INTO app_settings (id, data_json) VALUES (1, ?)", (json.dumps(legacy),))
+        self.assertEqual(repository.load()["accent_color"], "graphite")
+        saved = repository.save({**legacy, "accent_color": "#AABBCC"})
+        self.assertEqual(saved["accent_color"], "#aabbcc")
+        self.assertEqual(validate_settings({"theme": "dark"}, saved)["accent_color"], "#aabbcc")
+        self.assertEqual(repository.save({**saved, "accent_color": "graphite"})["accent_color"], "graphite")
 
     def test_settings_and_planning_never_command_or_tick_track(self) -> None:
         app = ControllerApplication.sample()

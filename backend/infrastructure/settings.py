@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import ipaddress
 import json
+import re
 from pathlib import Path
 import sqlite3
 from threading import RLock
@@ -99,6 +100,7 @@ def validate_workspace_layout(value: Any, current: Mapping[str, Any] | None = No
 
 DEFAULT_SETTINGS = {
     "theme": "system",
+    "accent_color": "graphite",
     "interface": {
         "density": "comfortable",
         "show_connection_detail": True,
@@ -183,6 +185,10 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
     result["operations"].setdefault("home_departure_count", 3)
     if result["theme"] not in ("system", "light", "dark"):
         raise ValueError("theme must be system, light, or dark")
+    accent = result["accent_color"]
+    if not isinstance(accent, str) or (accent != "graphite" and not re.fullmatch(r"#[0-9a-fA-F]{6}", accent)):
+        raise ValueError("accent_color must be graphite or a six-digit hex color")
+    result["accent_color"] = accent.lower()
     try:
         host = result["z21_host"]
         if not isinstance(host, str):

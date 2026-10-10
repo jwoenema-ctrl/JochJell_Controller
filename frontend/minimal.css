@@ -54,6 +54,9 @@ html[data-theme="light"] {
   --primary-bg: #292929;
   --primary-text: #ffffff;
   --primary-hover: #454545;
+  --accent: var(--blue-bright);
+  --accent-soft: var(--panel-soft);
+  --accent-border: var(--line-bright);
   --danger-bg: #fff3f2;
   --danger-line: #eac5c2;
   --occupied-bg: #faf0e5;
@@ -700,3 +703,29 @@ html[data-reduce-motion="true"] *, html[data-reduce-motion="true"] *::before, ht
 .home-departures-summary:empty { display: none; }
 .home-departures-empty { margin: 0; padding: 18px 16px; color: var(--muted); font-size: 12px; }
 .home-departures-panel .platform-tag { font-size: 11px; }
+
+/* Personal accents apply to interaction cues, independently of track statuses. */
+.mode-tab.is-active, .trains-subnav-link.is-active { color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-border); }
+.toolbar-tab.is-active, .editor-tab.is-active { color: var(--accent); background: var(--accent-soft); }
+.editor-tab.is-active::after { background: var(--accent); }
+.control-mode.is-active:not([data-control-mode="safe"]) { background: var(--accent-soft); border-color: var(--accent-border); }
+.control-mode.is-active:not([data-control-mode="safe"]) .mode-glyph { color: var(--accent); }
+.range-input, .settings-control input[type="checkbox"], .check-field input { accent-color: var(--accent); }
+.settings-field-label { display: block; font-size: 14px; font-weight: 500; }
+.settings-card .settings-accent-row { grid-template-columns: minmax(0, 1fr) minmax(0, 380px); align-items: start; }
+.settings-accent-control { min-width: 0; }
+.accent-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.accent-options .accent-option { position: relative; display: flex; align-items: center; gap: 7px; min-height: 42px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; cursor: pointer; }
+.accent-option:hover { background: var(--panel-raised); border-color: var(--line-bright); }
+.accent-option:has(input:checked) { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.accent-option:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 3px; }
+.accent-option input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.accent-swatch { width: 15px; height: 15px; flex-shrink: 0; border: 1px solid rgb(128 128 128 / 35%); border-radius: 50%; background: var(--swatch, #3975de); }
+.accent-custom-control { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.accent-custom-control label { color: var(--muted); font-size: 12px; }
+.accent-custom-control input[type="color"] { width: 46px; height: 34px; padding: 3px; border: 1px solid var(--line-bright); border-radius: 7px; background: var(--panel); cursor: pointer; }
+.accent-custom-control output { font-family: ui-monospace, monospace; color: var(--muted); font-size: 12px; }
+#settings-accent-reset { color: var(--accent); margin-top: 3px; }
+@media (max-width: 760px) {
+  .settings-card .settings-accent-row { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+}

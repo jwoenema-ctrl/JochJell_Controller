@@ -166,6 +166,7 @@ Settings includes:
 - world clock day length: 12 minutes, 24 minutes (default), 48 minutes, or 24 hours;
 
 - light, dark or device-following theme;
+- accent colors: Graphite, Railway Blue, Teal, Violet, Copper, or a custom color, with instant preview and readable shades for both themes;
 - compact or comfortable interface density;
 - browser refresh interval;
 - simulation rate and motion preferences;
