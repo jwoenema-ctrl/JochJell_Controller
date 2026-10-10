@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
+import traceback
 
 import webview
 
@@ -102,7 +103,8 @@ def main():
             assert window.evaluate_js("typeof window.pywebview.api.switch_mode") == "function"
             assert not window.evaluate_js("document.querySelector('#settings-connect-z21').disabled")
             assert not window.evaluate_js("document.querySelector('#setting-z21-wlan').checked")
-            assert window.evaluate_js("document.querySelector('#setting-z21-wlan-help').textContent.includes('does not join Wi-Fi')")
+            assert window.evaluate_js("/join.*Wi-Fi/i.test(document.querySelector('#setting-z21-wlan-help').textContent)"), 'WLAN help must explain joining the station Wi-Fi from the controller computer'
+            assert window.evaluate_js("document.querySelector('#setting-z21-wlan-help').textContent.includes('does not store Wi-Fi passwords')"), 'WLAN help must explain that passwords are not stored'
             window.evaluate_js("document.querySelector('#setting-z21-wlan').click()")
             assert window.evaluate_js("document.querySelector('#setting-z21-wlan').checked")
             assert window.evaluate_js("document.querySelector('#settings-connect-z21').disabled")
@@ -129,7 +131,8 @@ def main():
             assert all(float(train.get("speed", 0)) == 0 for train in controller.app.trains)
             result = {'passed': True, 'embedded_window': True, 'renderer': 'edgechromium', 'settings': True, 'wlan_settings': True, 'theme': True, 'direction': True, 'layout_info': True, 'editable_block_id': True, 'settings_connection_bridge': True, 'physical_connect_cancelled': True, 'simulation_switch_preserves_stopped_layout': True, 'external_browser': False}
         except Exception as error:
-            result['error'] = str(error)
+            result['error'] = f'{type(error).__name__}: {error}'
+            result['traceback'] = traceback.format_exc()
         finally:
             args.smoke_test.write_text(json.dumps(result), encoding='utf-8')
             window.destroy()
