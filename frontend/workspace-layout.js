@@ -18,6 +18,7 @@
     programming: ['DCC programming', '#programming-panel'],
     calibration: ['Motion calibration', '#calibration-panel'],
     timetable: ['Timetable', '#timetable-panel'],
+    departures: ['Upcoming departures', '#home-departures-panel'],
     scans: ['3D track viewer', '#scan-panel'],
     'control-center': ['Control center', '.control-panel'],
     'selected-train': ['Selected train', '.selected-train-panel'],
@@ -27,7 +28,7 @@
   };
   const PAGE_LABELS = { dispatch: 'Home', layout: 'Automation', trains: 'Trains', timetable: 'Timetable', scans: '3D workspace' };
   const MAIN = {
-    dispatch: ['layout-info', 'node-graph', 'systematic', 'trains', 'timetable'],
+    dispatch: ['layout-info', 'node-graph', 'systematic', 'trains', 'departures'],
     layout: ['layout-info', 'node-graph', 'automation', 'systematic', 'routes', 'track-triggers', 'scans', 'timetable'],
     trains: ['trains', 'train-profile', 'rolling-stock', 'programming', 'calibration', 'assembler'], timetable: ['timetable'], scans: ['scans']
   };
@@ -45,6 +46,10 @@
       if (!candidate) continue;
       for (const key of ['order', 'sidebar_order']) {
         let order = candidate[key];
+        if (page === 'dispatch' && key === 'order' && Array.isArray(order)) {
+          order = order.map(id => id === 'timetable' ? 'departures' : id);
+          if (order.length === 4 && new Set(order).size === 4 && order.every(id => preference[key].includes(id)) && !order.includes('departures')) order.push('departures');
+        }
         if (page === 'layout' && key === 'order' && Array.isArray(order) && !order.includes('track-triggers')) order = [...order, 'track-triggers'];
         if (Array.isArray(order) && order.length === preference[key].length && new Set(order).size === order.length
             && order.every(id => preference[key].includes(id))) preference[key] = [...order];
@@ -98,7 +103,7 @@
     for (const id of new Set(Object.values(MAIN).flat())) if (nodes[id]) workspace.append(nodes[id]);
     for (const id of SIDEBAR) if (nodes[id]) sidebar.append(nodes[id]);
     let homeOverview = null;
-    if (nodes.timetable && nodes['layout-info']) {
+    if (nodes.departures && nodes['layout-info']) {
       homeOverview = doc.createElement('div');
       homeOverview.className = 'home-overview-panels is-hidden';
       workspace.append(homeOverview);
@@ -136,7 +141,7 @@
       planningPair?.classList.toggle('is-hidden', page !== 'layout');
       automationSidebar?.classList.toggle('is-hidden', page !== 'layout');
       if (page === 'dispatch' && homeOverview) {
-        reorder(homeOverview, [nodes.timetable, nodes['layout-info']]);
+        reorder(homeOverview, [nodes.departures, nodes['layout-info']]);
       }
       if (page === 'layout' && automationSidebar) {
         // Reuse the live panels, retaining controls and listeners. Other pages
@@ -145,7 +150,7 @@
       }
       let planningPairAdded = false;
       const orderedPanels = preference.order.flatMap(id => {
-        if (page === 'dispatch' && homeOverview && ['layout-info', 'timetable'].includes(id)) return [];
+        if (page === 'dispatch' && homeOverview && ['layout-info', 'departures'].includes(id)) return [];
         if (page === 'layout' && automationSidebar && ['layout-info', 'timetable'].includes(id)) return [];
         if (page === 'layout' && planningPair && ['automation', 'routes'].includes(id)) {
           if (planningPairAdded) return [];
@@ -175,7 +180,7 @@
       const pairedPanelHelp = query('[data-planning-pair-help]');
       pairedPanelHelp.hidden = !['dispatch', 'layout'].includes(editingPage);
       pairedPanelHelp.textContent = editingPage === 'dispatch'
-        ? 'On Home, Timetable and Layout information stay together at the top, side by side on wide screens. The remaining panels follow the order below.'
+        ? 'On Home, Upcoming departures and Layout information stay together at the top, side by side on wide screens. The remaining panels follow the order below.'
         : 'On Automation, Layout information and Timetable stay in the left sidebar. Train automation and Route plans share one row on wide screens; the first of these two entries determines where that row appears.';
       for (const key of ['order', 'sidebar_order']) {
         const list = query(`[data-panel-list="${key}"]`); list.replaceChildren();

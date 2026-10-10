@@ -1022,6 +1022,39 @@ class ControllerApplication:
         if was_running or self.simulation_running:
             self.runtime.scheduler.start(tick=current_tick, world_tick=current_world_tick)
 
+    def upcoming_departures(self) -> list[dict[str, Any]]:
+        """Read the next daily departures using the dispatcher's actual stop times."""
+        if self.runtime is None:
+            return []
+        current = self.runtime.scheduler.world_current_tick
+        rows = {str(row.get("id")): row for row in self.schedules}
+        trains = {str(train["id"]): train for train in self.trains}
+        departures = []
+        for stop in self.runtime.scheduler.stops:
+            row = rows.get(stop.stop_id.split("#", 1)[0])
+            if row is None or self._schedule_domain_status(row.get("state")) is ScheduleStatus.CANCELLED:
+                continue
+            # The daily scheduler resets at midnight; later ticks never run.
+            if not 0 < stop.departure_tick <= WORLD_DAY_MINUTES:
+                continue
+            due = stop.departure_tick
+            if due <= current:
+                due += WORLD_DAY_MINUTES
+            train = trains.get(stop.train_id, {})
+            minute = stop.departure_tick % WORLD_DAY_MINUTES
+            departures.append({
+                "id": stop.stop_id, "schedule_id": row["id"],
+                "train_id": self._ui_train_id(stop.train_id),
+                "time": f"{minute // 60:02d}:{minute % 60:02d}",
+                "service": row.get("service") or train.get("name") or "Service",
+                "number": row.get("number") or train.get("address") or "",
+                "route": row.get("route") or "—",
+                "platform": stop.platform_id or row.get("platform") or "—",
+                "next_day": due >= WORLD_DAY_MINUTES,
+                "due_in_minutes": due - current,
+            })
+        return sorted(departures, key=lambda item: (item["due_in_minutes"], item["id"]))
+
     def _advance_repeating_world_schedule(self, count: int) -> tuple[RuntimeScheduleEvent, ...]:
         """Advance timetable minutes and replay the timetable at each day boundary."""
 
@@ -2567,6 +2600,7 @@ class ControllerApplication:
                 ),
                 "trains": self._ui_trains(track_snapshot, motions_by_id),
                 "schedules": list(self.schedules),
+                "upcomingDepartures": self.upcoming_departures(),
                 "feedback": self.feedback_payload(),
                 "presence": self.train_presence_state(),
                 "rollingStockInventory": self.rolling_stock_inventory(),
@@ -2790,6 +2824,7 @@ class ControllerApplication:
             "trainDatabase": self.train_database(),
             "train_database_revision": self.runtime.train_database.revision if self.runtime is not None else None,
             "schedules": list(self.schedules),
+            "upcomingDepartures": self.upcoming_departures(),
             "routes": deepcopy(self.routes),
             "blocks": ui_blocks,
             "turnouts": ui_turnouts,

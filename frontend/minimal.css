@@ -686,3 +686,17 @@ html[data-reduce-motion="true"] *, html[data-reduce-motion="true"] *::before, ht
 
 .track-trigger-content .muted, .track-trigger-content .empty-state { color: var(--muted); font-size: 12px; line-height: 1.6; }
 .track-trigger-content h3 { font-size: 14px; margin: 14px 0 6px; }
+/* Home has a read-only departure board, independent of the timetable editor. */
+.home-departures-panel .panel-heading { display: flex; flex-wrap: nowrap; justify-content: space-between; }
+.home-departures-panel .departures-toggle { flex-shrink: 0; display: grid; place-items: center; }
+.departures-toggle.is-collapsed svg { transform: rotate(180deg); }
+.home-departure-row { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 13px 16px; border-top: 1px solid var(--line); }
+.home-departure-time strong { font-size: 14px; font-variant-numeric: tabular-nums; }
+.home-departure-time small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.home-departure-service { min-width: 0; }
+.home-departure-service strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.home-departure-service small { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.home-departures-summary { margin: 0; padding: 10px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.home-departures-summary:empty { display: none; }
+.home-departures-empty { margin: 0; padding: 18px 16px; color: var(--muted); font-size: 12px; }
+.home-departures-panel .platform-tag { font-size: 11px; }

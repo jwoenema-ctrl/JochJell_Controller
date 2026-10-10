@@ -56,9 +56,11 @@ Home is the operating screen. It includes:
 - the 2D node graph with block occupancy and route reservations;
 - selected-train controls for speed, direction, stop and decoder functions;
 - track power and simulation controls;
-- timetable and dispatcher status;
+- a read-only board of upcoming departures;
 - route and block activity;
 - the 3D/photo-scan viewer when a layout scan is available.
+
+The **Upcoming departures** board shows the next daily departures in dispatcher order, including departures on the following model day. Use its chevron to collapse it to the next **3** departures, or expand it to show all. Change the collapsed count (1–100) in **Settings → Operations → Home departure preview**. The count is saved on the controller; the collapsed/expanded choice is remembered in your browser. Service editing and simulation controls are in **Automation → Timetable & scheduler**.
 
 Use **Forward** or **Reverse** only when the train is stationary. A direction change does not start the train. **Stop** is the safe way to cancel motion.
 

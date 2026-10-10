@@ -14,7 +14,7 @@ from .hardware import DEFAULT_HARDWARE, Z21_COMPATIBLE_SYSTEMS, validate_hardwar
 
 
 WORKSPACE_PANELS = {
-    "dispatch": ["layout-info", "node-graph", "systematic", "trains", "timetable"],
+    "dispatch": ["layout-info", "node-graph", "systematic", "trains", "departures"],
     "layout": ["layout-info", "node-graph", "automation", "systematic", "routes", "track-triggers", "scans", "timetable"],
     "trains": ["trains", "train-profile", "rolling-stock", "programming", "calibration", "assembler"],
     "timetable": ["timetable"],
@@ -55,7 +55,10 @@ def validate_workspace_layout(value: Any, current: Mapping[str, Any] | None = No
         if page == "dispatch" and key == "order" and isinstance(order, list):
             legacy = ["layout-info", "node-graph", "systematic", "trains"]
             if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
-                return list(order) + ["timetable"]
+                return list(order) + ["departures"]
+            legacy = ["layout-info", "node-graph", "systematic", "trains", "timetable"]
+            if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
+                return ["departures" if item == "timetable" else item for item in order]
         if page == "trains" and key == "order" and isinstance(order, list):
             legacy = ["trains", "train-profile", "assembler"]
             if len(order) == len(legacy) and all(isinstance(item, str) for item in order) and set(order) == set(legacy):
@@ -106,6 +109,7 @@ DEFAULT_SETTINGS = {
         "default_simulation_rate": 1,
         "world_day_minutes": 24,
         "connected_blocks": True,
+        "home_departure_count": 3,
     },
     "z21_host": "192.168.0.111",
     "z21_port": 21105,
@@ -176,6 +180,7 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
         raise ValueError("operations must contain only known settings")
     result["operations"].update(operations)
     result["operations"].setdefault("world_day_minutes", 24)
+    result["operations"].setdefault("home_departure_count", 3)
     if result["theme"] not in ("system", "light", "dark"):
         raise ValueError("theme must be system, light, or dark")
     try:
@@ -200,6 +205,8 @@ def validate_settings(value: Mapping[str, Any], current: Mapping[str, Any] | Non
         raise ValueError("operations.confirm_power_actions must be a boolean")
     if type(result["operations"]["connected_blocks"]) is not bool:
         raise ValueError("operations.connected_blocks must be a boolean")
+    if type(result["operations"]["home_departure_count"]) is not int or not 1 <= result["operations"]["home_departure_count"] <= 100:
+        raise ValueError("operations.home_departure_count must be an integer between 1 and 100")
     if type(result["operations"]["default_simulation_rate"]) is not int or result["operations"]["default_simulation_rate"] not in (1, 5, 15, 60):
         raise ValueError("operations.default_simulation_rate must be one of 1, 5, 15, or 60")
     if type(result["operations"]["world_day_minutes"]) is not int or result["operations"]["world_day_minutes"] not in (12, 24, 48, 1440):

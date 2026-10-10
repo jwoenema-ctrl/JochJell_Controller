@@ -91,6 +91,7 @@
     selectedBlockId: 'b04',
     controlMode: 'manual',
     workspace: 'dispatch',
+    homeDeparturesCollapsed: false,
     trainSection: 'overview',
     layoutView: 'graph',
     editorTab: 'datasheet',
@@ -229,7 +230,7 @@
     });
   }
 
-  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true, world_day_minutes: 24 }, hardware: { system: 'z21', host: '192.168.0.111', port: 21105, serial_port: '', baudrate: 115200, decoder_protocol: 'dcc' }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
+  const DEFAULT_SETTINGS = { theme: 'system', interface: { density: 'comfortable', show_connection_detail: true, reduce_motion: false }, operations: { confirm_power_actions: false, default_simulation_rate: 1, connected_blocks: true, world_day_minutes: 24, home_departure_count: 3 }, hardware: { system: 'z21', host: '192.168.0.111', port: 21105, serial_port: '', baudrate: 115200, decoder_protocol: 'dcc' }, z21_host: '192.168.0.111', z21_port: 21105, z21_wlan_enabled: false, ui_refresh_ms: 5000, routing: { adaptive: true, busy_interval_ms: 1000, idle_interval_ms: 5000 } };
   app.settings = clone(DEFAULT_SETTINGS);
   app.settingsDirty = false;
   app.settingsLoaded = false;
@@ -437,7 +438,12 @@
       mergeTrainDatabaseRecords(app.state.trainDatabase);
     }
     if (Array.isArray(value.trains) && value.trains.length && value.trains[0] && value.trains[0].train_id) mergeTrainDatabaseRecords(value.trains);
-    if (Array.isArray(value.schedules)) app.state.schedules = value.schedules;
+    if (Array.isArray(value.schedules)) {
+      app.state.schedules = value.schedules;
+      // Older controller processes send schedules without a departure projection.
+      if (!Array.isArray(value.upcomingDepartures)) app.state.upcomingDepartures = null;
+    }
+    if (Array.isArray(value.upcomingDepartures)) app.state.upcomingDepartures = value.upcomingDepartures;
     if (Array.isArray(value.scans)) app.state.scans = value.scans;
     if (typeof value.track_power === 'boolean') {
       if (!value.track_power) { cancelSpeedDraft(); speedChoices.clear(); }
@@ -685,6 +691,8 @@
     $('#setting-connected-blocks').checked = settings.operations.connected_blocks;
     $('#setting-default-simulation-rate').value = String(settings.operations.default_simulation_rate);
     $('#setting-world-day-minutes').value = String(settings.operations.world_day_minutes);
+    $('#setting-home-departure-count').value = String(settings.operations.home_departure_count);
+    renderHomeDepartures();
     app.simRate = Number(settings.operations.default_simulation_rate) || 1;
     applyInterfaceSettings(settings);
     const hardware = settings.hardware || { ...DEFAULT_SETTINGS.hardware, host: settings.z21_host, port: settings.z21_port };
@@ -875,7 +883,7 @@
       z21_wlan_enabled: ['z21', 'z21_white', 'z21_start'].includes($('#setting-hardware-system').value) && $('#setting-z21-wlan').checked,
       ui_refresh_ms: Number($('#setting-ui-refresh').value) * 1000,
       interface: { density: $('#setting-interface-density').value, show_connection_detail: $('#setting-show-connection-detail').checked, reduce_motion: $('#setting-reduce-motion').checked },
-      operations: { confirm_power_actions: $('#setting-confirm-power-actions').checked, default_simulation_rate: Number($('#setting-default-simulation-rate').value), connected_blocks: $('#setting-connected-blocks').checked, world_day_minutes: Number($('#setting-world-day-minutes').value) },
+      operations: { confirm_power_actions: $('#setting-confirm-power-actions').checked, default_simulation_rate: Number($('#setting-default-simulation-rate').value), connected_blocks: $('#setting-connected-blocks').checked, world_day_minutes: Number($('#setting-world-day-minutes').value), home_departure_count: Number($('#setting-home-departure-count').value) },
       routing: { adaptive: $('#setting-routing-adaptive').checked, busy_interval_ms: Number($('#setting-routing-busy').value) * 1000, idle_interval_ms: Number($('#setting-routing-idle').value) * 1000 }
     };
     button.disabled = true;
@@ -3225,7 +3233,87 @@
     $$('.editor-tab').forEach((button) => button.classList.toggle('is-active', button.dataset.editorTab === app.editorTab));
   }
 
+  function homeUpcomingDepartures() {
+    if (Array.isArray(app.state.upcomingDepartures)) return app.state.upcomingDepartures;
+
+    // Keep the board usable when the frontend is newer than the running server.
+    const dayMinutes = 1440;
+    const parseTime = value => {
+      const parts = String(value ?? '').split(':');
+      if (parts.length !== 2 || parts.some(part => !/^-?\d+$/.test(part))) return null;
+      const [hour, minute] = parts.map(Number);
+      return Math.max(0, ((hour % 24 + 24) % 24) * 60 + Math.max(0, Math.min(59, minute)));
+    };
+    const stopMinute = (value, fallback, index, defaultMinute = index) => {
+      if (value != null && value !== '') {
+        const seconds = Number(value);
+        if (Number.isFinite(seconds)) {
+          // Match the scheduler's rounding of stop seconds to model minutes.
+          const minute = seconds / 60;
+          const floor = Math.floor(minute);
+          const rounded = minute - floor === 0.5 ? floor + (floor % 2 !== 0 ? 1 : 0) : Math.round(minute);
+          return Math.max(0, rounded);
+        }
+        const parsed = parseTime(value);
+        if (parsed != null) return parsed;
+      }
+      const parsed = parseTime(fallback);
+      return Math.max(0, parsed == null ? defaultMinute : parsed + index);
+    };
+    const simulation = app.state.simulation || {};
+    let current = Number(simulation.schedule_minutes ?? NaN);
+    if (!Number.isFinite(current)) {
+      const seconds = Number(simulation.world_clock_seconds ?? NaN);
+      current = Number.isFinite(seconds) ? Math.floor(seconds / 60) : (parseTime(simulation.world_clock) ?? 0);
+    }
+    current = ((current % dayMinutes) + dayMinutes) % dayMinutes;
+    const departures = [];
+    for (const row of app.state.schedules || []) {
+      if (!row.id || /^(cancelled|canceled)$/i.test(String(row.state || '').trim())) continue;
+      const train = (app.state.trains || []).find(item =>
+        item.id === row.train_id || (row.number != null && String(item.address ?? item.number) === String(row.number)));
+      if (!row.train_id && !train) continue;
+      const stops = Array.isArray(row.stops) && row.stops.length ? row.stops : [{}];
+      stops.forEach((stop, index) => {
+        if (!stop || typeof stop !== 'object') return;
+        const arrival = stopMinute(stop.arrival_seconds ?? stop.arrivalSeconds, row.time || '00:00', index);
+        const departure = Math.max(arrival, stopMinute(stop.departure_seconds ?? stop.departureSeconds, null, index, arrival + 1));
+        if (departure <= 0 || departure > dayMinutes) return;
+        // The timetable repeats each model day, including previously departed rows.
+        const due = departure <= current ? departure + dayMinutes : departure;
+        const minute = departure % dayMinutes;
+        departures.push({
+          id: index ? `${row.id}#${index}` : String(row.id), schedule_id: row.id,
+          train_id: train?.id || row.train_id,
+          time: `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`,
+          service: row.service || train?.name || 'Service',
+          number: row.number || train?.address || train?.number || '',
+          route: row.route || '—', platform: stop.platform_id || stop.platformId || row.platform || '—',
+          next_day: due >= dayMinutes, due_in_minutes: due - current,
+        });
+      });
+    }
+    return departures.sort((a, b) => a.due_in_minutes - b.due_in_minutes || a.id.localeCompare(b.id));
+  }
+
+  function renderHomeDepartures() {
+    const list = $('#home-departures-list');
+    if (!list) return;
+    const departures = homeUpcomingDepartures();
+    const count = Math.max(1, Math.min(100, Number(app.settings.operations.home_departure_count) || 3));
+    const shown = app.homeDeparturesCollapsed ? departures.slice(0, count) : departures;
+    const toggle = $('#home-departures-toggle');
+    const action = app.homeDeparturesCollapsed ? 'Show all upcoming departures' : `Show the next ${count} departures`;
+    toggle.setAttribute('aria-expanded', String(!app.homeDeparturesCollapsed));
+    toggle.setAttribute('aria-label', action);
+    toggle.title = action;
+    toggle.classList.toggle('is-collapsed', app.homeDeparturesCollapsed);
+    list.innerHTML = shown.length ? shown.map(departure => `<div class="home-departure-row"><div class="home-departure-time"><strong>${escapeHtml(departure.time)}</strong>${departure.next_day ? '<small>Next day</small>' : ''}</div><div class="home-departure-service"><strong>${escapeHtml(departure.service)}</strong><small>${departure.number ? `#${escapeHtml(departure.number)} · ` : ''}${escapeHtml(departure.route)}</small></div><span class="platform-tag" title="Platform ${escapeHtml(departure.platform)}">${escapeHtml(departure.platform)}</span></div>`).join('') : '<p class="home-departures-empty">No upcoming departures.</p>';
+    $('#home-departures-summary').textContent = departures.length ? `${shown.length} of ${departures.length} upcoming departures` : '';
+  }
+
   function renderSchedules() {
+    renderHomeDepartures();
     $('#schedule-list').innerHTML = app.state.schedules.map((schedule) => `<div class="schedule-row"><span class="schedule-time">${escapeHtml(schedule.time || '—')}</span><span class="schedule-service"><strong>${escapeHtml(schedule.service || 'Service')}</strong><small>#${escapeHtml(schedule.number || '—')}</small></span><span class="schedule-route">${escapeHtml(schedule.route || '—')}</span><span class="platform-tag">${escapeHtml(schedule.platform || '—')}</span><span class="schedule-state ${schedule.state === 'Delayed' ? 'delayed' : ''}">${escapeHtml(schedule.state || 'Planned')}</span><span class="schedule-actions"><button class="icon-button small schedule-menu" data-schedule-id="${escapeHtml(schedule.id)}" title="Edit service" aria-label="Edit service">⋯</button><button class="icon-button small schedule-delete danger-text" data-schedule-id="${escapeHtml(schedule.id)}" title="Remove service" aria-label="Remove service">×</button></span></div>`).join('');
     $$('.schedule-menu', $('#schedule-list')).forEach((button) => button.addEventListener('click', () => {
       const schedule = app.state.schedules.find((item) => item.id === button.dataset.scheduleId);
@@ -3901,7 +3989,8 @@
     // existing workflows; the Locomotives tab simply focuses the same module.
     $('#train-editor-panel').classList.toggle('is-hidden', page !== 'trains');
     $('.bottom-grid').classList.toggle('is-hidden', !['dispatch', 'layout', 'trains', 'timetable'].includes(page));
-    $('#timetable-panel').classList.toggle('is-hidden', !['dispatch', 'layout', 'timetable'].includes(page));
+    $('#timetable-panel').classList.toggle('is-hidden', !['layout', 'timetable'].includes(page));
+    $('#home-departures-panel').classList.toggle('is-hidden', page !== 'dispatch');
     $('#rolling-stock-panel').classList.toggle('is-hidden', page !== 'trains' || trainSection !== 'rolling-stock');
     $('#programming-panel').classList.toggle('is-hidden', page !== 'trains' || trainSection !== 'programming');
     $('#calibration-panel').classList.toggle('is-hidden', page !== 'trains' || trainSection !== 'programming');
@@ -4568,6 +4657,12 @@
         window.scrollTo({ top: Math.max(0, targetTop - navigationOffset), behavior: reducedMotion ? 'auto' : 'smooth' });
       });
     }));
+    try { app.homeDeparturesCollapsed = localStorage.getItem('jochjell.homeDeparturesCollapsed') === 'true'; } catch (_) {}
+    $('#home-departures-toggle').addEventListener('click', () => {
+      app.homeDeparturesCollapsed = !app.homeDeparturesCollapsed;
+      try { localStorage.setItem('jochjell.homeDeparturesCollapsed', String(app.homeDeparturesCollapsed)); } catch (_) {}
+      renderHomeDepartures();
+    });
     $('#app-settings-form').addEventListener('submit', saveAppSettings);
     $('#setting-hardware-system').addEventListener('change', () => { renderHardwareFields(true); app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; updateNativeControls(); });
     $('#app-settings-form').addEventListener('input', (event) => { if (event.target.id === 'setting-world-clock-time') return; app.settingsDirty = true; $('#settings-save-status').textContent = 'Unsaved changes'; renderWlanPresentation(app.settingsRuntime); updateNativeControls(); });
