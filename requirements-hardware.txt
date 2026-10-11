@@ -1,2 +1,2 @@
-# Needed only for the XpressNet LI-USB serial PC interface.
+# Needed for XpressNet LI-USB and independent USB / serial occupancy detectors.
 pyserial==3.5

@@ -155,7 +155,7 @@
             <div class="health-row"><span class="health-check warning">!</span><span>Connection checker</span><span class="health-value" id="checker-health">Standby</span></div>
             <div class="health-row health-connection-status"><span class="health-connection-dot" aria-hidden="true"></span><span id="health-source">Embedded sample state</span></div>
           </div>
-          <div class="health-app-info"><span>JochJell Controller</span><span>JochJell · v0.2.16 · local workspace</span></div>
+          <div class="health-app-info"><span>JochJell Controller</span><span>JochJell · v0.2.17 · local workspace</span></div>
         </section>
       </aside>
 
@@ -231,7 +231,11 @@
             <p class="settings-help" id="connection-limit-status" role="status">Select a directed connection. Blank removes the default or makes a train inherit it.</p>
           </div>
           <div class="spline-section-editor is-hidden" id="spline-section-editor">
-            <div><strong id="spline-section-name">Select a spline section</strong><p class="settings-help">Maximum speed in both directions. The lowest section limit applies across the connection.</p></div>
+            <div><strong id="spline-section-name">Select a track section</strong><p class="settings-help">Assign multiple sections to the same block to share its colour and occupancy display.</p></div>
+            <label>Track block <select id="spline-section-block" aria-label="Selected track section block" disabled></select></label>
+            <button type="button" class="button button-soft" id="save-spline-section-block" disabled>Assign block</button>
+            <label>Split at % <input id="spline-section-split" type="number" min="1" max="99" step="1" value="50" required aria-label="Position of new block boundary along selected curve"></label>
+            <button type="button" class="button button-soft" id="split-block-boundary" disabled>＋ Block boundary</button>
             <label>Maximum km/h <input id="spline-section-speed" type="number" min="0" max="1000" step="0.1" placeholder="No section limit" aria-label="Selected spline section maximum speed in km/h" disabled></label>
             <button type="button" class="button button-soft" id="save-spline-section-speed" disabled>Apply maximum speed</button>
             <p class="settings-help" id="spline-section-status" role="status">Click a rail section to show its pull points and maximum speed.</p>
@@ -241,6 +245,7 @@
             <div class="map-stage-label top-left"><span class="pulse-dot"></span> <span id="map-stage-mode">LIVE BLOCK GRAPH</span> · <span id="pinboard-coordinate">Move over the board to read coordinates</span></div>
             <div class="map-stage-label bottom-right">Drag empty space to pan · Space + drag anywhere</div>
           </div>
+          <div class="track-block-legend is-hidden" id="track-block-legend" aria-label="Track blocks"></div>
           <p class="graph-motion-note" id="graph-motion-note">Train markers show controller-reported blocks. Exact positions are unavailable.</p>
           <div class="map-summary">
             <div class="summary-stat"><span class="stat-icon blue">▦</span><span><strong id="block-count">12</strong><small>Track blocks</small></span></div>
@@ -545,6 +550,8 @@
             <p class="settings-help" id="settings-connection-note">Save your settings, then connect explicitly. Connecting leaves track power off.</p>
             <div class="settings-native-actions"><button type="button" class="button button-primary" id="settings-connect-z21" disabled>Connect</button><button type="button" class="button button-soft" id="settings-use-simulation" disabled>Disconnect / use simulation</button></div>
             <p class="settings-status" id="settings-native-status" role="status">Loading controller connection settings…</p>
+            <div class="settings-row"><div><span class="settings-field-label">Hardware blocks</span><p class="settings-help">Link physical detector inputs to your layout blocks. A block can use several inputs.</p><p class="settings-help" id="feedback-mapping-summary">Assignments are saved separately for each digital system.</p></div><div class="settings-control"><button type="button" class="button button-soft" id="open-feedback-mapping">Map hardware blocks</button></div></div>
+            <div class="settings-row"><div><span class="settings-field-label">Track switches</span><p class="settings-help">Control switches through the command station or the computer's USB / network bridge.</p><p class="settings-help" id="turnout-connector-summary">Command-station accessory addresses are used by default.</p></div><div class="settings-control"><button type="button" class="button button-soft" id="open-turnout-connectors">Map track switches</button></div></div>
           </section>
           <section class="settings-section settings-card" id="settings-routing" aria-labelledby="routing-heading">
             <div class="settings-section-heading"><div><p class="eyebrow">PLANNING ENGINE</p><h3 id="routing-heading">Routing</h3><p>Keep route plans in step with your layout without over-polling a quiet railway.</p></div><span class="settings-section-index">03</span></div>
@@ -621,10 +628,12 @@
         <div class="field-grid">
         <div class="field"><label for="block-id">Block ID</label><input id="block-id" required maxlength="32" pattern="[A-Za-z][A-Za-z0-9_\-]{0,31}" aria-describedby="block-id-help"><small id="block-id-help">Switch track power off to rename an ID. Connections and references update together.</small></div>
           <div class="field"><label for="block-name">Block name</label><input id="block-name" required></div>
+          <div class="field"><label for="block-color">Track colour</label><input id="block-color" type="color"><small>Used by every track section assigned to this block.</small></div>
           <div class="field"><label for="block-length">Length (mm)</label><input id="block-length" type="number" min="0" step="1"></div>
           <div class="field"><label for="block-station">Station / area label</label><input id="block-station"></div>
         </div>
         <p class="editor-note">IDs are unique and case-insensitive. Use Save layout to keep your changes. Connections are managed in the graph toolbar.</p>
+        <div class="block-feedback-shortcut"><div><strong>Hardware detectors</strong><p class="editor-note" id="block-feedback-summary">Assign detector inputs to report this block's occupancy.</p></div><button type="button" class="button button-soft" id="edit-block-feedback">Assign hardware detectors</button></div>
       </div>
       <div class="modal-actions"><button type="button" class="button button-soft" id="cancel-block-editor">Cancel</button><button type="submit" class="button button-primary" id="save-block-editor">Save block</button></div>
     </form>
@@ -698,6 +707,8 @@
   <script src="scan_viewer.js"></script>
   <script src="workspace-layout.js"></script>
   <script src="track-triggers.js"></script>
+  <script src="block-feedback.js"></script>
+  <script src="turnout-connectors.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

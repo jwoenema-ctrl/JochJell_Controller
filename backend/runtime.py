@@ -228,6 +228,8 @@ class ControllerRuntime:
                 if any(not result.accepted for result in results):
                     self.dispatcher.emergency_stop()
                 snapshot = self.track.get_snapshot()
+            if not isinstance(self.track, SimulatedTrackSystem) and not getattr(self.track, "feedback_healthy", True):
+                self.dispatcher.emergency_stop()
             cycle = self.dispatcher.tick(snapshot=snapshot)
         if cycle is None:
             cycle = self.dispatcher.tick()

@@ -170,13 +170,19 @@ class Z21TrackSystem:
             occupied_blocks={new if key == old else key: value for key, value in self._snapshot.occupied_blocks.items()})
 
     def get_snapshot(self) -> TrackSnapshot:
-        return self._snapshot
+        source = getattr(self, "computer_feedback", None)
+        if source is None:
+            return self._snapshot
+        occupied = dict(self._snapshot.occupied_blocks)
+        for block, values in source.occupied_blocks().items():
+            occupied[block] = tuple(sorted(set(occupied.get(block, ())) | set(values)))
+        return replace(self._snapshot, occupied_blocks=occupied)
 
     def tick(self, count: int = 1) -> TrackSnapshot:
         if count < 0:
             raise ValueError("count cannot be negative")
         self._snapshot = TrackSnapshot(self._snapshot.tick + count, self._snapshot.time_seconds + count * self.tick_seconds, self._snapshot.powered, self._snapshot.trains, self._snapshot.occupied_blocks, self._snapshot.turnouts)
-        return self._snapshot
+        return self.get_snapshot()
 
     def set_train_speed(self, train_id: str, speed: float) -> CommandResult:
         if not 0.0 <= float(speed) <= 1.0:
@@ -199,6 +205,9 @@ class Z21TrackSystem:
         return result
 
     def set_train_speed_by_address(self, address: int, speed: float, *, forward: bool = True, speed_limit: float | None = None) -> CommandResult:
+        source = getattr(self, "computer_feedback", None)
+        if speed > 0 and source is not None and not source.healthy:
+            return CommandResult(False, "set_train_speed", source.error)
         if not 0.0 <= float(speed) <= 1.0:
             raise ValueError("speed must be between 0 and 1")
         dcc_speed = round(float(speed) * 126)
@@ -399,13 +408,15 @@ class Z21TrackSystem:
     def feedback_healthy(self) -> bool:
         """Whether the latest configured feedback poll completed successfully."""
 
-        return self._feedback_healthy
+        source = getattr(self, "computer_feedback", None)
+        return self._feedback_healthy and (source is None or source.healthy)
 
     @property
     def feedback_error(self) -> str:
         """Return the latest feedback error, if any."""
 
-        return self._feedback_error
+        source = getattr(self, "computer_feedback", None)
+        return self._feedback_error or (source.error if source is not None and not source.healthy else "")
 
     def poll_feedback(self, groups: Iterable[int] = (0,)) -> tuple[CommandResult, ...]:
         """Poll R-BUS groups and update occupancy without inventing train IDs.

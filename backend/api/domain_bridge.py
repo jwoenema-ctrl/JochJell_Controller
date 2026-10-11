@@ -148,6 +148,7 @@ def snapshot_from_ui(
                 occupied_by=occupied_by,
                 platform_ids=tuple(str(item) for item in value.get("platform_ids", ())),
                 position=_position(value),
+                color=value.get("color"),
             )
         )
 
@@ -400,6 +401,7 @@ def snapshot_from_ui(
             _canonical_block_id(section.get("end_anchor_id")),
             _anchor(section.get("control1")), _anchor(section.get("control2")),
             section.get("speed_limit_kmh"),
+            _canonical_block_id(section["block_id"]) if section.get("block_id") is not None else None,
         ) for section in track_sections),
     )
 
@@ -414,6 +416,7 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
             "x": block.position.x if block.position else 62,
             "y": block.position.y if block.position else 224,
             "length_mm": block.length_mm,
+            "color": block.color,
             "status": block.state.value,
             "occupied_by": block.occupied_by,
             "station": block.name or "H0 layout",
@@ -589,5 +592,6 @@ def snapshot_to_ui(snapshot: LayoutSnapshot) -> dict[str, Any]:
                             "start_anchor_id": section.start_anchor_id, "end_anchor_id": section.end_anchor_id,
                             "control1": {"x": section.control1.x, "y": section.control1.y} if section.control1 else None,
                             "control2": {"x": section.control2.x, "y": section.control2.y} if section.control2 else None,
-                            "speed_limit_kmh": section.speed_limit_kmh} for section in snapshot.track_sections],
+                            "speed_limit_kmh": section.speed_limit_kmh,
+                            "block_id": section.block_id} for section in snapshot.track_sections],
     }

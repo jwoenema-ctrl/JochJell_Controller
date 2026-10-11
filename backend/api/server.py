@@ -39,7 +39,7 @@ from backend.core.events import (
     TrainSpeedChanged,
     TurnoutPositionChanged,
 )
-from backend.core.models import BlockState, LayoutSnapshot, ScheduleStatus, SignalAspect, TrainMode, TurnoutPosition
+from backend.core.models import Block, BlockState, LayoutSnapshot, ScheduleStatus, SignalAspect, TrainMode, TurnoutPosition
 from backend.core.decoder import normalize_decoder_protocol
 from backend.core.routing import RouteAlgorithm, find_route
 from backend.infrastructure.train_catalogue import TrainCatalogue, export_csv, export_json, import_csv, import_json
@@ -63,7 +63,7 @@ from backend.services.coordinate_move import (
 from backend.services.automation_recording import PlaybackPlan, RecordedAction
 from backend.services.track_triggers import TrackTriggerController
 from backend.services.train_presence import SavedTrainPresenceService
-from backend.services.pinboard import nearest_track_coordinate, block_center
+from backend.services.pinboard import TrackCoordinate, nearest_track_coordinate, block_center
 from backend.services.track_geometry import cubic_controls
 
 
@@ -236,7 +236,7 @@ class ControllerApplication:
             self.schedules = deepcopy(self._loaded_operating_plan["schedules"])
             self._sync_scheduler()
         self._restore_automation_programs()
-        self._track_trigger_controller = TrackTriggerController(self, (self._loaded_operating_plan or {}).get("track_triggers", []))
+        self._track_trigger_controller = TrackTriggerController(self, (self._loaded_operating_plan or {}).get("track_triggers", []), (self._loaded_operating_plan or {}).get("block_feedback", []))
         self._persist_operating_plan()
 
     @property
@@ -339,7 +339,10 @@ class ControllerApplication:
             for program in self._automation_programs
         ]
         triggers = self._track_trigger_controller.definitions if self._track_trigger_controller else (self._loaded_operating_plan or {}).get("track_triggers", [])
-        self._operating_plan_repository.save(self.schedules, routines, triggers)
+        block_feedback = self._track_trigger_controller.block_feedback if self._track_trigger_controller else (self._loaded_operating_plan or {}).get("block_feedback", [])
+        computer_feedback = self._track_trigger_controller.computer.config if self._track_trigger_controller else (self._loaded_operating_plan or {}).get("computer_feedback", {})
+        computer_turnouts = self._track_trigger_controller.computer_turnouts.assignments if self._track_trigger_controller else (self._loaded_operating_plan or {}).get("computer_turnouts", [])
+        self._operating_plan_repository.save(self.schedules, routines, triggers, block_feedback, computer_feedback, computer_turnouts)
 
     def _restore_automation_programs(self) -> None:
         """Restore persisted routines and rebuild their train-specific actions."""
@@ -495,6 +498,8 @@ class ControllerApplication:
         # be finishing a tick while waiting for this same lock.
         for worker in playback_workers:
             worker.join(timeout=0.2)
+        if self._track_trigger_controller:
+            self._track_trigger_controller.computer.close()
         try:
             self.stop_motion_clock()
         except Exception:
@@ -2530,7 +2535,7 @@ class ControllerApplication:
             "waypoints": self.waypoints,
             "turntables": self.turntables,
             "platforms": self.platforms,
-            "feedback": {"healthy": feedback_healthy, "error": feedback_error, "mapped_contacts": len(self.feedback_map)},
+            "feedback": {"healthy": feedback_healthy, "error": feedback_error, "mapped_contacts": len(self.feedback_map) + (len(self._track_trigger_controller.computer.mapping) if self._track_trigger_controller else 0)},
             "events": self.events[-25:],
         }
 
@@ -2647,10 +2652,11 @@ class ControllerApplication:
             feedback_healthy = getattr(self.runtime.track, "feedback_healthy", True) if self.runtime is not None else True
             feedback_error = getattr(self.runtime.track, "feedback_error", "") if self.runtime is not None else ""
             return {
-                "occupied_blocks": dict(self.feedback_occupancy),
+                "occupied_blocks": dict(self.runtime.track.get_snapshot().occupied_blocks) if self.runtime is not None else dict(self.feedback_occupancy),
                 "healthy": feedback_healthy,
                 "error": feedback_error,
-                "mapped_contacts": len(self.feedback_map),
+                "mapped_contacts": len(self.feedback_map) + (len(self._track_trigger_controller.computer.mapping) if self._track_trigger_controller else 0),
+                "computer_feedback": self._track_trigger_controller.computer.payload() if self._track_trigger_controller else None,
             }
 
     def layout_payload(self) -> dict[str, Any]:
@@ -2776,7 +2782,7 @@ class ControllerApplication:
         runtime_settings = self.settings_payload(track_snapshot=track_snapshot)["runtime"]
         feedback = {
             **snapshot["feedback"],
-            "occupied_blocks": self.feedback_occupancy,
+            "occupied_blocks": dict(track_snapshot.occupied_blocks) if track_snapshot is not None else self.feedback_occupancy,
         }
         world_elapsed_seconds = int(self._world_clock_seconds) % 86400
         world_hours = world_elapsed_seconds // 3600
@@ -2851,7 +2857,7 @@ class ControllerApplication:
             occupants = simulated_occupants.get(block_id, [])
             if not self.simulation_mode:
                 occupants = list(reported_occupancy.get(block_id, ()))
-            feedback_occupants = list(self.feedback_occupancy.get(block_id, ()))
+            feedback_occupants = list((reported_occupancy if not self.simulation_mode else self.feedback_occupancy).get(block_id, ()))
             reservation_owner = reservations.get(block_id) or reservations.get(block_id.upper())
             default_x, default_y = positions.get(block_id, (62, 224))
             x, y = block.get("x", default_x), block.get("y", default_y)
@@ -2863,6 +2869,7 @@ class ControllerApplication:
                 "feedback": feedback_occupants,
                 "neighborIds": [str(item).lower() for item in block.get("neighbor_ids", block.get("neighborIds", ()))],
                 "station": block.get("station", display_name),
+                "color": block.get("color"),
             })
         return result
 
@@ -2923,7 +2930,8 @@ class ControllerApplication:
             segments.append({"start_anchor_id": start, "end_anchor_id": end,
                              "control1": section.get("control2" if reversed_section else "control1"),
                              "control2": section.get("control1" if reversed_section else "control2"),
-                             "speed_limit_kmh": section.get("speed_limit_kmh")})
+                             "speed_limit_kmh": section.get("speed_limit_kmh"),
+                             "block_id": section.get("block_id") or pair[1]})
         edge["bezier_segments"] = segments
         return edge
 
@@ -3010,6 +3018,8 @@ class ControllerApplication:
                 "name": item.get("name", item.get("id", "Turnout")),
                 "state": "straight" if item.get("state") in {"straight", "0", 0} else "diverging",
                 "address": item.get("address"),
+                "hardware_source": "computer" if self._track_trigger_controller and str(item.get("id", "")).upper() in self._track_trigger_controller.computer.turnouts else "command_station",
+                "hardware_confirmed": self._track_trigger_controller.computer.payload()["switch_states"].get(str(item.get("id", "")).upper()) if self._track_trigger_controller else None,
                 "from": str(item.get("from", item.get("entry_block_id", ""))).lower(),
                 "to": str(item.get("to", item.get("straight_block_id", ""))).lower(),
                 "alternate": str(item.get("alternate", item.get("diverging_block_id", ""))).lower(),
@@ -3182,6 +3192,7 @@ class ControllerApplication:
                 "locomotive_ids": [self._ui_train_id(str(item)) for item in train.get("locomotive_ids", ()) if str(item)],
                 "decoder_function_states": dict(train.get("decoder_function_states", {})),
                 "target_coordinate": deepcopy(train.get("target_coordinate")) if train.get("target_coordinate") else None,
+                "pinboard_position": self._manual_pinboard_position(train, motions_by_id.get(str(train["id"]))),
                 **self._train_motion_state(train, track_snapshot, motions_by_id),
             })
         return result
@@ -3590,21 +3601,51 @@ class ControllerApplication:
             existing.update(updates)
             collection[existing_index] = self._normalize_layout_asset(asset_type, existing)
         else:
+            if asset_type == "turnout" and self._track_trigger_controller and any(row["turnout_id"] == selected_id for row in self._track_trigger_controller.computer_turnouts.assignments):
+                raise ValueError("remove this switch's computer bridge assignment before deleting it")
             collection.pop(existing_index)
 
         candidates = {collection_name: collection}
         previous_sections = self.track_sections
         if asset_type == "waypoint":
+            previous_edges = self._ui_edges()
             # Remove handle/limit records for intervals that no longer exist
             # after deleting a point or changing its connected nodes.
             previous_waypoints = self.waypoints
             self.waypoints = collection
             try:
+                new_edges = self._ui_edges()
+                edges_by_pair = {frozenset((str(e["from"]).upper(), str(e["to"]).upper())): e for e in new_edges}
                 valid = {(str(edge["from"]).upper(), str(edge["to"]).upper(), section["start_anchor_id"], section["end_anchor_id"])
-                         for edge in self._ui_edges() for section in edge["bezier_segments"]}
+                         for edge in new_edges for section in edge["bezier_segments"]}
                 candidates["track_sections"] = [row for row in self.track_sections
                     if (row["from"], row["to"], row["start_anchor_id"], row["end_anchor_id"]) in valid
                     or (row["to"], row["from"], row["end_anchor_id"], row["start_anchor_id"]) in valid]
+                if previous_edges:
+                    for old_edge in previous_edges:
+                        pair = {str(old_edge["from"]).upper(), str(old_edge["to"]).upper()}
+                        old_segments = old_edge["bezier_segments"]
+                        anchors = [old_segments[0]["start_anchor_id"], *[s["end_anchor_id"] for s in old_segments]]
+                        new_edge = edges_by_pair.get(frozenset(pair))
+                        new_segments = new_edge["bezier_segments"] if new_edge else ()
+                        new_anchors = [new_segments[0]["start_anchor_id"], *[s["end_anchor_id"] for s in new_segments]] if new_segments else []
+                        for section in new_edge["bezier_segments"] if new_edge else ():
+                            start, end = section["start_anchor_id"], section["end_anchor_id"]
+                            before = next(a for a in reversed(new_anchors[:new_anchors.index(start) + 1]) if a in anchors)
+                            after = next(a for a in new_anchors[new_anchors.index(end):] if a in anchors)
+                            lo, hi = anchors.index(before), anchors.index(after)
+                            merged = old_segments[lo:hi]
+                            if not merged or (len(merged) == 1 and start in anchors and end in anchors):
+                                continue
+                            owners = {s["block_id"] for s in merged}
+                            if len(owners) > 1:
+                                raise ValueError("cannot remove a block boundary: assign the adjacent track sections to the same block first")
+                            limits = [s["speed_limit_kmh"] for s in merged if s["speed_limit_kmh"] is not None]
+                            candidates["track_sections"].append({"from": str(old_edge["from"]).upper(), "to": str(old_edge["to"]).upper(),
+                                "start_anchor_id": start, "end_anchor_id": end, "block_id": next(iter(owners)),
+                                "speed_limit_kmh": min(limits) if limits else None,
+                                "control1": merged[0].get("control1") if start in anchors else None,
+                                "control2": merged[-1].get("control2") if end in anchors else None})
             finally:
                 self.waypoints = previous_waypoints
         self._validate_layout_asset_state(candidates, removed_type=asset_type if operation == "remove" else None, removed_id=selected_id if operation == "remove" else None)
@@ -3612,7 +3653,9 @@ class ControllerApplication:
         setattr(self, collection_name, collection)
         self.track_sections = candidates.get("track_sections", self.track_sections)
         try:
-            self._sync_runtime_from_ui()
+            self._sync_runtime_from_ui(apply_motion=asset_type != "waypoint")
+            if asset_type == "turnout" and self._track_trigger_controller:
+                self._track_trigger_controller.computer_turnouts.rebase()
         except Exception:
             setattr(self, collection_name, previous)
             self.track_sections = previous_sections
@@ -3692,6 +3735,84 @@ class ControllerApplication:
             raise ValueError(f"No route from {source_id} to {target_id}")
         return list(route.node_ids), route.algorithm.value
 
+    def _place_simulated_train(self, train: dict[str, Any], coordinate: TrackCoordinate, *, preserve_manual: bool = False) -> None:
+        """Update simulation location without emitting speed or power commands."""
+        train_id = str(train["id"])
+        source = coordinate.from_node.upper()
+        occupants = self.runtime.track.get_snapshot().occupied_blocks.get(source, ())
+        if any(occupant != train_id for occupant in occupants):
+            raise ValueError(f"track block {source} is occupied by another train")
+        route = (source, coordinate.to_node.upper())
+        result = self.runtime.track.place_train(train_id, source, coordinate.progress, route=route, direction=1)
+        if hasattr(result, "accepted") and not result.accepted:
+            raise ValueError(result.detail or "train placement was rejected")
+        control = self.runtime.dispatcher.register_train(train_id)
+        mode = ControlMode.MANUAL if preserve_manual and control.mode is ControlMode.MANUAL else ControlMode.STOPPED
+        control.mode = mode
+        control.manual_speed = control.automatic_speed = 0.0
+        self.runtime.route_updater.set_route(train_id, route)
+        train.update(block_id=source, route=list(route), mode=mode.value,
+                     speed=0, requested_speed_kmh=0, target_coordinate=None, graph_enabled=True)
+        self.events.append({"type": "train_placed_on_track", "train_id": train_id, "coordinate": {
+            "x": round(coordinate.x, 2), "y": round(coordinate.y, 2),
+            "from_node": coordinate.from_node.lower(), "to_node": coordinate.to_node.lower(),
+            "progress": round(coordinate.progress, 6)}})
+
+    def _manual_pinboard_position(self, train: dict[str, Any], motion: Any) -> dict[str, Any] | None:
+        """A manual hardware marker never replaces detector or routing state."""
+        position = train.get("pinboard_position")
+        if not isinstance(position, dict) or self.simulation_mode:
+            return None
+        control = self.runtime.dispatcher.trains.get(str(train["id"])) if self.runtime else None
+        moving = (control and control.desired_speed > 0) or float(train.get("speed", 0) or 0) > 0
+        if motion is not None:
+            moving = moving or motion.speed > 0 or motion.target_speed > 0
+            if str(motion.block_id) != position.get("reported_block_id", ""):
+                moving = True  # A new identified position supersedes the manual marker.
+        pair = {str(position.get("from_node", "")).upper(), str(position.get("to_node", "")).upper()}
+        exists = any({str(edge["from"]).upper(), str(edge["to"]).upper()} == pair for edge in self._ui_edges())
+        if moving or not exists:
+            train.pop("pinboard_position", None)
+            return None
+        return deepcopy(position)
+
+    def _reposition_train_on_track(self, payload: dict[str, Any]) -> None:
+        """Manual placement without calibration or any physical movement command."""
+        train_id = self._canonical_train_id(str(payload.get("train_id", "")))
+        train = next((item for item in self.trains if item.get("id") == train_id), None)
+        if train is None or self.runtime is None:
+            raise ValueError("a known train and active runtime are required")
+        snapshot = self.runtime.track.get_snapshot()
+        motion = next((m for m in snapshot.trains if m.train_id == train_id), None)
+        control = self.runtime.dispatcher.trains.get(train_id)
+        execution = self.runtime.coordinate_movement.status
+        if (float(train.get("speed", 0) or 0) > 0 or (control and control.desired_speed > 0)
+                or (motion and (motion.speed > 0 or motion.target_speed > 0))
+                or (execution and execution.train_id == train_id and execution.state == "running")
+                or train_id in self._playback_runs):
+            raise ValueError("stop the train and its active routine before repositioning it")
+        try:
+            x, y = float(payload.get("x")), float(payload.get("y"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("x and y coordinates are required") from exc
+        coordinate = nearest_track_coordinate(self.blocks, self._ui_edges(), x, y)
+        if coordinate is None:
+            raise ValueError("coordinate is not on a configured track segment")
+        if self.simulation_mode:
+            # Simulation placement updates its location immediately, at zero speed.
+            if not hasattr(self.runtime.track, "place_train"):
+                raise ValueError("simulation track placement is unavailable")
+            self._place_simulated_train(train, coordinate, preserve_manual=True)
+            return
+        train["pinboard_position"] = {"x": coordinate.x, "y": coordinate.y,
+            "from_node": coordinate.from_node.lower(), "to_node": coordinate.to_node.lower(),
+            "progress": coordinate.progress, "source": "manual",
+            "reported_block_id": str(motion.block_id) if motion else ""}
+        train["target_coordinate"] = None
+        train["graph_enabled"] = True
+        self.events.append({"type": "train_visual_position_changed", "train_id": train_id,
+                            "coordinate": deepcopy(train["pinboard_position"])})
+
     def _command_track_section(self, kind: str, payload: dict[str, Any]) -> None:
         left, right = sorted((str(payload.get("from", "")).strip().upper(), str(payload.get("to", "")).strip().upper()))
         if not left or left == right or not any({row["from"].upper(), row["to"].upper()} == {left, right} for row in self._ui_connections()):
@@ -3714,11 +3835,13 @@ class ControllerApplication:
         previous_sections, previous_waypoints = self.track_sections, self.waypoints
         waypoints = deepcopy(self.waypoints)
         if kind == "set_track_section":
-            for key in ("control1", "control2", "speed_limit_kmh"):
+            for key in ("control1", "control2", "speed_limit_kmh", "block_id"):
                 if key not in payload:
                     continue
-                target = ("control2" if key == "control1" else "control1") if reversed_request and key != "speed_limit_kmh" else key
+                target = ("control2" if key == "control1" else "control1") if reversed_request and key.startswith("control") else key
                 value = payload[key]
+                if key == "block_id" and value is not None:
+                    value = str(value).strip().upper()
                 if key.startswith("control") and value is not None:
                     if not isinstance(value, dict) or not all(axis in value for axis in ("x", "y")):
                         raise ValueError("Bezier handle requires x and y offsets")
@@ -3726,6 +3849,14 @@ class ControllerApplication:
                 row[target] = value
             rows.append(row)
         else:
+            fraction = payload.get("split_fraction", 0.5)
+            if isinstance(fraction, bool):
+                raise ValueError("split fraction must be a number between 0 and 1")
+            fraction = float(fraction)
+            if not math.isfinite(fraction) or not 0.01 <= fraction <= 0.99:
+                raise ValueError("split fraction must be between 0.01 and 0.99")
+            if reversed_request:
+                fraction = 1 - fraction
             waypoint_id = self._layout_asset_id(payload.get("waypoint_id"), "waypoint")
             if any(str(item["id"]).upper() == waypoint_id for item in waypoints) or any(str(item["id"]).upper() == waypoint_id for item in self.blocks):
                 raise ValueError("spline point ID must be unique")
@@ -3749,7 +3880,7 @@ class ControllerApplication:
                 rows.append(frozen)
             first, second = cubic_controls(points, index, segment)
             def middle(a, b):
-                return ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+                return (a[0] + (b[0] - a[0]) * fraction, a[1] + (b[1] - a[1]) * fraction)
             a, b = points[index:index + 2]
             p01, p12, p23 = middle(a, first), middle(first, second), middle(second, b)
             p012, p123 = middle(p01, p12), middle(p12, p23)
@@ -3762,7 +3893,8 @@ class ControllerApplication:
                 rows.append({"from": left, "to": right, "start_anchor_id": start_id, "end_anchor_id": end_id,
                              "control1": {"x": c1[0] - p[0], "y": c1[1] - p[1]},
                              "control2": {"x": c2[0] - q[0], "y": c2[1] - q[1]},
-                             "speed_limit_kmh": segment.get("speed_limit_kmh")})
+                             "speed_limit_kmh": segment.get("speed_limit_kmh"),
+                             "block_id": segment.get("block_id")})
         self.track_sections, self.waypoints = rows, waypoints
         try:
             candidate = self._domain_snapshot()
@@ -3795,7 +3927,16 @@ class ControllerApplication:
             if kind in {"remove_train", "delete_train", "update_train", "update_consist", "upsert_rolling_stock_inventory", "set_rolling_stock_inventory", "set_train_graph_membership", "set_train_graph", "toggle_train_graph", "program_dcc_address", "program_decoder_address"}:
                 if self._track_trigger_controller:
                     self._track_trigger_controller.cancel_all()
-            if kind in {"save_track_trigger", "upsert_track_trigger"}:
+            if kind == "set_block_feedback":
+                self._track_trigger_controller.set_block_feedback(payload.get("system"), payload.get("block_id"), payload.get("contacts"))
+                self.events.append({"type": "block_feedback_saved", "block_id": str(payload.get("block_id", "")).upper(), "system": payload.get("system")})
+            elif kind == "configure_computer_feedback":
+                self._track_trigger_controller.configure_computer(payload.get("config"))
+            elif kind == "set_turnout_connector":
+                self._track_trigger_controller.computer_turnouts.set_assignment(payload.get("turnout_id"), payload.get("assignment"))
+            elif kind in {"connect_computer_feedback", "disconnect_computer_feedback"}:
+                self._track_trigger_controller.connect_computer(disconnect=kind == "disconnect_computer_feedback")
+            elif kind in {"save_track_trigger", "upsert_track_trigger"}:
                 definition = self._track_trigger_controller.upsert(payload.get("trigger"))
                 self.events.append({"type": "track_trigger_saved", "trigger_id": definition["id"]})
             elif kind == "delete_track_trigger":
@@ -3932,6 +4073,8 @@ class ControllerApplication:
                 self.events.append({"type": "automation_program_deleted", "program_id": program_id})
             elif kind in {"play_automation_program", "run_automation_program"}:
                 self.play_automation_program(payload)
+            elif kind == "reposition_train_on_track":
+                self._reposition_train_on_track(payload)
             elif kind in {"place_train_on_track", "place_train"}:
                 if not self.simulation_mode:
                     raise ValueError("placing a train on a coordinate is available in simulation only")
@@ -3945,48 +4088,10 @@ class ControllerApplication:
                     x, y = float(payload.get("x")), float(payload.get("y"))
                 except (TypeError, ValueError) as exc:
                     raise ValueError("x and y coordinates are required") from exc
-                coordinate = nearest_track_coordinate(self.blocks, self._topology_edges(), x, y)
+                coordinate = nearest_track_coordinate(self.blocks, self._ui_edges(), x, y)
                 if coordinate is None:
                     raise ValueError("coordinate is not on a configured track segment")
-                occupied = {
-                    str(motion.block_id).upper(): motion.train_id
-                    for motion in self.runtime.track.get_snapshot().trains
-                }
-                source = coordinate.from_node.upper()
-                occupant = occupied.get(source)
-                if occupant is not None and occupant != train_id:
-                    raise ValueError(f"track block {source} is occupied by {self._ui_train_id(occupant)}")
-                route = (source, coordinate.to_node.upper())
-                result = self.runtime.track.place_train(
-                    train_id,
-                    source,
-                    coordinate.progress,
-                    route=route,
-                    direction=1,
-                )
-                if hasattr(result, "accepted") and not result.accepted:
-                    raise ValueError(result.detail or "train placement was rejected")
-                control = self.runtime.dispatcher.register_train(train_id)
-                control.mode = ControlMode.STOPPED
-                control.manual_speed = control.automatic_speed = 0.0
-                train.update({
-                    "block_id": source,
-                    "route": [source, route[1]],
-                    "mode": ControlMode.STOPPED.value,
-                    "speed": 0,
-                    "requested_speed_kmh": 0,
-                    "target_coordinate": None,
-                    "graph_enabled": True,
-                })
-                self.events.append({
-                    "type": "train_placed_on_track",
-                    "train_id": train_id,
-                    "coordinate": {
-                        "x": round(coordinate.x, 2), "y": round(coordinate.y, 2),
-                        "from_node": coordinate.from_node.lower(), "to_node": coordinate.to_node.lower(),
-                        "progress": round(coordinate.progress, 6),
-                    },
-                })
+                self._place_simulated_train(train, coordinate)
             elif kind in {"upsert_rolling_stock_inventory", "set_rolling_stock_inventory"}:
                 if self.runtime is None:
                     raise ValueError("runtime is not available")
@@ -4342,7 +4447,7 @@ class ControllerApplication:
                 self.events.append({"type": "track_power", "enabled": self.track_power})
             elif kind in {"turnout", "set_turnout"}:
                 turnout_id = str(payload.get("turnout_id", ""))
-                turnout = next((item for item in self.turnouts if item["id"] == turnout_id), None)
+                turnout = next((item for item in self.turnouts if str(item["id"]).upper() == turnout_id.upper()), None)
                 if turnout is None and turnout_id == "to1" and self.turnouts:
                     turnout = self.turnouts[0]
                 if turnout is None:
@@ -4350,18 +4455,28 @@ class ControllerApplication:
                 locked_by = self.runtime.interlocking.locks.get(str(turnout.get("id", "")).upper()) if self.runtime is not None and hasattr(self.runtime, "interlocking") else None
                 if locked_by:
                     raise ValueError(f"turnout is locked by {locked_by}")
-                turnout["state"] = str(payload.get("state", "straight"))
-                if self.runtime is not None and hasattr(self.runtime.track, "set_turnout"):
-                    result = self.runtime.track.set_turnout(turnout_id, 0 if turnout["state"] == "straight" else 1)
+                requested_state = payload.get("state", "straight")
+                if requested_state not in ("straight", "diverging"):
+                    raise ValueError("choose straight or diverging for the track switch")
+                canonical_id = str(turnout["id"]).upper()
+                computer = self._track_trigger_controller.computer
+                if not self.simulation_mode and canonical_id in computer.turnouts:
+                    result = computer.send_turnout(canonical_id, requested_state)
+                    if not result.accepted:
+                        self.runtime.dispatcher.emergency_stop()
+                        raise ValueError(result.detail or "computer switch command rejected")
+                elif self.runtime is not None and hasattr(self.runtime.track, "set_turnout"):
+                    result = self.runtime.track.set_turnout(turnout_id, 0 if requested_state == "straight" else 1)
                     if hasattr(result, "accepted") and not result.accepted:
                         raise ValueError(result.detail or "turnout command rejected")
                 elif self.runtime is not None and hasattr(self.runtime.track, "set_turnout_by_address"):
                     address = turnout.get("address")
                     if address in (None, ""):
                         raise ValueError("turnout has no DCC accessory address")
-                    result = self.runtime.track.set_turnout_by_address(int(address), output=0 if turnout["state"] == "straight" else 1)
+                    result = self.runtime.track.set_turnout_by_address(int(address), output=0 if requested_state == "straight" else 1)
                     if hasattr(result, "accepted") and not result.accepted:
                         raise ValueError(result.detail or "turnout command rejected")
+                turnout["state"] = requested_state
                 self._publish_domain_event(
                     TurnoutPositionChanged(
                         turnout_id=str(turnout.get("id", turnout_id)),
@@ -4735,6 +4850,8 @@ class ControllerApplication:
                     )
                 if runtime_occupants:
                     raise ValueError(f"cannot remove block {block_id} while a train is occupying it")
+                if any(row["block_id"] == block_id for row in self._track_trigger_controller.block_feedback) or any(str(value).upper() == block_id for value in self._track_trigger_controller._base_feedback.values()):
+                    raise ValueError(f"cannot remove block {block_id}: remove its hardware detector assignments first")
                 train_refs = references(self.trains, ("block_id", "destination_block_id", "current_block_id"))
                 if train_refs:
                     raise ValueError(f"cannot remove block {block_id}: train {train_refs[0]} references it")
@@ -4748,7 +4865,7 @@ class ControllerApplication:
                     ("platform", self.platforms, ("blockId", "block_id")),
                     ("route", self.routes, ("source_block_id", "target_block_id", "node_ids", "path")),
                     ("connection speed limit", self.connection_limits, ("from", "to", "from_block_id", "to_block_id")),
-                    ("track section", self.track_sections, ("from", "to", "start_anchor_id", "end_anchor_id")),
+                    ("track section", self.track_sections, ("from", "to", "start_anchor_id", "end_anchor_id", "block_id")),
                 ):
                     matches = references(collection, fields)
                     if matches:
@@ -4773,6 +4890,9 @@ class ControllerApplication:
                 if block is None:
                     raise ValueError(f"Unknown block: {block_id}")
                 updates = dict(payload.get("block", {}))
+                if "color" in updates:
+                    # Validate before renaming or mutating any editor state.
+                    Block(id=block_id, color=updates["color"])
                 if "length_mm" in updates:
                     length = float(updates["length_mm"])
                     if not math.isfinite(length) or length < 0:
@@ -4809,6 +4929,8 @@ class ControllerApplication:
                     block["length_mm"] = max(0, float(updates["length_mm"]))
                 if "station" in updates:
                     block["station"] = str(updates["station"]).strip()
+                if "color" in updates:
+                    block["color"] = updates["color"].lower() if updates["color"] is not None else None
                 self._sync_runtime_from_ui(apply_motion=False)
                 raw_state = str(block.get("status", "free")).lower()
                 block_state = BlockState.OCCUPIED if raw_state == "occupied" else BlockState.RESERVED if raw_state in {"route", "reserved"} else BlockState.OUT_OF_SERVICE if raw_state in {"out_of_service", "offline"} else BlockState.FREE
@@ -5218,6 +5340,16 @@ class ControllerHandler(BaseHTTPRequestHandler):
             return self._send_json(self.application.events_payload())
         if parsed.path == "/api/feedback":
             return self._send_json(self.application.feedback_payload())
+        if parsed.path == "/api/block-feedback":
+            try:
+                with self.application._lock:
+                    system = parse_qs(parsed.query).get("system", ["z21"])[0]
+                    return self._send_json(self.application._track_trigger_controller.block_feedback_payload(system))
+            except ValueError as exc:
+                return self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        if parsed.path == "/api/turnout-connectors":
+            with self.application._lock:
+                return self._send_json(self.application._track_trigger_controller.computer_turnouts.editor_payload())
         if parsed.path == "/api/scans":
             return self._send_json(self.application.scans_payload())
         if parsed.path == "/api/layouts":

@@ -14,11 +14,11 @@ VSVersionInfo(
       StringTable('040904B0', [
         StringStruct('CompanyName', 'JochJell'),
         StringStruct('FileDescription', 'JochJell Controller'),
-        StringStruct('FileVersion', '0.2.16'),
+        StringStruct('FileVersion', '0.2.17'),
         StringStruct('InternalName', 'JochJell Controller'),
         StringStruct('OriginalFilename', 'JochJell-Controller.exe'),
         StringStruct('ProductName', 'JochJell Controller'),
-        StringStruct('ProductVersion', '0.2.16'),
+        StringStruct('ProductVersion', '0.2.17'),
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

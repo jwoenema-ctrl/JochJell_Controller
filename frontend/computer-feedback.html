@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Computer detector connection guide</title><link rel="stylesheet" href="/minimal.css"></head>
+<body><main style="max-width:760px;margin:32px auto;padding:24px">
+<h1>Connect detectors and track switches to this computer</h1>
+<p>Detectors can report directly to the computer running JochJell Controller over USB / serial or a TCP network connection. The command station still drives the trains; it does not need a cable to these detectors.</p>
+<h2>Connection setup</h2>
+<ol><li>Open Settings → Hardware blocks → Map hardware blocks and choose <strong>Computer-connected detectors</strong>.</li>
+<li>Choose USB / serial and enter the computer's serial port and baud rate, or choose Network TCP and enter the bridge's host and port. Save the connection.</li>
+<li>Assign the module and input numbers to your layout blocks and save the assignments.</li>
+<li>Turn physical track power off, then select <strong>Connect bridge</strong>. Wait for fresh readings before running trains.</li></ol>
+<p>USB / serial requires pyserial (included in the native Windows app). Connections are saved but must be activated again after restarting. Simulation lets you check the connection without altering simulated occupancy.</p>
+<h2>Detector / bridge reporting format</h2>
+<p>This is a JSON bridge interface. A device using another protocol needs compatible bridge software or a dedicated adapter. A USB plug or network port alone does not establish compatibility.</p>
+<p>Send UTF-8 JSON with one complete snapshot per line, ending with a newline. Include every mapped input in each snapshot, even inputs which are clear:</p>
+<pre style="white-space:pre-wrap;overflow-wrap:anywhere">{"contacts":[{"module":1,"input":1,"occupied":true},{"module":1,"input":2,"occupied":false}]}</pre>
+<p>Module and input numbers are integers from 1 to 65535. Occupied must be the JSON boolean true or false. Occupancy-only setups receive data without sending commands. TCP bridges listen for the application to connect; serial devices stream snapshots to the selected port. Use 8 data bits, no parity, 1 stop bit and no flow control.</p>
+<p>Send a full snapshot every second, including when nothing changes. The default timeout is 3 seconds and can be adjusted from 0.5 to 60 seconds. Frames are limited to 64 KiB and 4096 contacts.</p>
+<h2>Block protection</h2>
+<p>Any occupied input makes its block occupied. Command-station and computer readings are combined; a clear computer reading cannot clear command-station occupancy. Missing, malformed, disconnected or stale readings mark all computer-mapped blocks as unknown and protected. Physical movement commands are rejected and the next dispatch cycle stops trains when configured computer feedback is unhealthy. Fresh snapshots restore feedback health; stopped trains require operator action to resume.</p>
+<p>Occupancy reports do not identify a locomotive. Change active assignments or connect / disconnect detectors with physical track power off.</p>
+<h2>Track switches on the same bridge</h2>
+<p>Open Settings → Track switches → Map track switches. Choose the turnout and Computer USB / network bridge, then assign its module and output. Set a pulse duration of 50–1000 milliseconds and choose whether to swap straight / diverging for reversed wiring. Other switches retain their command-station accessory addresses.</p>
+<p>Saving, connecting and restarting never actuate outputs. In physical mode, use Set straight / Set diverging or the normal graph control. Route locks still apply. Simulation never sends switch commands to the bridge.</p>
+<p>The application sends one JSON line per command:</p>
+<pre style="white-space:pre-wrap;overflow-wrap:anywhere">{"type":"set_turnout","request_id":"unique-id","module":2,"output":3,"position":"diverging","pulse_ms":250}</pre>
+<p>The bridge must bound the pulse itself and respond with a matching acknowledgement. The module, output, position and request ID must match the command exactly:</p>
+<pre style="white-space:pre-wrap;overflow-wrap:anywhere">{"type":"turnout_ack","request_id":"unique-id","module":2,"output":3,"position":"diverging","accepted":true}</pre>
+<p>Send accepted:false and an optional detail message for rejection. An acknowledgement confirms acceptance of the command, not the measured blade position. Unconfirmed commands leave the last accepted digital state unchanged and protect physical movement. Commands are never automatically retried. A fresh explicit command can recover confirmation.</p>
+<p>Keep sending full occupancy snapshots every second. A switch-only bridge sends {"contacts":[]} as its heartbeat. Set each mapped switch after connecting to establish command confirmation before driving trains. Disconnecting clears these confirmations. Missing heartbeat or unconfirmed switches prevent physical movement and cause a stop on the next dispatch cycle.</p>
+<p><a href="/#settings">Return to controller settings</a></p>
+</main></body></html>

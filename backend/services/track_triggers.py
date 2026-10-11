@@ -5,13 +5,23 @@ import math
 import threading
 import time
 import uuid
+from types import SimpleNamespace
 
 from .automation_recording import PlaybackPlan
+from backend.infrastructure.hardware import hardware_profile
+from backend.infrastructure.computer_feedback import ComputerFeedback, validate_computer_feedback
+from .computer_turnouts import ComputerTurnouts
+
+
+def feedback_profile(system):
+    return SimpleNamespace(id="computer", label="Computer-connected detectors") if system == "computer" else hardware_profile(system)
 
 
 class TrackTriggerController:
     @staticmethod
     def detector_limits(profile):
+        if profile == "computer":
+            return 1, 65535, 65535
         if profile in {"z21", "z21_white", "z21_start", "dr5000"}:
             return 1, 255, 8
         if profile == "xpressnet":
@@ -20,12 +30,31 @@ class TrackTriggerController:
             return 1, 256, 16
         return 0, 65535, 65535
 
-    def __init__(self, app, definitions=()):
+    def __init__(self, app, definitions=(), block_feedback=()):
         self.app = app
         self.definitions = []
         self.results = {}
         self.pulses = {}
-        self._base_feedback = dict(app.feedback_map)
+        self._base_feedback = {key: str(value).strip().upper() for key, value in app.feedback_map.items()}
+        try:
+            self.computer = ComputerFeedback((app._loaded_operating_plan or {}).get("computer_feedback", {}))
+        except ValueError as exc:
+            self.computer = ComputerFeedback()
+            app.events.append({"type": "computer_feedback_invalid", "detail": str(exc)})
+        self.computer_turnouts = ComputerTurnouts(app, self.computer, (app._loaded_operating_plan or {}).get("computer_turnouts", []))
+        self.block_feedback = []
+        for raw in block_feedback:
+            try:
+                profile = feedback_profile(raw.get("system"))
+                if profile.id == "simulation":
+                    raise ValueError("choose a physical digital system")
+                contact = self.validate_contact(raw, profile.id)
+                block = str(raw.get("block_id", "")).strip().upper()
+                if not block or any(row["system"] == profile.id and (row["module"], row["input"]) == (contact["module"], contact["input"]) for row in self.block_feedback):
+                    raise ValueError("missing block or duplicate detector contact")
+                self.block_feedback.append({"system": profile.id, "block_id": block, **contact})
+            except ValueError as exc:
+                app.events.append({"type": "block_feedback_invalid", "detail": str(exc)})
         self._occupied = None
         self._positions = {}
         self._reported = {}
@@ -36,6 +65,118 @@ class TrackTriggerController:
             except ValueError as exc:
                 app.events.append({"type": "track_trigger_invalid", "detail": str(exc)})
         self.rebase()
+
+    def validate_contact(self, raw, profile):
+        if not isinstance(raw, dict):
+            raise ValueError("a detector contact must contain a module and input")
+        minimum, maximum, inputs = self.detector_limits(profile)
+        module, contact = raw.get("module"), raw.get("input")
+        if type(module) is not int or type(contact) is not int or not minimum <= module <= maximum or not 1 <= contact <= inputs:
+            raise ValueError(f"detector for {profile} needs module {minimum}–{maximum} and input 1–{inputs}")
+        return {"module": module, "input": contact}
+
+    def set_block_feedback(self, system, block_id, contacts):
+        profile = feedback_profile(system)
+        if profile.id == "simulation":
+            raise ValueError("choose a physical digital system for detector assignments")
+        if not isinstance(block_id, str) or not block_id.strip():
+            raise ValueError("choose a block")
+        block_id = block_id.strip().upper()
+        if not isinstance(contacts, list) or len(contacts) > 64:
+            raise ValueError("contacts must be a list of at most 64 module/input pairs")
+        if contacts and block_id not in {str(block["id"]).upper() for block in self.app.blocks}:
+            raise ValueError("choose an existing layout block")
+        rows, keys = [], set()
+        for raw in contacts:
+            if not isinstance(raw, dict) or set(raw) != {"module", "input"}:
+                raise ValueError("each detector contact needs only module and input")
+            contact = self.validate_contact(raw, system)
+            key = contact["module"], contact["input"]
+            if key in keys:
+                raise ValueError("a detector contact cannot be listed twice")
+            keys.add(key)
+            rows.append({"system": system, "block_id": block_id, **contact})
+        other = {} if system == "computer" else {key: str(value).upper() for key, value in self._base_feedback.items()}
+        for row in self.block_feedback:
+            if row["system"] == system and row["block_id"] != block_id:
+                other[(row["module"], row["input"])] = row["block_id"]
+        for definition in self.definitions:
+            if system != "computer" and definition["detector"]:
+                other[(definition["detector"]["module"], definition["detector"]["input"])] = definition["block_id"]
+        for key in keys:
+            if key in other and other[key] != block_id:
+                raise ValueError(f"module {key[0]}, input {key[1]} is already assigned to block {other[key]}")
+        old = self.block_feedback
+        replacement = [row for row in old if row["system"] != system or row["block_id"] != block_id] + rows
+        if sorted(old, key=lambda row: (row["system"], row["block_id"], row["module"], row["input"])) == sorted(replacement, key=lambda row: (row["system"], row["block_id"], row["module"], row["input"])):
+            return
+        self.block_feedback = replacement
+        try:
+            self.sync_mapping()
+            self.app._persist_operating_plan()
+        except Exception:
+            self.block_feedback = old
+            self.sync_mapping()
+            raise
+
+    def block_feedback_payload(self, system):
+        profile = feedback_profile(system)
+        if profile.id == "simulation":
+            raise ValueError("choose a physical digital system")
+        minimum, maximum, inputs = self.detector_limits(system)
+        blocks = {str(block["id"]).upper() for block in self.app.blocks}
+        rows = {}
+        def add(module, contact, block, source):
+            key = (module, contact, str(block).upper())
+            row = rows.setdefault(key, {"module": module, "input": contact, "block_id": str(block).upper(), "sources": []})
+            row["sources"].append(source)
+        for (module, contact), block in self._base_feedback.items():
+            if system != "computer":
+                add(module, contact, block, "environment")
+        for row in self.block_feedback:
+            if row["system"] == system:
+                add(row["module"], row["input"], row["block_id"], "block")
+        for definition in self.definitions:
+            detector = definition["detector"]
+            if system != "computer" and detector and minimum <= detector["module"] <= maximum and 1 <= detector["input"] <= inputs:
+                add(detector["module"], detector["input"], definition["block_id"], "trigger")
+        active = not self.app.simulation_mode and (system == "computer" or self.app._active_hardware_profile().id == system)
+        for row in rows.values():
+            row["available"] = row["block_id"] in blocks and minimum <= row["module"] <= maximum and 1 <= row["input"] <= inputs
+            mapping = self.computer.mapping if system == "computer" else self.app.feedback_map
+            row["active"] = active and row["available"] and mapping.get((row["module"], row["input"])) == row["block_id"]
+        return {"system": system, "label": profile.label, "limits": {"module_min": minimum, "module_max": maximum, "input_max": inputs},
+                "assignments": sorted(rows.values(), key=lambda row: (row["block_id"], row["module"], row["input"])),
+                "physical": not self.app.simulation_mode, "active_system": self.app._active_hardware_profile().id,
+                "track_power": self.app.track_power, "feedback_healthy": self.computer.healthy if system == "computer" else getattr(self.app.runtime.track, "feedback_healthy", True),
+                "computer_feedback": self.computer.payload()}
+
+    def computer_mapping(self):
+        blocks = {str(block["id"]).upper() for block in self.app.blocks}
+        return {(row["module"], row["input"]): row["block_id"] for row in self.block_feedback
+                if row["system"] == "computer" and row["block_id"] in blocks}
+
+    def configure_computer(self, config):
+        value = validate_computer_feedback(config, self.computer.config)
+        if value == self.computer.config:
+            return
+        if self.computer.payload()["connected"]:
+            raise ValueError("disconnect computer detectors before changing their connection settings")
+        old = self.computer.config
+        self.computer.config = value
+        try:
+            self.app._persist_operating_plan()
+        except Exception:
+            self.computer.config = old
+            raise
+
+    def connect_computer(self, *, disconnect=False):
+        if not self.app.simulation_mode and self.app.track_power:
+            raise ValueError("switch track power off before connecting or disconnecting computer detectors")
+        if disconnect:
+            self.computer.close()
+        else:
+            self.computer.connect()
 
     def validate(self, raw, *, references=True):
         if not isinstance(raw, dict):
@@ -76,6 +217,7 @@ class TrackTriggerController:
                     raise ValueError(f"detector for {profile} needs module {minimum}–{maximum} and input 1–{inputs}")
                 key = (detector["module"], detector["input"])
                 other_mapping = dict(self._base_feedback)
+                other_mapping.update({(row["module"], row["input"]): row["block_id"] for row in self.block_feedback if row["system"] == profile})
                 for definition in self.definitions:
                     if definition["id"] != value["id"] and definition["detector"]:
                         other_mapping[(definition["detector"]["module"], definition["detector"]["input"])] = definition["block_id"]
@@ -141,11 +283,19 @@ class TrackTriggerController:
         self.results.pop(trigger_id, None)
 
     def feedback_for_profile(self, profile, *, report=False):
+        if profile == "simulation":
+            profile = self.app._settings["hardware"]["system"]
         blocks = {str(block["id"]).upper() for block in self.app.blocks}
         mapping = {key: value for key, value in self._base_feedback.items() if str(value).upper() in blocks}
         minimum, maximum, inputs = self.detector_limits(profile)
         if any(not minimum <= module <= maximum or not 1 <= contact <= inputs for module, contact in mapping):
             raise ValueError("existing feedback mappings are incompatible with the selected command station")
+        for row in self.block_feedback:
+            if row["system"] == profile and row["block_id"] in blocks:
+                key = row["module"], row["input"]
+                if key in mapping and str(mapping[key]).upper() != row["block_id"]:
+                    raise ValueError("a saved detector contact conflicts with an environment mapping")
+                mapping[key] = row["block_id"]
         for definition in self.definitions:
             detector = definition["detector"]
             if detector and definition["block_id"] in blocks:
@@ -168,6 +318,10 @@ class TrackTriggerController:
         method = getattr(self.app.runtime.track, "replace_feedback_map", None)
         if method:
             method(mapping)
+        self.computer.replace_mapping(self.computer_mapping())
+        self.computer_turnouts.rebase()
+        if not self.app.simulation_mode:
+            self.app.runtime.track.computer_feedback = self.computer
         self.app.feedback_map = mapping
         snapshot = self.app.runtime.track.get_snapshot()
         self._positions = {motion.train_id: str(motion.block_id).upper() for motion in snapshot.trains}
@@ -178,7 +332,7 @@ class TrackTriggerController:
     def sync_mapping(self):
         profile = "simulation" if self.app.simulation_mode else self.app._active_hardware_profile().id
         mapping = self.feedback_for_profile(profile)
-        if mapping == self.app.feedback_map:
+        if mapping == self.app.feedback_map and self.computer_mapping() == self.computer.mapping:
             return
         if not self.app.simulation_mode and self.app.track_power:
             raise ValueError("switch track power off before adding, changing or removing detector mappings")
@@ -344,6 +498,9 @@ class TrackTriggerController:
 
     def rename_block(self, old, new):
         self._base_feedback = {key: new if str(value).upper() == old else value for key, value in self._base_feedback.items()}
+        for row in self.block_feedback:
+            if row["block_id"] == old:
+                row["block_id"] = new
         for definition in self.definitions:
             if definition["block_id"] == old:
                 definition["block_id"] = new
@@ -366,5 +523,8 @@ class TrackTriggerController:
             if result["train_id"]:
                 result["train_id"] = self.app._ui_train_id(result["train_id"])
         return {"definitions": definitions, "results": results,
+                "block_feedback": deepcopy(self.block_feedback),
+                "computer_feedback": self.computer.payload(),
+                "computer_turnouts": self.computer_turnouts.payload(),
                 "feedback_map": [{"module": mod, "input": contact, "block_id": block} for (mod, contact), block in self.app.feedback_map.items()],
                 "pending_blocks": sorted(self._pending), "active_pulses": len(self.pulses)}

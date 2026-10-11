@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import Enum
 import math
+import re
 from typing import Any, Iterable, Mapping, TypeVar
 
 from .decoder import normalize_decoder_protocol, validate_decoder_address
@@ -152,9 +153,14 @@ class Block:
     waypoint_ids: tuple[str, ...] = ()
     platform_ids: tuple[str, ...] = ()
     position: Point | None = None
+    color: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", _require_text(self.id, "id"))
+        if self.color is not None:
+            if not isinstance(self.color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", self.color):
+                raise ValueError("block color must be a six-digit hex color")
+            object.__setattr__(self, "color", self.color.lower())
         object.__setattr__(self, "name", self.name.strip())
         object.__setattr__(self, "length_mm", _require_non_negative(self.length_mm, "length_mm"))
         object.__setattr__(
@@ -487,6 +493,8 @@ class TrackSection:
 
     Handles are offsets from their respective anchors, so moving an anchor
     carries its handle with it. Speed limits apply in both directions.
+    block_id identifies the block displayed over this track section; connection
+    endpoints continue to define the routing topology.
     """
 
     from_block_id: str
@@ -496,6 +504,7 @@ class TrackSection:
     control1: Point | None = None
     control2: Point | None = None
     speed_limit_kmh: float | None = None
+    block_id: str | None = None
 
     @property
     def id(self) -> str:
@@ -506,6 +515,8 @@ class TrackSection:
             _require_text(getattr(self, name), name)
         if self.from_block_id == self.to_block_id or self.start_anchor_id == self.end_anchor_id:
             raise ValueError("track section endpoints must differ")
+        if self.block_id is not None:
+            _require_text(self.block_id, "track section block_id")
         if self.speed_limit_kmh is not None:
             if isinstance(self.speed_limit_kmh, bool):
                 raise ValueError("speed limit must be a number")
@@ -576,6 +587,8 @@ class LayoutSnapshot:
                 _require_reference(train_id, rule.id, "train", train_ids)
         graph_node_ids = block_ids | waypoint_ids | turntable_ids
         for section in self.track_sections:
+            if section.block_id is not None:
+                _require_reference(section.block_id, section.id, "block", block_ids)
             if (section.from_block_id, section.to_block_id) not in connections:
                 raise ValueError(f"track section references missing connection: {section.id}")
             for anchor in (section.start_anchor_id, section.end_anchor_id):

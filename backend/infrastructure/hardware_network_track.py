@@ -74,6 +74,9 @@ class NetworkTrackSystem(Z21TrackSystem):
         return result
 
     def set_train_speed_by_address(self, address, speed, *, forward=True, speed_limit=None, decoder_protocol=None):
+        source = getattr(self, "computer_feedback", None)
+        if speed > 0 and source is not None and not source.healthy:
+            return CommandResult(False, "set_train_speed", source.error)
         protocol = decoder_protocol or self._default_protocol
         self.validate_address(address, protocol)
         if not 0 <= float(speed) <= 1:

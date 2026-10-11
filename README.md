@@ -171,6 +171,9 @@ Settings includes:
 - browser refresh interval;
 - simulation rate and motion preferences;
 - digital system selection, IPv4 address and network port, or XpressNet serial port and baud rate;
+- physical detector-to-block assignments per digital system, including several inputs for one logical block; see [Block feedback](docs/BLOCK_FEEDBACK.md);
+- independent occupancy detectors connected to the controller computer over USB / serial or network TCP, with stale-reading protection; see [Computer detector connections](docs/COMPUTER_FEEDBACK.md);
+- track switches assigned to the same computer USB / TCP bridge, with bounded-pulse commands, acknowledgements and route-lock protection; see [Computer track switches](docs/COMPUTER_TURNOUTS.md);
 - LAN/Wi-Fi preference for network stations;
 - adaptive route-planning intervals;
 - connected-block or one-block dispatch;
@@ -346,3 +349,9 @@ The browser suite uses disposable data and never enables physical Z21 control. G
 - [Native Windows edition](docs/WINDOWS_NATIVE.txt) — embedded app notes.
 - [Photo-scan viewer](docs/PHOTO_SCAN_VIEWER.md) — scan manifest and viewer data.
 - [Logo](docs/LOGO.md) — supplied transparent product logo.
+
+## Track block visualizer
+
+The train visualizer supports coloured track sections, multiple tracks per block,
+editable block boundaries and saved custom block colours. See
+[Track blocks](docs/TRACK_BLOCKS.md) for assignment and editing steps.
